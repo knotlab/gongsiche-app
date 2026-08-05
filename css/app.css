@@ -1,0 +1,1207 @@
+/* ============ 공시체 계산기 — 전역 스타일 ============ */
+/* 테마 고정 — 시스템이 아니라 앱 설정을 따른다 */
+:root{color-scheme:light}
+:root[data-theme="dark"]{color-scheme:dark}
+
+:root{
+  --bg:#f4f5f7;
+  --surface:#ffffff;
+  --surface-2:#eef0f4;
+  --line:#dfe3ea;
+  --text:#111827;
+  --text-2:#5f6775;
+  --accent:#1d4ed8;
+  --accent-soft:#e6edff;
+  --on-accent:#ffffff;   /* 강조색 위 글자 */
+  --danger:#c81e1e;
+  --kakao:#fee500;
+  --kakao-text:#191600;
+  --shadow:0 1px 2px rgba(16,24,40,.06), 0 4px 14px rgba(16,24,40,.08);
+  --r:14px;         /* 카드 */
+  --r-md:12px;      /* 버튼·입력칸 */
+  --r-sm:10px;      /* 작은 칩·배지 */
+  --ic-xs:14px; --ic-sm:16px; --ic-md:20px; --ic-lg:22px; --ic-xl:26px;
+  --tabh:58px;
+  --tap:44px;       /* 최소 터치 크기 — 장갑 낀 손 기준 */
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-t: env(safe-area-inset-top, 0px);
+
+  /* 계산 화면 치수는 전부 변수로 뺀다.
+     좁은 화면에서 줄일 때 값을 한 곳에서만 바꾸면 되고,
+     미디어쿼리와 JS 단계축소(.tight-*)가 서로 겹쳐 두 번 줄어드는 사고를 막는다. */
+  --keyh:58px;      /* 키패드 키 높이 */
+  --dispf:40px;     /* 입력 디스플레이 글자 */
+  --avgf:38px;      /* 보정평균 글자 */
+  --chiph:39px;     /* 등록값 칩 높이. +줄간격 = 44 라 X 히트영역이 딱 맞는다 */
+  --chipgap:5px;
+  --statpad:8px;    /* 통계 카드 안쪽 여백 */
+  --statrow:26px;   /* 통계 한 줄 최소 높이 */
+}
+:root[data-theme="dark"]{
+    --bg:#0b1017; --surface:#151b24; --surface-2:#1e2632; --line:#2a3442;
+    --text:#f1f5f9; --text-2:#94a3b8; --accent:#60a5fa; --accent-soft:#1b2b45;
+    /* 다크의 accent 는 밝다 — 그 위엔 어두운 글자라야 읽힌다 */
+    --on-accent:#0b1017;
+    --danger:#f87171; --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 18px rgba(0,0,0,.35);
+  }
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+
+/* ---------- 부팅 화면 ---------- */
+.boot{
+  position:fixed;inset:0;z-index:200;background:#111827;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0;
+  transition:opacity .34s ease, visibility .34s;
+}
+.boot.gone{opacity:0;visibility:hidden;pointer-events:none}
+.boot-art{display:flex;flex-direction:column;align-items:center}
+.boot-logo{
+  width:96px;height:96px;
+  animation:bootRise .62s cubic-bezier(.2,.8,.25,1) both;
+}
+.boot-name{
+  margin-top:18px;color:#f1f5f9;font-size:17px;font-weight:800;letter-spacing:.06em;
+  animation:bootFade .5s ease-out .18s both;
+}
+.boot-unit{
+  margin-top:5px;color:#60a5fa;font-size:12px;font-weight:700;letter-spacing:.22em;
+  animation:bootFade .5s ease-out .3s both;
+}
+.boot-bar{
+  position:absolute;left:50%;bottom:calc(11% + var(--safe-b));transform:translateX(-50%);
+  width:104px;height:2px;border-radius:2px;background:rgba(255,255,255,.14);overflow:hidden;
+}
+.boot-bar i{
+  display:block;width:40%;height:100%;border-radius:2px;background:#60a5fa;
+  animation:bootSlide 1.05s ease-in-out .28s infinite;
+}
+@keyframes bootRise{
+  from{opacity:0;transform:translateY(14px) scale(.9)}
+  to{opacity:1;transform:none}
+}
+@keyframes bootFade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@keyframes bootSlide{
+  0%{transform:translateX(-110%)}
+  100%{transform:translateX(360%)}
+}
+@media (prefers-reduced-motion:reduce){
+  .boot-logo,.boot-name,.boot-unit{animation:none}
+  .boot-bar i{animation:none;width:100%}
+  /* 칩 등장·토스트·바텀시트까지 전부 멈춘다. 누르면 바뀌는 건 그대로 유지 */
+  .chip.new,.toast,.sheet{animation:none}
+  *{transition-duration:.01ms !important}
+}
+
+/* ---------- 아이콘 (이모지 대체) ---------- */
+.ic{
+  width:var(--ic-lg);height:var(--ic-lg);display:block;flex:0 0 auto;
+  fill:none;stroke:currentColor;stroke-width:1.9;
+  stroke-linecap:round;stroke-linejoin:round;
+}
+.ic .f{fill:currentColor;stroke:none}
+html,body{height:100%;margin:0}
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
+body{
+  /* 한글이 없는 Roboto 를 앞에 두면 글자마다 폰트 폴백이 걸려 조합이 버벅인다.
+     안드로이드는 system-ui / sans-serif 가 곧 한글 폰트다. */
+  font-family:system-ui,-apple-system,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;
+  background:var(--bg); color:var(--text);
+  overscroll-behavior:none;
+  font-size:16px; line-height:1.45;
+}
+/* user-select:none 을 body 에 걸면 안드로이드 WebView 에서 한글 조합이 어긋난다.
+   드래그 선택을 막을 곳(버튼·키패드·목록)에만 건다. */
+button,.tabbar,.keypad,.keypad-zone,.stat-card,.chips,.day-head,
+.rec-card,.bat-row,.sheet,.toast,.tab-ico{
+  -webkit-user-select:none; user-select:none;
+}
+input,textarea{-webkit-user-select:text;user-select:text;user-select:auto}
+button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit}
+/* 터치에는 안 뜨고 키보드로 이동할 때만 뜬다 */
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:var(--r-sm)}
+.hidden{display:none !important}
+
+/* ---------- 뷰 / 레이아웃 ---------- */
+.view{
+  position:fixed; inset:0; bottom:calc(var(--tabh) + var(--safe-b));
+  display:flex; flex-direction:column; overflow:hidden;
+}
+.view.editor{bottom:0;z-index:30;background:var(--bg)}
+.topbar{
+  flex:0 0 auto; display:flex; align-items:center; gap:8px;
+  padding:calc(var(--safe-t) + 10px) 12px 10px;
+  background:var(--surface); border-bottom:1px solid var(--line);
+}
+.topbar h1{flex:1;margin:0;font-size:17px;font-weight:700;letter-spacing:-.02em;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* 최상단 — 앱 마크(공시체 원기둥) + 은은한 강조 바탕.
+   전엔 제목 하나만 덩그러니 있어서 화면이 어디서 시작하는지 눈에 안 잡혔다. */
+.topbar-hero{
+  background:
+    linear-gradient(180deg, var(--accent-soft) 0%, transparent 78%),
+    var(--surface);
+  border-bottom-color:var(--line);
+}
+.topbar-mark{
+  flex:0 0 auto;width:34px;height:34px;border-radius:var(--r-sm);
+  display:grid;place-items:center;
+  background:var(--accent);color:var(--on-accent);
+  box-shadow:0 2px 6px rgba(29,78,216,.28);
+}
+.topbar-mark .ic{width:var(--ic-md);height:var(--ic-md);stroke-width:1.8}
+.topbar-hero h1{letter-spacing:-.03em;font-weight:800}
+:root[data-theme="dark"] .topbar-mark{box-shadow:0 2px 6px rgba(0,0,0,.45)}
+.topbar-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.topbar-main h1{flex:0 0 auto}
+.storage-line{
+  font-size:11px;font-weight:600;color:var(--text-2);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-variant-numeric:tabular-nums;
+}
+.storage-line b{color:var(--text-2);font-weight:800}
+.storage-line .low{color:var(--danger)}
+.icon-btn{
+  flex:0 0 auto; width:var(--tap);height:var(--tap);border-radius:var(--r-md);
+  font-size:20px;line-height:1;display:grid;place-items:center;color:var(--text);
+}
+.icon-btn:active{background:var(--surface-2)}
+.icon-btn .ic{width:var(--ic-lg);height:var(--ic-lg)}
+#ed-delete .ic{width:var(--ic-md);height:var(--ic-md)}
+
+/* ---------- P0 : 홈 ---------- */
+.home-scroll{flex:1 1 auto;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:8px 12px 12px}
+.card{
+  display:block;width:100%;text-align:left;
+  background:var(--surface);border-radius:var(--r);box-shadow:var(--shadow);
+  padding:10px 13px;margin-bottom:7px;color:inherit;
+}
+
+/* 날씨 */
+.hello-card{padding:10px 13px 8px}
+
+/* 안내 멘트 (카드 안 한 줄씩) */
+.advice{display:flex;flex-direction:column;gap:3px;margin-top:6px}
+.advice-row{
+  display:flex;align-items:flex-start;gap:6px;
+  padding:5px 8px;border-radius:8px;font-size:12px;font-weight:700;line-height:1.35;
+}
+.advice-row .ic{width:var(--ic-xs);height:var(--ic-xs);margin-top:1px;flex:0 0 auto}
+.advice-row.warn{background:#fef2f2;color:#b91c1c}
+.advice-row.care{background:#fff7ed;color:#c2410c}
+.advice-row.info{background:var(--surface-2);color:var(--text-2)}
+:root[data-theme="dark"] .advice-row.warn{background:#2a1517;color:#fca5a5}
+:root[data-theme="dark"] .advice-row.care{background:#2a1e12;color:#fdba74}
+
+/* 기준 날짜 네비 */
+.day-card{padding:6px 8px 9px}
+.day-nav{display:flex;align-items:center;gap:4px}
+.day-arrow{
+  flex:0 0 auto;width:var(--tap);height:var(--tap);border-radius:var(--r-md);
+  display:grid;place-items:center;color:var(--text-2);
+}
+.day-arrow:active{background:var(--surface-2)}
+.day-arrow .ic{width:var(--ic-md);height:var(--ic-md)}
+.day-arrow .flip{transform:scaleX(-1)}
+.day-label{
+  flex:1 1 auto;min-width:0;display:flex;align-items:center;justify-content:center;gap:7px;
+  height:var(--tap);border-radius:var(--r-md);color:var(--text);
+}
+.day-label:active{background:var(--surface-2)}
+.day-text{font-size:16px;font-weight:800;letter-spacing:-.02em}
+.day-badge{
+  flex:0 0 auto;font-size:11px;font-weight:800;padding:2px 7px;border-radius:999px;
+  background:var(--accent);color:var(--on-accent);
+}
+.day-badge.off{background:var(--danger)}
+
+/* 분류 배지 — 재령별로 색을 달리해 목록에서 바로 구분되게 한다 */
+.due-spec{
+  flex:0 0 auto;min-width:44px;text-align:center;
+  font-size:12px;font-weight:800;padding:4px 7px;border-radius:8px;
+  background:var(--accent-soft);color:var(--accent);
+}
+.sp-vert   {background:#e0edff;color:#1d4ed8}   /* 수직 1일  */
+.sp-horiz  {background:#dcfce7;color:#15803d}   /* 수평 3일  */
+.sp-filler {background:#fef3c7;color:#b45309}   /* 필러 10일 */
+.sp-d28    {background:#ede9fe;color:#6d28d9}   /* 28일 (수중·봉함 한 세트) */
+.sp-water  {background:#ede9fe;color:#6d28d9}   /* 수중 28일 — 구버전 */
+.sp-seal   {background:#ffe4e6;color:#be123c}   /* 봉함 28일 */
+:root[data-theme="dark"] .sp-vert{background:#16233d;color:#93c5fd}
+:root[data-theme="dark"] .sp-horiz{background:#12291b;color:#86efac}
+:root[data-theme="dark"] .sp-filler{background:#2a2110;color:#fcd34d}
+:root[data-theme="dark"] .sp-d28{background:#231a3a;color:#c4b5fd}
+:root[data-theme="dark"] .sp-water{background:#231a3a;color:#c4b5fd}
+:root[data-theme="dark"] .sp-seal{background:#2d1419;color:#fda4af}
+
+/* 시계 · 근무시간 */
+.clock-wrap{text-align:center;margin-top:2px}
+.clock-card{text-align:center;padding:4px 13px 8px}
+.clock{
+  font-size:37px;font-weight:800;letter-spacing:-.02em;line-height:1.05;
+  font-variant-numeric:tabular-nums;color:var(--text);
+}
+.shift-line{display:flex;align-items:baseline;justify-content:center;gap:7px;margin-top:4px;flex-wrap:wrap}
+.shift-name{font-size:14px;font-weight:800;color:var(--text-2)}
+.shift-name.on{color:var(--accent)}
+.shift-left{font-size:12px;font-weight:600;color:var(--text-2);font-variant-numeric:tabular-nums}
+.shift-bar{margin-top:6px;height:4px;border-radius:4px;background:var(--surface-2);overflow:hidden}
+.shift-bar i{display:block;height:100%;width:0;border-radius:4px;background:var(--line);transition:width .4s ease}
+.shift-bar i.on{background:var(--accent)}
+/* 근무 중일 땐 "17:00까지 N분"이 이미 알려주므로 시간표는 숨긴다 */
+.shift-hint{margin-top:5px;font-size:11px;font-weight:600;color:var(--text-2);opacity:.7;
+  font-variant-numeric:tabular-nums}
+.shift-hint.hidden{display:none}
+
+/* 날씨 */
+.wx-card:active{background:var(--surface-2)}
+.wx-main{display:flex;align-items:center;gap:10px}
+.wx-ico{width:36px;height:36px;flex:0 0 auto;color:var(--accent);stroke-width:1.9}
+.wx-temp{display:flex;align-items:baseline;gap:1px}
+.wx-temp b{font-size:30px;font-weight:800;letter-spacing:-.03em;font-variant-numeric:tabular-nums}
+.wx-temp span{font-size:13px;font-weight:700;color:var(--text-2)}
+.wx-side{display:flex;flex-direction:column;gap:1px;min-width:0;margin-left:auto;text-align:right}
+.wx-side span:first-child{font-size:14px;font-weight:700}
+.wx-side span:last-child{font-size:11px;color:var(--text-2);font-weight:600}
+.wx-sub{margin-top:6px;font-size:12px;color:var(--text-2);font-weight:600;font-variant-numeric:tabular-nums}
+.wx-foot{display:flex;align-items:center;gap:6px;margin-top:4px;
+  font-size:11px;color:var(--text-2);font-weight:600;opacity:.8}
+.wx-refresh{width:13px;height:13px;margin-left:auto;opacity:.7}
+.wx-card.wx-empty .wx-ico{color:var(--text-2);opacity:.5}
+
+/* 할 일 */
+.todo-head{display:flex;align-items:baseline;gap:8px;margin-bottom:6px}
+.todo-head>span{font-size:14px;font-weight:800}
+.todo-head b{margin-left:auto;font-size:13px;color:var(--text-2);font-variant-numeric:tabular-nums}
+.todo-list{display:flex;flex-direction:column}
+.todo-empty{margin:3px 2px 6px;font-size:13px;color:var(--text-2)}
+.todo-row{display:flex;align-items:center;gap:10px;padding:6px 0}
+.todo-row+.todo-row{border-top:1px solid var(--line)}
+.todo-row .chk{width:22px;height:22px;border-radius:7px}
+.todo-row .chk .ic{width:var(--ic-xs);height:var(--ic-xs)}
+.todo-text{flex:1 1 auto;min-width:0;font-size:14px;font-weight:600;word-break:break-word}
+.todo-row.done .todo-text{text-decoration:line-through;color:var(--text-2);opacity:.65}
+.todo-del{flex:0 0 auto;width:30px;height:30px;border-radius:8px;display:grid;place-items:center;
+  color:var(--text-2);opacity:.5}
+.todo-del .ic{width:var(--ic-xs);height:var(--ic-xs);stroke-width:2.4}
+.todo-del:active{opacity:1;background:var(--surface-2)}
+.todo-add{display:flex;gap:7px;margin-top:7px}
+.todo-add input{
+  flex:1 1 auto;min-width:0;height:38px;border-radius:var(--r-md);border:1px solid var(--line);
+  background:var(--surface);color:var(--text);padding:0 11px;font-size:15px;outline:none;font-family:inherit;
+}
+.todo-add input:focus{border-color:var(--accent)}
+.todo-add-btn{flex:0 0 auto;width:44px;height:38px;border-radius:var(--r-md);background:var(--accent);
+  color:var(--on-accent);display:grid;place-items:center}
+.todo-add-btn .ic{width:var(--ic-md);height:var(--ic-md);stroke-width:2.4}
+
+/* 작업 목록 */
+.task-list{display:flex;flex-direction:column;gap:5px}
+.task-row{
+  display:flex;align-items:center;gap:8px;width:100%;text-align:left;
+  padding:7px 9px;border-radius:var(--r-md);background:var(--surface-2);color:inherit;
+  border:1.5px solid transparent;
+}
+.task-row:active{filter:brightness(.95)}
+.task-row.done{border-color:var(--accent);background:var(--accent-soft)}
+.task-row.done .task-part{color:var(--text-2)}
+.task-body{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:1px}
+.task-part{font-size:14px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.task-meta{font-size:11px;color:var(--text-2);font-weight:600;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.task-flag{
+  flex:0 0 auto;width:22px;height:22px;border-radius:7px;
+  border:2px solid var(--line);display:grid;place-items:center;color:#fff;
+}
+.task-flag.on{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.task-flag .ic{width:var(--ic-xs);height:var(--ic-xs);stroke-width:3}
+/* 작업 추가 + 일정표 스캔 — 스캔은 OCR 플러그인이 있을 때만 나타난다 */
+.task-btns{display:flex;gap:8px;margin-top:8px}
+.task-btns .task-add{margin-top:0;flex:1 1 0;width:auto;min-width:0}
+.task-add{
+  display:flex;align-items:center;justify-content:center;gap:6px;width:100%;
+  margin-top:8px;height:var(--tap);border-radius:var(--r-md);
+  background:var(--surface-2);color:var(--text-2);font-size:14px;font-weight:700;
+}
+.task-add .ic{width:var(--ic-sm);height:var(--ic-sm);stroke-width:2.4}
+.task-add:active{filter:brightness(.93)}
+
+/* 작업 편집기 */
+.two-col{display:flex;gap:8px}
+.two-col .field{flex:1 1 0;min-width:0}
+.age-hint{margin:-8px 0 12px;font-size:12px;font-weight:700;color:var(--text-2)}
+.age-hint.off{color:var(--danger)}
+.spec-pick{display:flex;flex-wrap:wrap;gap:6px}
+.spec-pill{
+  display:flex;flex-direction:column;align-items:center;gap:0;
+  flex:1 1 0;min-width:58px;padding:7px 5px;border-radius:var(--r-md);
+  border:1.5px solid transparent;opacity:.55;
+}
+.spec-pill.on{opacity:1;border-color:currentColor}
+.sp-name{font-size:14px;font-weight:800}
+.sp-age{font-size:11px;font-weight:700;opacity:.75}
+.sp-cast{font-size:11px;font-weight:700;margin-top:2px;font-variant-numeric:tabular-nums;opacity:.9}
+.lbl-sub{font-weight:600;color:var(--text-2);opacity:.8}
+.due-note{
+  margin-top:7px;padding:7px 9px;border-radius:var(--r-sm);
+  background:#fff7ed;color:#c2410c;font-size:12px;font-weight:700;line-height:1.4;
+}
+:root[data-theme="dark"] .due-note{background:#2a1e12;color:#fdba74}
+.tk-stat{
+  margin-bottom:8px;padding:9px 11px;border-radius:var(--r-md);background:var(--surface-2);
+  font-size:13px;font-weight:700;color:var(--text-2);
+}
+.tk-stat.on{color:var(--text)}
+.tk-stat b{font-variant-numeric:tabular-nums}
+.tk-stat b.hi{color:var(--accent);font-size:15px}
+.tk-stat span{font-weight:600;color:var(--text-2)}
+.val-add{display:flex;gap:7px;margin-top:8px}
+.val-add input{
+  flex:1 1 auto;min-width:0;height:40px;border-radius:var(--r-md);border:1px solid var(--line);
+  background:var(--surface);color:var(--text);padding:0 11px;font-size:16px;outline:none;
+  font-family:inherit;font-variant-numeric:tabular-nums;
+}
+.val-add input:focus{border-color:var(--accent)}
+.done-flag{color:var(--accent);font-weight:800}
+.done-flag.off{color:#9a5b12}
+:root[data-theme="dark"] .done-flag.off{color:#fdba74}
+
+/* 감리/완료 구간 머리 (홈 작업 목록) */
+.grp-head{
+  display:flex;align-items:center;gap:6px;
+  margin:7px 0 3px;font-size:11px;font-weight:800;color:var(--accent);
+}
+.grp-head:first-child{margin-top:0}
+.grp-head.done{color:var(--text-2)}
+.grp-head::after{content:'';flex:1 1 auto;height:1px;background:var(--line)}
+
+/* 작업 탭 날짜 네비 */
+.tasks-nav{padding:6px 10px 0}
+
+/* 계산 탭 — 작업 연결 배너 */
+.link-bar{
+  flex:0 0 auto;display:flex;align-items:center;gap:10px;
+  padding:9px 12px;background:var(--accent-soft);border-bottom:1px solid var(--line);
+}
+.link-txt{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:1px}
+.link-lead{font-size:11px;font-weight:700;color:var(--accent);opacity:.85}
+.link-name{font-size:13px;font-weight:800;color:var(--text);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.link-save{
+  flex:0 0 auto;padding:9px 13px;border-radius:10px;
+  background:var(--accent);color:var(--on-accent);font-size:13px;font-weight:800;
+}
+.link-save:active{filter:brightness(.9)}
+
+/* 카톡 표기 날짜 */
+.report-row{display:flex;gap:8px;align-items:center}
+.report-row input{
+  flex:1 1 auto;min-width:0;border-radius:var(--r-md);border:1px solid var(--line);
+  background:var(--surface);color:var(--text);padding:11px 12px;font-size:16px;
+  outline:none;font-family:inherit;
+}
+.report-row input:focus{border-color:var(--accent)}
+.report-row .mini-btn{flex:0 0 auto}
+/* 목록 날짜 · 보고 — 위의 타설일/시험일과 똑같은 2열.
+   폭까지 맞춰야 한 세트로 보인다(높이만 맞췄더니 목록 날짜만 짧아 보였다). */
+.workday-line{margin-bottom:10px}
+.workday-line .field-sub{margin-top:0;margin-bottom:0}
+.workday-line .field-sub .field-label{font-size:13px}
+.workday-line .field-sub input{max-width:none;padding:11px 12px;font-size:16px}
+/* 값만 보여주는 칸 — 날짜칸과 같은 높이·라운드, 테두리는 없앤다(누르는 곳이 아니다) */
+/* 보고 문구 — 내보내기가 두 갈래라 둘 다 보여 준다(감리별 · 날짜별) */
+.report-prev{
+  display:flex;flex-direction:column;gap:3px;min-height:47px;justify-content:center;
+  padding:9px 12px;border-radius:var(--r-md);background:var(--surface-2);
+  font-variant-numeric:tabular-nums;letter-spacing:-.02em;
+}
+.report-row{display:flex;align-items:baseline;gap:8px;min-width:0}
+.report-axis{
+  flex:0 0 auto;width:38px;
+  font-size:11px;font-weight:700;color:var(--text-2);
+}
+.report-text{
+  flex:1 1 auto;min-width:0;
+  font-size:15px;font-weight:800;color:var(--accent);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+
+
+/* 작업 편집기 — 계산기 열기 */
+.btn-calc{width:100%;margin-top:2px;background:var(--accent-soft);color:var(--accent);font-weight:800}
+
+/* 동수 고르기 — 감리 선택 버튼과 같은 모양 */
+.pick-box{
+  width:100%;min-height:var(--tap);display:flex;align-items:center;
+  padding:8px 12px;border-radius:var(--r-md);border:1px solid var(--line);
+  background:var(--surface);color:var(--text);
+  font-size:16px;font-weight:700;text-align:left;
+}
+.pick-box:active{background:var(--surface-2)}
+.pick-box .ph{color:var(--text-2);font-weight:600}
+
+/* 담당 감리 */
+.sup-row{display:flex;gap:8px}
+.sup-pick{
+  flex:1 1 auto;min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:1px;
+  min-height:var(--tap);padding:8px 12px;border-radius:var(--r-md);
+  border:1px solid var(--line);background:var(--surface);color:var(--text);
+}
+.sup-pick:active{background:var(--surface-2)}
+#tk-sup-name{font-size:15px;font-weight:700}
+#tk-sup-name.ph{color:var(--text-2);font-weight:600}
+.sup-where{font-size:12px;color:var(--text-2);font-weight:600}
+.sup-call{
+  flex:0 0 auto;width:50px;min-height:var(--tap);border-radius:var(--r-md);
+  background:var(--accent);color:var(--on-accent);
+  display:grid;place-items:center;
+}
+.sup-call .ic{width:var(--ic-md);height:var(--ic-md)}
+.sup-hint{margin-top:7px;font-size:12px;color:var(--text-2);font-weight:600}
+.sup-sug{
+  font-size:12px;font-weight:800;color:var(--accent);
+  padding:3px 8px;border-radius:999px;background:var(--accent-soft);
+}
+.sup-list{flex:1 1 auto;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:0 12px 16px}
+.sup-item{
+  display:flex;align-items:center;width:100%;text-align:left;
+  padding:11px 12px;border-radius:var(--r-md);background:var(--surface);box-shadow:var(--shadow);
+  margin-bottom:6px;color:inherit;border:1.5px solid transparent;
+}
+.sup-item.on{border-color:var(--accent);background:var(--accent-soft)}
+.sup-item:active{filter:brightness(.96)}
+.sup-left{display:flex;flex-direction:column;gap:2px;min-width:0}
+.sup-name{font-size:15px;font-weight:700}
+.sup-name.ph{color:var(--text-2)}
+.sup-sub{font-size:12px;color:var(--text-2);font-weight:600}
+
+/* 작업 목록 행의 편집 버튼 */
+.row-edit{
+  position:relative;
+  flex:0 0 auto;width:32px;height:32px;border-radius:var(--r-sm);display:grid;place-items:center;
+  color:var(--text-2);opacity:.55;
+}
+/* 목록 행 안이라 크기는 못 키운다 — 히트영역만 44px 로 */
+.row-edit::after{content:'';position:absolute;inset:-6px}
+.row-edit .ic{width:var(--ic-sm);height:var(--ic-sm);transform:scaleX(-1)}
+.row-edit:active{opacity:1;background:var(--surface-2)}
+
+/* ---------- P1 : 통계 ---------- */
+/* 계산 화면은 아래에서부터 자리를 잡는다.
+   키패드(.keypad-zone)와 등록값(.chips-wrap)은 flex:0 0 auto 로 절대 안 줄고,
+   남는 높이를 통계 카드가 받는다. 모자라면 통계가 양보한다 — 사용자 지시.
+   flex-basis 를 0 으로 둬야 내용 높이(=stat-card)가 자리를 우겨 키패드를 밀지 않는다. */
+/* flex:0 1 auto — 필요한 만큼만 쓰고, 모자랄 때만 줄어든다(줄 수 있는 유일한 항목).
+   grow 를 주면 남는 공간을 여기가 먹어서 통계 카드와 등록값 카드 사이가 벌어진다. */
+.calc-scroll{flex:0 1 auto;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:8px 12px 0}
+/* 카드는 내용만큼만. 늘려 놓으면 안이 휑해 보인다.
+   남는 공간은 아래 .chips-wrap 의 margin-bottom:auto 가 먹어 키패드 위로 몰아 준다. */
+.calc-scroll{display:flex;flex-direction:column}
+.stat-card{
+  flex:0 0 auto;
+  background:var(--surface);border-radius:var(--r);box-shadow:var(--shadow);
+  padding:var(--statpad) 14px var(--statpad);
+}
+
+/* 평균 × 보정계수 — 계산식 한 줄 */
+.calc-flow{display:flex;align-items:center;gap:8px;min-height:var(--statrow)}
+.flow-item{
+  flex:1 1 0;min-width:0;display:flex;align-items:baseline;gap:6px;
+  background:var(--surface-2);border-radius:var(--r-sm);padding:5px 9px;
+}
+.flow-label{flex:0 0 auto;font-size:11px;font-weight:700;color:var(--text-2)}
+.flow-val{
+  flex:1 1 auto;text-align:right;font-size:18px;font-weight:800;letter-spacing:-.02em;
+  font-variant-numeric:tabular-nums;color:var(--text);
+}
+.flow-op{flex:0 0 auto;font-size:15px;font-weight:800;color:var(--text-2)}
+#factor-reset{flex:0 0 auto}
+
+.stat-main{display:flex;align-items:baseline;gap:8px;margin-top:0}
+.stat-label{font-size:13px;color:var(--text-2);font-weight:600;white-space:nowrap}
+.stat-label.accent{color:var(--accent);font-size:13px}
+.stat-raw{
+  flex:1;text-align:right;font-size:17px;font-weight:700;letter-spacing:-.02em;
+  font-variant-numeric:tabular-nums;color:var(--text-2);
+}
+.stat-unit.dim{opacity:.7}
+.factor-input{
+  flex:1 1 auto;min-width:0;width:100%;text-align:right;
+  font-size:18px;font-weight:800;font-variant-numeric:tabular-nums;color:var(--accent);
+  background:none;border:none;border-bottom:1.5px solid transparent;border-radius:0;
+  padding:0;outline:none;font-family:inherit;
+}
+.factor-input:focus{border-bottom-color:var(--accent)}
+/* 입력칸 자체는 낮지만 감싼 칸이 44px 을 만든다.
+   :has() 는 구형 WebView 에서 통째로 무시되므로 클래스로 잡는다. */
+.flow-input{min-height:var(--tap);cursor:text}
+.factor-input.bad{color:var(--danger);border-color:var(--danger)}
+#factor-reset{flex:0 0 auto}
+.stat-main{
+  background:var(--accent-soft);border-radius:var(--r-md);
+  padding:4px 11px;margin:6px 0;
+}
+.stat-avg{
+  flex:1;text-align:right;font-size:var(--avgf);font-weight:800;letter-spacing:-.03em;
+  font-variant-numeric:tabular-nums;line-height:1.15;color:var(--accent);
+}
+.stat-main .stat-unit{color:var(--accent);opacity:.75}
+.stat-unit{font-size:13px;color:var(--text-2);font-weight:600}
+
+/* ---------- P1 : 등록값 칩 ---------- */
+/* flex:0 0 auto — 여기가 줄면 등록값이 잘린다. 절대 안 줄인다. */
+.chips-wrap{
+  /* margin-bottom:auto — 남는 공간을 여기가 먹어 키패드를 바닥에 붙여 둔다.
+     카드끼리는 붙고 빈 공간은 키패드 위에 생긴다. */
+  flex:0 0 auto;margin:8px 12px auto;
+  background:var(--surface);border-radius:var(--r);box-shadow:var(--shadow);padding:8px 10px 8px;
+}
+/* 버튼이 줄바꿈되면 세로 공간을 크게 먹는다 → 한 줄 고정, 좁으면 가로 스크롤 */
+.chips-head{display:flex;align-items:center;flex-wrap:nowrap;gap:6px;margin-bottom:6px}
+.chips-head>span{flex:0 0 auto;font-size:13px;color:var(--text-2);font-weight:600}
+.chips-head b{color:var(--text)}
+.chips-head-btns{
+  flex:1 1 auto;min-width:0;display:flex;gap:5px;justify-content:flex-end;
+  overflow-x:auto;scrollbar-width:none;
+}
+.chips-head-btns::-webkit-scrollbar{display:none}
+.chips-head-btns .mini-btn{flex:0 0 auto}
+.mini-btn{
+  position:relative;
+  font-size:12px;font-weight:600;padding:8px 11px;min-height:38px;border-radius:var(--r-sm);
+  background:var(--surface-2);color:var(--text-2);
+  display:inline-flex;align-items:center;
+}
+/* 눈에 보이는 크기는 그대로 두고 손가락이 닿는 면적만 44px 로 넓힌다.
+   가로로 넓히면 옆 버튼과 겹치므로 세로로만 넓힌다. */
+.mini-btn::after{content:'';position:absolute;left:0;right:0;top:-3px;bottom:-3px}
+.mini-btn:active{background:var(--line)}
+.mini-btn.danger{color:var(--danger)}
+/* 한 줄에 3칸 고정 — 폭이 들쭉날쭉하면 눈으로 훑기 어렵다 */
+.chips{
+  display:grid;grid-template-columns:repeat(3,1fr);grid-auto-rows:var(--chiph);
+  gap:var(--chipgap);min-height:var(--chiph);align-content:flex-start;
+}
+/* 9개(3줄)까지는 통째로 보인다. 그 이상 등록하면 키패드를 밀어내지 말고 여기서만 스크롤.
+   overflow-x 를 안 적으면 CSS 규칙상 visible → auto 로 바뀌어 가로 스크롤바가 생기고,
+   그 두께(PC 15px)만큼 세로가 깎여 3줄째가 잘린다. 반드시 hidden 으로 못박는다. */
+#chips{
+  /* X 히트영역(::after)이 칩 위아래로 줄간격 절반씩 삐져나온다.
+     그대로 두면 줄 수와 상관없이 스크롤 높이가 늘 3px 커져 헛스크롤이 생긴다
+     → 같은 크기의 안쪽 여백으로 흡수하고, 3줄 상한도 그만큼 키운다. */
+  padding:calc(var(--chipgap)/2) 0;
+  max-height:calc(var(--chiph)*3 + var(--chipgap)*3);
+  overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;
+}
+.chips-empty{margin:6px 2px;font-size:13px;color:var(--text-2)}
+.chip{
+  display:flex;align-items:center;gap:3px;min-width:0;
+  background:var(--accent-soft);color:var(--accent);
+  border-radius:10px;padding:5px 4px 5px 7px;font-weight:700;
+  font-variant-numeric:tabular-nums;font-size:15px;
+}
+.chip .val{flex:1 1 auto;text-align:center;overflow:hidden}
+.chip.new{animation:pop .18s ease-out}   /* 새로 등록된 칩만 튄다 */
+
+/* 드래그로 순서 바꾸기 */
+.chips.dragging{touch-action:none}
+.chip.drag-src{opacity:.22}
+.chip-ghost{
+  position:fixed;z-index:150;pointer-events:none;margin:0;
+  transform:translate(-50%,-50%) scale(1.08);
+  box-shadow:0 10px 26px rgba(16,24,40,.32);
+}
+.chip .idx{font-size:11px;opacity:.65;font-weight:700}
+.chip .x{
+  position:relative;
+  width:23px;height:23px;border-radius:7px;display:grid;place-items:center;
+  opacity:.6;background:rgba(0,0,0,.06);
+}
+.chip .x .ic{width:var(--ic-xs);height:var(--ic-xs);stroke-width:2.6}
+/* 장갑 낀 손 기준으로 히트영역을 넓힌다(그림은 그대로).
+   세로는 칩 높이를 절대 넘기지 않는다 — 넘기면 #chips 의 스크롤 높이가 그만큼 늘어
+   3줄 제한이 어긋나고, 윗줄 X 가 아랫줄 칩의 탭을 가로챈다. */
+.chip .x::after{
+  content:'';position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+  /* 칩 높이 + 줄간격 = 44px. 이웃 줄의 히트영역과 줄간격 한가운데서 정확히 맞닿아
+     겹치지 않는다 — 겹치면 윗줄 X 가 아랫줄 탭을 훔쳐 엉뚱한 값이 지워진다. */
+  width:44px;height:calc(var(--chiph) + var(--chipgap));
+}
+.chip .x:active{opacity:1;background:rgba(0,0,0,.14)}
+@keyframes pop{from{transform:scale(.7);opacity:0}to{transform:scale(1);opacity:1}}
+
+/* ---------- P1 : 디스플레이 ---------- */
+/* flex:0 0 auto — 예전엔 0 1 auto 라 자리가 모자라면 여기가 눌렸다.
+   키 높이는 고정이라 눌린 만큼 아랫줄(00·0·C)이 통째로 잘려 나갔다. 절대 안 줄인다. */
+.keypad-zone{flex:0 0 auto;background:var(--surface);border-top:1px solid var(--line);padding:8px 8px 16px}
+/* 보정계수 입력 중에는 소프트키보드가 화면을 반쯤 먹으므로 키패드를 접는다.
+   안 그러면 평균·보정평균이 밀려 올라가 안 보이고 키패드 아랫줄이 잘린다. */
+body.kb-edit .keypad{display:none}
+body.kb-edit .display{padding-bottom:2px}
+.display{display:flex;align-items:center;gap:9px;padding:4px 8px 8px}
+.display-mask{
+  flex:1;font-size:var(--dispf);font-weight:800;letter-spacing:.02em;
+  font-variant-numeric:tabular-nums;line-height:1.1;white-space:nowrap;
+}
+.display-mask .d{color:var(--text)}
+/* 자리표시 0 은 "몇 자리 더 눌러야 등록되는지"를 알려주는 유일한 단서다.
+   야외 직사광선에서도 보이도록 대비를 확보한다(var(--line) 은 1.3:1 로 사실상 안 보임). */
+.display-mask .ph{color:var(--text-2);opacity:.55}
+.display-mask .dot{color:var(--text-2);margin:0 1px}
+.display-right{display:flex;flex-direction:column;align-items:flex-end;gap:4px}
+.display-unit{font-size:12px;color:var(--text-2);font-weight:700}
+/* 체크박스 자체는 16px 이라 라벨 전체를 눌러도 켜지게 하고 히트영역을 넓힌다 */
+.auto-toggle{position:relative;display:flex;align-items:center;gap:5px;padding:10px 0 2px;
+  font-size:11px;color:var(--text-2);font-weight:600}
+.auto-toggle::after{content:'';position:absolute;left:-8px;right:-4px;top:-6px;bottom:-10px}
+.auto-toggle input{width:16px;height:16px;accent-color:var(--accent);margin:0}
+
+/* ---------- 설정 카드 ----------
+   시트+토스트로 하던 걸 스위치로 바꿨다. 켜고 끈 결과가 그 자리에 그대로 보이니
+   따로 알림을 띄울 이유가 없다. */
+/* ※ 클래스 이름에 set- 을 쓰지 마라 — 계산 세트 줄(.set-row/.set-main)이 이미 쓴다.
+   실제로 여기서 한 번 겹쳐 세트 목록에 없던 구분선이 그어졌다. 그래서 opt- 로 간다. */
+.opt-card{padding:2px 12px}
+.opt-row{
+  display:flex;align-items:center;gap:10px;
+  min-height:var(--tap);padding:6px 0;cursor:pointer;
+}
+.opt-row + .opt-row{border-top:1px solid var(--line)}
+.opt-label{flex:1 1 auto;min-width:0;font-size:14px;font-weight:700;color:var(--text)}
+
+/* 주구 고르기 — 둘 중 하나라 세그먼트로 */
+.seg{flex:0 0 auto;display:flex;gap:4px;padding:3px;border-radius:var(--r-md);background:var(--surface-2)}
+.seg button{
+  min-height:32px;padding:0 12px;border-radius:var(--r-sm);
+  font-size:13px;font-weight:700;color:var(--text-2);position:relative;
+}
+.seg button::after{content:'';position:absolute;left:0;right:0;top:-6px;bottom:-6px}
+.seg button.on{background:var(--accent);color:var(--on-accent)}
+
+/* 스위치 — 체크박스를 숨기고 트랙+손잡이를 그린다 */
+.sw{flex:0 0 auto;position:relative;width:46px;height:28px}
+.sw input{position:absolute;inset:0;opacity:0;margin:0;width:100%;height:100%;cursor:pointer}
+.sw i{
+  position:absolute;inset:0;border-radius:999px;background:var(--line);
+  transition:background .15s;pointer-events:none;
+}
+.sw i::after{
+  content:'';position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;
+  background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:transform .15s;
+}
+.sw input:checked + i{background:var(--accent)}
+.sw input:checked + i::after{transform:translateX(18px)}
+:root[data-theme="dark"] .sw i::after{background:#e5e7eb}
+
+/* ---------- P1 : 키패드 ---------- */
+/* 3열 — 4열이던 시절 4번째 열(⌫·등록)과 00 이 거의 안 눌려서 숫자에 폭을 돌려줬다 */
+.keypad{display:grid;grid-template-columns:repeat(3,1fr);grid-auto-rows:var(--keyh);gap:7px}
+.key{
+  height:var(--keyh);border-radius:var(--r-md);background:var(--surface-2);
+  font-size:23px;font-weight:600;color:var(--text);
+  display:grid;place-items:center;transition:transform .04s, background .1s;
+}
+.key .ic{width:var(--ic-xl);height:var(--ic-xl)}
+.key:active{background:var(--line);transform:scale(.96)}
+/* 등록 버튼은 평소엔 아예 없다.
+   4자리 자동등록이 켜져 있으면(기본) 손댈 일이 없어서 자리만 차지했다.
+   자동등록을 꺼야만 값을 확정할 방법이 필요해지므로, 그때만 나타난다. */
+.key-enter{display:none}
+body.manual-reg .key-enter{
+  flex:0 0 auto;min-width:72px;min-height:var(--tap);padding:0 14px;
+  border-radius:var(--r-md);background:var(--accent);color:var(--on-accent);
+  font-size:16px;font-weight:800;display:grid;place-items:center;
+}
+body.manual-reg .key-enter:active{filter:brightness(.9)}
+.key-esc{color:var(--danger);font-weight:800}
+.wide-back{font-size:20px}
+
+/* ---------- P2 : 목록 ---------- */
+.search-row{flex:0 0 auto;padding:10px 12px 6px}
+.search-row input{
+  width:100%;height:var(--tap);border-radius:var(--r-md);border:1px solid var(--line);
+  background:var(--surface);color:var(--text);padding:0 12px;font-size:15px;outline:none;
+}
+.search-row input:focus{border-color:var(--accent)}
+.tag-filter{flex:0 0 auto;display:flex;gap:6px;overflow-x:auto;padding:2px 12px 8px;scrollbar-width:none}
+.tag-filter::-webkit-scrollbar{display:none}
+.tag-pill{
+  flex:0 0 auto;font-size:13px;font-weight:600;padding:6px 11px;border-radius:999px;
+  background:var(--surface);border:1px solid var(--line);color:var(--text-2);white-space:nowrap;
+}
+.tag-pill.on{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.rec-list{flex:1 1 auto;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:0 12px 16px}
+.empty-msg{text-align:center;color:var(--text-2);font-size:14px;margin-top:60px;line-height:1.8}
+.rec-card{
+  display:flex;gap:10px;background:var(--surface);border-radius:var(--r);
+  box-shadow:var(--shadow);padding:10px;margin-bottom:10px;
+}
+.rec-card:active{background:var(--surface-2)}
+.rec-thumbs{flex:0 0 auto;display:flex;gap:3px}
+.rec-thumbs img{width:56px;height:56px;object-fit:cover;border-radius:var(--r-sm);background:var(--surface-2);display:block}
+.rec-thumbs .more{
+  width:26px;height:56px;border-radius:var(--r-sm);background:var(--surface-2);
+  display:grid;place-items:center;font-size:11px;font-weight:700;color:var(--text-2);
+}
+.rec-thumbs .nopic{
+  width:56px;height:56px;border-radius:var(--r-sm);background:var(--surface-2);
+  display:grid;place-items:center;color:var(--text-2);opacity:.55;
+}
+.nopic.bad{color:var(--danger);opacity:.8}
+.rec-body{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;justify-content:center;gap:3px}
+.rec-title{font-size:15px;font-weight:700;letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rec-title.untitled{color:var(--text-2);font-weight:600}
+.rec-meta{display:flex;align-items:center;gap:6px;min-width:0}
+.rec-date{font-size:12px;color:var(--text-2);font-variant-numeric:tabular-nums;flex:0 0 auto}
+.tag-chip{
+  flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:11px;font-weight:700;padding:2px 7px;border-radius:999px;
+  background:var(--accent-soft);color:var(--accent);
+}
+.rec-memo{
+  font-size:13px;color:var(--text-2);overflow:hidden;text-overflow:ellipsis;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;white-space:pre-wrap;
+}
+
+/* 28일 편집기의 칸 전환 — 수중 / 봉함. 사진도 계산도 칸별로 따로 담긴다. */
+.subtabs{display:flex;gap:8px;margin:0 0 12px}
+.subtab{
+  flex:1 1 0;min-height:var(--tap);padding:7px 10px;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;
+  border-radius:var(--r-md);background:var(--surface-2);
+  border:2px solid transparent;
+}
+.subtab-name{font-size:15px;font-weight:800;color:var(--text-2)}
+.subtab-n{font-size:11px;font-weight:700;color:var(--text-2);opacity:.75}
+.subtab.on{background:var(--accent-soft);border-color:var(--accent)}
+.subtab.on .subtab-name{color:var(--accent)}
+.subtab.on .subtab-n{color:var(--accent);opacity:1}
+.subtab-n.has{font-weight:800}
+
+/* 28일 작업에서 아직 안 찍은 칸 — "봉함 미완료" */
+.sub-left{
+  margin-left:auto;flex:0 0 auto;
+  padding:2px 7px;border-radius:var(--r-sm);
+  font-size:11px;font-weight:800;white-space:nowrap;
+  background:#fdf0e3;color:#9a5b12;
+}
+:root[data-theme="dark"] .sub-left{background:#2a1e12;color:#fdba74}
+
+/* 목록 행에서 동수 옆에 붙는 담당 감리 — 제목보다 한 단계 약하게 */
+.row-sup{
+  margin-left:6px;font-size:12px;font-weight:600;color:var(--text-2);
+  white-space:nowrap;
+}
+
+/* ---------- 그룹 헤더(작업 탭 = 감리별) ----------
+   예전엔 날짜 헤더라 sticky 로 붙여 뒀는데, 지금은 감리 이름이라
+   위에 붙박이면 스크롤해도 남의 감리 이름이 떠 있어 헷갈린다.
+   목록과 같이 흘러가게 둔다(사용자 지시). */
+.day-head{
+  display:flex;align-items:center;gap:8px;
+  padding:10px 4px 7px;background:var(--bg);
+  font-size:13px;font-weight:700;color:var(--text-2);
+}
+.day-head b{color:var(--text);font-size:14px;font-weight:800;letter-spacing:-.01em}
+.day-head>span:last-child{margin-left:auto;font-size:12px;font-weight:600}
+.day-head-btn:active{background:var(--surface-2)}
+
+/* ---------- P3 : 묶어보내기 ---------- */
+.bat-list{flex:1 1 auto;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:0 12px 12px}
+.chk{
+  flex:0 0 auto;width:24px;height:24px;border-radius:8px;
+  border:2px solid var(--line);background:var(--surface);
+  display:grid;place-items:center;color:#fff;
+}
+.chk.on{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.chk .ic{width:var(--ic-xs);height:var(--ic-xs);stroke-width:3}
+.bat-thumb .nopic{color:var(--text-2)}
+.bat-row{
+  display:flex;align-items:center;gap:10px;
+  background:var(--surface);border-radius:var(--r);box-shadow:var(--shadow);
+  padding:10px;margin-bottom:8px;border:2px solid transparent;
+}
+.bat-row.on{border-color:var(--accent);background:var(--accent-soft)}
+.bat-row:active{filter:brightness(.95)}
+.bat-thumb{flex:0 0 auto}
+.bat-thumb img{width:52px;height:52px;object-fit:cover;border-radius:var(--r-sm);display:block;background:var(--surface-2)}
+.bat-thumb .nopic{width:52px;height:52px;border-radius:var(--r-sm);background:var(--surface-2);
+  display:grid;place-items:center;font-size:19px;opacity:.45}
+.bat-body{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:3px}
+.bat-bar{
+  flex:0 0 auto;display:flex;align-items:center;gap:10px;
+  padding:10px 12px calc(10px + var(--safe-b));
+  background:var(--surface);border-top:1px solid var(--line);
+}
+/* 내보내기 버튼이 둘(날짜별·감리별)이라 정보 줄은 위로 올리고 버튼은 반씩 나눈다 */
+.bat-bar{flex-wrap:wrap}
+.bat-info{flex:1 0 100%;font-size:13px;font-weight:700;color:var(--text-2);margin-bottom:2px}
+.bat-bar .btn{flex:1 1 0;min-width:0;height:50px}
+.btn.off{opacity:.45}
+#view-batch .topbar .mini-btn{flex:0 0 auto}
+
+/* ---------- 편집기 ---------- */
+.ed-scroll{flex:1 1 auto;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:12px 12px 8px}
+.field{display:block;margin-bottom:14px}
+/* 태그는 제목보다 한 단계 작게 — 보조 정보임을 눈에 보이게 */
+.field-sub{margin-top:-4px;margin-bottom:8px}
+.field-sub .field-label{font-size:12px}
+.field-sub input{padding:8px 11px;font-size:14px;max-width:60%}
+.field-label{display:block;font-size:13px;font-weight:700;color:var(--text-2);margin-bottom:6px}
+.field-label b{color:var(--accent)}
+.field input[type=text],.field input[type=date],.field input[type=datetime-local],.field textarea{
+  width:100%;border-radius:var(--r-md);border:1px solid var(--line);background:var(--surface);
+  color:var(--text);padding:11px 12px;font-size:16px;outline:none;font-family:inherit;
+}
+/* 날짜칸의 달력 아이콘이 라이트/다크 모두에서 보이게 */
+.field input[type=date]{font-variant-numeric:tabular-nums}
+:root[data-theme="dark"] .field input[type=date]::-webkit-calendar-picker-indicator{filter:invert(.75)}
+.field input:focus,.field textarea:focus{border-color:var(--accent)}
+.field textarea{resize:vertical;line-height:1.5}
+.tag-suggest{display:flex;gap:6px;flex-wrap:wrap;margin:-8px 0 14px}
+/* 긴 태그 하나가 폼 전체를 가로로 밀어내지 않도록 잘라 준다 */
+.tag-suggest .tag-pill{background:var(--surface-2);border-color:transparent;
+  max-width:100%;overflow:hidden;text-overflow:ellipsis;display:block}
+.memo-tools{display:flex;gap:6px;margin-top:-8px}
+.photo-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:8px}
+.photo-cell{position:relative;aspect-ratio:1;border-radius:var(--r-md);overflow:hidden;background:var(--surface-2)}
+.photo-cell img{width:100%;height:100%;object-fit:cover;display:block}
+.photo-cell .del{
+  position:absolute;top:4px;right:4px;width:28px;height:28px;border-radius:8px;
+  background:rgba(0,0,0,.55);color:#fff;display:grid;place-items:center;
+}
+.photo-cell .del .ic{width:var(--ic-xs);height:var(--ic-xs);stroke-width:2.4}
+.photo-cell .n{
+  position:absolute;left:4px;bottom:4px;background:rgba(0,0,0,.55);color:#fff;
+  font-size:11px;font-weight:700;padding:2px 5px;border-radius:6px;
+}
+.photo-cell.loading{display:grid;place-items:center;color:var(--text-2);font-size:12px}
+.photo-btns{display:flex;gap:8px}
+.btn{
+  flex:1;height:46px;border-radius:var(--r-md);background:var(--surface-2);
+  font-size:15px;font-weight:700;color:var(--text);
+  display:flex;align-items:center;justify-content:center;gap:7px;
+}
+.btn .ic{width:var(--ic-md);height:var(--ic-md)}
+.btn:active{filter:brightness(.93)}
+.btn-primary{background:var(--accent);color:var(--on-accent)}
+.btn-kakao{background:var(--kakao);color:var(--kakao-text)}
+.ed-actions{
+  flex:0 0 auto;display:flex;gap:8px;padding:10px 12px calc(10px + var(--safe-b));
+  background:var(--surface);border-top:1px solid var(--line);
+}
+.ed-actions .btn{height:50px}
+.ed-actions .btn-kakao{flex:1.4}
+
+/* 단계를 끝까지 올려도 안 들어가는 극단(가로 화면·분할 화면).
+   예전엔 여기서 조용히 포기해 키패드 아랫줄이 view 밖으로 나갔고,
+   .view 가 overflow:hidden 이라 스크롤로도 닿을 수 없었다.
+   못 누르게 잘라 두느니 화면째 스크롤시킨다. */
+#view-calc.nofit{overflow-y:auto;-webkit-overflow-scrolling:touch}
+#view-calc.nofit .calc-scroll{flex:0 0 auto;overflow:visible}
+#view-calc.nofit .keypad-zone{flex:0 0 auto}
+
+/* ---------- 계산 세트 (작업 편집기) ---------- */
+.set-list{display:flex;flex-direction:column;gap:6px;margin:2px 0 8px}
+.set-empty{margin:2px 2px 8px;font-size:13px;color:var(--text-2)}
+.set-row{
+  display:flex;align-items:center;gap:6px;
+  background:var(--surface-2);border-radius:var(--r-md);padding:8px 8px 8px 10px;
+}
+.set-main{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:1px;
+  min-height:var(--tap);justify-content:center;cursor:text}
+/* 전역 .field input[type=text] 규칙(테두리·흰 배경·16px)이 여기까지 먹으면
+   세트 줄이 입력 박스 덩어리로 보인다. 선택자를 더 세게 잡아 눌러둔다. */
+.field .set-row input.set-name{
+  width:100%;background:none;border:none;outline:none;padding:0;border-radius:0;
+  font-family:inherit;font-size:15px;font-weight:700;color:var(--text);
+}
+.field .set-row input.set-name:focus{border:none;box-shadow:none}
+/* 한 줄짜리 입력이라 20px 밖에 안 된다 — 위아래 여백으로 44px 을 만든다 */
+.field .set-row input.set-name{padding:11px 0 3px}
+.set-name::placeholder{color:var(--text-2);opacity:.7;font-weight:600}
+.set-sum{font-size:12px;color:var(--text-2);font-variant-numeric:tabular-nums}
+.set-sum b{color:var(--accent);font-size:14px}
+.set-sum span{opacity:.7}
+.set-sum.off{opacity:.75}
+/* 장갑 낀 손 기준 44px 확보 */
+.set-open,.set-del{
+  position:relative;
+  flex:0 0 auto;width:38px;height:38px;border-radius:var(--r-md);
+  display:grid;place-items:center;background:var(--surface);color:var(--text-2);
+}
+/* 보이는 크기는 38, 손가락이 닿는 면적은 44 (가로는 gap 6px 안에서만 넓힌다) */
+.set-open::after,.set-del::after{content:'';position:absolute;inset:-3px}
+.set-open{color:var(--accent)}
+.set-open .ic,.set-del .ic{width:var(--ic-md);height:var(--ic-md)}
+.set-open:active,.set-del:active{background:var(--line)}
+
+/* ---------- AI 검수 (beta) ---------- */
+/* 「사진 보내기」 바로 위. 보내기 전에 한 번 훑는 자리라 여기 둔다. */
+.audit-btn{
+  flex:0 0 auto;display:flex;align-items:center;justify-content:center;gap:7px;
+  margin:0 12px 8px;min-height:var(--tap);border-radius:var(--r-md);
+  background:var(--accent-soft);color:var(--accent);
+  font-size:15px;font-weight:800;
+}
+.audit-btn .ic{width:var(--ic-sm);height:var(--ic-sm)}
+.audit-btn:active{filter:brightness(.96)}
+.audit-btn:disabled{opacity:.45}
+.audit-btn .beta{background:transparent;padding:0;opacity:.8}
+
+.audit-sum{
+  flex:0 0 auto;margin:10px 12px 2px;padding:11px 13px;border-radius:var(--r-md);
+  font-size:14px;font-weight:800;
+}
+.audit-sum.busy{background:var(--surface-2);color:var(--text-2)}
+.audit-sum.ok{background:#dcfce7;color:#15803d}
+.audit-sum.warn{background:#fff7ed;color:#c2410c}
+:root[data-theme="dark"] .audit-sum.ok{background:#12291b;color:#86efac}
+:root[data-theme="dark"] .audit-sum.warn{background:#2a1e12;color:#fdba74}
+
+.audit-list{flex:1 1 auto;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;
+  padding:8px 12px calc(12px + var(--safe-b));display:flex;flex-direction:column;gap:8px}
+.audit-note{
+  display:flex;align-items:flex-start;gap:7px;padding:9px 11px;border-radius:var(--r-md);
+  background:var(--surface-2);color:var(--text-2);font-size:12px;font-weight:700;line-height:1.5;
+}
+.audit-note .ic{width:var(--ic-xs);height:var(--ic-xs);margin-top:2px;flex:0 0 auto}
+.audit-note.calm{background:var(--accent-soft);color:var(--accent);opacity:.9}
+
+.audit-card{
+  background:var(--surface);border-radius:var(--r);box-shadow:var(--shadow);
+  padding:9px 11px 10px;border-left:3px solid transparent;
+}
+.audit-card.bad{border-left-color:#c2410c}
+.audit-card.warn{border-left-color:#c2410c}
+.audit-card.ok{border-left-color:#15803d}
+:root[data-theme="dark"] .audit-card.warn{border-left-color:#fdba74}
+:root[data-theme="dark"] .audit-card.ok{border-left-color:#86efac}
+.audit-head{
+  width:100%;display:flex;align-items:center;gap:8px;min-height:var(--tap);
+  text-align:left;color:inherit;
+}
+.audit-title{flex:1 1 auto;min-width:0;font-size:15px;font-weight:800;letter-spacing:-.02em;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.audit-flag{flex:0 0 auto;width:24px;height:24px;border-radius:7px;display:grid;place-items:center}
+.audit-flag .ic{width:var(--ic-xs);height:var(--ic-xs);stroke-width:2.4}
+.audit-flag.ok{background:#dcfce7;color:#15803d}
+.audit-flag.warn{background:#fff7ed;color:#c2410c}
+.audit-flag.bad{background:#fff7ed;color:#c2410c}
+.audit-flag.info{background:var(--surface-2);color:var(--text-2)}
+:root[data-theme="dark"] .audit-flag.ok{background:#12291b;color:#86efac}
+:root[data-theme="dark"] .audit-flag.warn{background:#2a1e12;color:#fdba74}
+:root[data-theme="dark"] .audit-flag.bad{background:#2a1e12;color:#fdba74}
+.audit-read{
+  margin:2px 0 6px;padding:7px 9px;border-radius:var(--r-sm);background:var(--surface-2);
+  font-size:12px;font-weight:600;color:var(--text-2);line-height:1.5;
+}
+.audit-read b{display:block;font-size:11px;font-weight:800;opacity:.75;margin-bottom:2px}
+.audit-line{display:flex;gap:7px;padding:4px 0;font-size:13px;font-weight:600;line-height:1.5}
+.audit-line span{white-space:pre-line;min-width:0}
+.audit-line b{flex:0 0 auto;font-size:11px;font-weight:800;padding:2px 6px;border-radius:5px;
+  align-self:flex-start;margin-top:2px}
+.audit-line.bad b{background:#fff7ed;color:#c2410c}
+.audit-line.warn b{background:#fff7ed;color:#c2410c}
+.audit-line.info b{background:var(--surface-2);color:var(--text-2)}
+.audit-line.ok{color:var(--text-2);font-weight:700}
+:root[data-theme="dark"] .audit-line.bad b{background:#2a1e12;color:#fdba74}
+:root[data-theme="dark"] .audit-line.warn b{background:#2a1e12;color:#fdba74}
+
+/* ---------- AI 어시스턴트 (beta) ---------- */
+.beta{
+  font-size:11px;font-weight:800;letter-spacing:.06em;vertical-align:middle;
+  padding:2px 5px;border-radius:5px;background:var(--accent-soft);color:var(--accent);
+}
+/* 홈 진입 카드 */
+.ai-entry{display:flex;align-items:center;gap:11px;padding:11px 13px;text-align:left}
+.ai-entry:active{filter:brightness(.97)}
+.ai-entry-ico{
+  flex:0 0 auto;width:38px;height:38px;border-radius:var(--r-md);display:grid;place-items:center;
+  background:var(--accent);color:var(--on-accent);
+}
+.ai-entry-ico .ic{width:var(--ic-md);height:var(--ic-md)}
+.ai-entry-main{flex:1 1 auto;min-width:0;display:flex;align-items:center}
+.ai-entry-title{font-size:15px;font-weight:800;letter-spacing:-.02em}
+.ai-entry-go{flex:0 0 auto;width:var(--ic-sm);height:var(--ic-sm);color:var(--text-2);opacity:.7}
+.flip{transform:scaleX(-1)}
+
+/* 키 넣는 칸 */
+.ai-setup{flex:0 0 auto;padding:12px 12px 4px}
+.ai-setup-msg{margin:0 0 8px;font-size:13px;font-weight:700}
+.ai-key-row{display:flex;gap:7px}
+.ai-key-row input{
+  flex:1 1 auto;min-width:0;height:var(--tap);border-radius:var(--r-md);
+  border:1px solid var(--line);background:var(--surface);color:var(--text);
+  padding:0 12px;font-size:15px;outline:none;font-family:inherit;
+}
+.ai-key-row input:focus{border-color:var(--accent)}
+.ai-key-row .btn{flex:0 0 auto;width:74px;height:var(--tap)}
+.ai-setup-hint{margin:7px 0 0;font-size:11px;font-weight:600;color:var(--text-2)}
+
+/* 대화 */
+.ai-log{flex:1 1 auto;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;
+  padding:12px 12px 4px;display:flex;flex-direction:column;gap:8px}
+.ai-empty{margin:auto 0;text-align:center;padding:0 8px}
+.ai-empty-t{margin:0;font-size:15px;font-weight:800;color:var(--text-2);opacity:.85}
+.ai-msg{display:flex}
+.ai-msg.me{justify-content:flex-end}
+.ai-bubble{
+  max-width:84%;padding:9px 12px;border-radius:var(--r);
+  font-size:14px;font-weight:600;line-height:1.55;white-space:pre-wrap;word-break:break-word;
+  background:var(--surface);color:var(--text);box-shadow:var(--shadow);
+}
+.ai-msg.me .ai-bubble{background:var(--accent);color:var(--on-accent);font-weight:700}
+.ai-wait{color:var(--text-2);letter-spacing:.18em;animation:aiPulse 1s ease-in-out infinite}
+.ai-err{color:var(--danger)}
+@keyframes aiPulse{0%,100%{opacity:.45}50%{opacity:1}}
+
+/* 추천 질문 */
+.ai-suggest{flex:0 0 auto;display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;
+  padding:6px 12px 8px}
+.ai-suggest::-webkit-scrollbar{display:none}
+.ai-chip{
+  flex:0 0 auto;min-height:38px;padding:8px 12px;border-radius:999px;
+  background:var(--surface-2);color:var(--text-2);
+  font-size:13px;font-weight:700;white-space:nowrap;
+}
+.ai-chip:active{background:var(--line)}
+
+/* 입력줄 */
+.ai-input-row{
+  flex:0 0 auto;display:flex;gap:7px;align-items:center;
+  padding:8px 12px calc(10px + var(--safe-b));
+  background:var(--surface);border-top:1px solid var(--line);
+}
+.ai-input-row input{
+  flex:1 1 auto;min-width:0;height:var(--tap);border-radius:999px;
+  border:1px solid var(--line);background:var(--bg);color:var(--text);
+  padding:0 15px;font-size:15px;outline:none;font-family:inherit;
+}
+.ai-input-row input:focus{border-color:var(--accent)}
+.ai-input-row input:disabled{opacity:.6}
+.ai-send{
+  flex:0 0 auto;width:var(--tap);height:var(--tap);border-radius:50%;
+  display:grid;place-items:center;background:var(--accent);color:var(--on-accent);
+}
+.ai-send:disabled{opacity:.45}
+.ai-send .ic{width:var(--ic-md);height:var(--ic-md)}
+
+/* ---------- 탭바 ---------- */
+.tabbar{
+  position:fixed;left:0;right:0;bottom:0;z-index:20;
+  height:calc(var(--tabh) + var(--safe-b));padding-bottom:var(--safe-b);
+  display:flex;background:var(--surface);border-top:1px solid var(--line);
+}
+.tab{
+  flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
+  font-size:11px;font-weight:700;color:var(--text-2);
+}
+.tab-ico{width:var(--ic-md);height:var(--ic-md)}
+.tab.active{color:var(--accent)}
+
+/* ---------- 라이트박스 ---------- */
+.lightbox{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.94);display:grid;place-items:center}
+.lightbox img{max-width:100%;max-height:100%;object-fit:contain}
+.lightbox-close{
+  position:absolute;top:calc(var(--safe-t) + 10px);right:12px;width:42px;height:42px;
+  border-radius:var(--r-md);background:rgba(255,255,255,.15);color:#fff;
+  display:grid;place-items:center;
+}
+.lightbox-close .ic{width:var(--ic-md);height:var(--ic-md);stroke-width:2.4}
+
+/* ---------- 바텀시트 ---------- */
+.sheet-back{position:fixed;inset:0;z-index:70;background:rgba(0,0,0,.45);display:flex;align-items:flex-end}
+.sheet{
+  width:100%;background:var(--surface);border-radius:20px 20px 0 0;
+  padding:8px 12px calc(12px + var(--safe-b));animation:up .2s ease-out;
+  /* 항목이 많아도 화면을 안 넘게 — 넘치면 .sheet-scroll 이 양보한다 */
+  display:flex;flex-direction:column;max-height:88vh;max-height:88dvh;
+}
+/* overflow-y 만 적으면 overflow-x 가 visible→auto 로 바뀌어 가로 스크롤바가 생긴다 */
+.sheet-scroll{
+  flex:0 1 auto;min-height:0;
+  overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;
+  overscroll-behavior:contain;
+}
+@keyframes up{from{transform:translateY(100%)}to{transform:translateY(0)}}
+/* white-space 가 없으면 '사진도 함께 지워집니다' 같은 경고 줄바꿈이 접혀 한 줄로 붙는다 */
+.sheet-title{text-align:center;font-size:13px;color:var(--text-2);font-weight:700;
+  padding:10px 0 8px;white-space:pre-wrap}
+.sheet-item{
+  display:block;width:100%;text-align:center;padding:15px 10px;font-size:16px;font-weight:600;
+  border-radius:var(--r-md);color:var(--text);
+}
+.sheet-item:active{background:var(--surface-2)}
+.sheet-item.danger{color:var(--danger)}
+.sheet-item.strong{font-weight:800;color:var(--accent)}
+.sheet-item small{display:block;font-size:12px;color:var(--text-2);font-weight:500;margin-top:2px}
+.sheet-sep{height:1px;background:var(--line);margin:4px 8px}
+.sheet-cancel{margin-top:6px;background:var(--surface-2);font-weight:700}
+
+/* ---------- 토스트 ---------- */
+/* 키패드를 가리지 않도록 위쪽(헤더 아래)에 띄운다 */
+.toast-wrap{
+  position:fixed;left:0;right:0;top:calc(var(--safe-t) + 64px);
+  z-index:90;display:flex;flex-direction:column;align-items:center;gap:6px;pointer-events:none;
+}
+.toast{
+  max-width:92%;background:#111827e6;color:#fff;font-size:14px;font-weight:600;
+  padding:11px 16px;border-radius:var(--r-md);animation:fade .2s ease-out;
+  box-shadow:0 6px 20px rgba(0,0,0,.3);white-space:pre-wrap;text-align:center;
+}
+.toast.has-act{display:flex;align-items:center;gap:12px;text-align:left;pointer-events:auto}
+.toast-act{
+  flex:0 0 auto;color:#93c5fd;font-weight:800;font-size:14px;
+  padding:6px 4px 6px 12px;border-left:1px solid rgba(255,255,255,.25);
+}
+:root[data-theme="dark"] .toast-act{color:#1d4ed8}
+:root[data-theme="dark"] .toast{background:#e5e7ebee;color:#0b1017}
+@keyframes fade{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}
+
+/* ---------- 좁은 세로 대응 (3단계 축소) ---------- */
+/* 미디어쿼리는 화면 전체 높이만 본다. 실제로 쓸 수 있는 높이는 거기서
+   상단바·작업연결바·탭바·세이프에어리어를 뺀 값이라 훨씬 짧다
+   (실측: 891px 화면에서 계산 본문에 남는 건 631px).
+   그래서 진짜 판정은 JS(Calc.fit)가 재보고 .tight-top → .tight → .xtight 를 붙인다.
+   미디어쿼리는 첫 그림부터 덜 튀게 하는 밑그림일 뿐 — 같은 변수를 쓰므로 겹쳐도 두 번 줄지 않는다.
+
+   **키패드(--keyh)와 입력 디스플레이(--dispf)는 어느 단계에서도 안 줄인다.**
+   찌부러진 키는 누르기 어렵다 — 사용자 지시. 줄일 건 위(통계 카드)뿐이고,
+   그래도 모자라면 칩을 한 단 줄이고, 끝내 안 되면 nofit(화면째 스크롤)로 넘긴다.
+     1단계(tight-top) 통계 카드만
+     2단계(tight)     통계 카드 최대 압축
+     3단계(xtight)    칩까지 한 단 (키패드는 그대로) */
+#view-calc.tight-top,#view-calc.tight,#view-calc.xtight{
+  --avgf:31px; --statpad:5px; --statrow:22px;
+}
+/* 통계 카드 안의 「기본값」 버튼만 낮춘다.
+   등록값 머리의 버튼들은 현장에서 장갑 끼고 누르는 곳이라 그대로 둔다. */
+#view-calc.tight-top .stat-card .mini-btn,
+#view-calc.tight .stat-card .mini-btn,
+#view-calc.xtight .stat-card .mini-btn{min-height:32px;padding:6px 10px}
+#view-calc.tight-top .link-bar,#view-calc.tight .link-bar,#view-calc.xtight .link-bar{padding-top:7px;padding-bottom:7px}
+
+/* 2단계 — 통계 카드를 끝까지 */
+#view-calc.tight{
+  --avgf:29px; --statpad:4px; --statrow:20px;
+}
+#view-calc.tight .stat-main,#view-calc.xtight .stat-main{margin:3px 0;padding:2px 11px}
+#view-calc.tight .calc-flow,#view-calc.xtight .calc-flow{gap:6px}
+
+/* 3단계 — 칩만 한 단. 키패드는 여전히 안 건드린다 */
+#view-calc.xtight{
+  --avgf:29px; --statpad:4px; --statrow:20px;
+  --chiph:36px; --chipgap:4px;
+}
+#view-calc.xtight .chips-wrap{padding:6px 9px 7px;margin:6px 12px auto}
+#view-calc.tight .calc-scroll,#view-calc.xtight .calc-scroll{padding:6px 12px 0}
+
+/* 예전엔 여기에 @media(max-height:800/680){:root{...}} 로 치수를 줄여 뒀었다. 지웠다.
+   tier 클래스는 #view-calc(자손)에, 미디어쿼리는 :root(조상)에 선언되므로
+   상속 규칙상 tier 가 무조건 이긴다 — 우선순위가 아니라 '스코프'로 이긴다.
+   그래서 680px 이하에선 :root 가 이미 43px 로 줄여 놨는데 .tight 가 46px 로
+   되돌려, 2단계가 축소가 아니라 확대가 되는 역전이 실측됐다.
+   지금은 Calc.fit() 이 직접 재서 붙이는 tier 하나만 남긴다 — 단조 감소가 보장된다. */
+@media (min-width:560px){
+  .view,.tabbar{max-width:520px;margin:0 auto;left:0;right:0}
+}
