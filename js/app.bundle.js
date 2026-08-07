@@ -462,6 +462,10 @@
       };
       req.onsuccess = () => {
         req.result.onversionchange = () => { try { req.result.close(); } catch (e) {} dbp = null; };
+        // 웹뷰가 메모리·저장소 압박으로 연결을 강제로 닫을 수 있다(close 이벤트).
+        // 이걸 안 받으면 죽은 연결을 세션 내내 물고 있어 모든 조회가 실패하고,
+        // 화면엔 "작업이 없습니다"만 떠서 **데이터가 다 날아간 것처럼 보인다**(실제 사고).
+        req.result.onclose = () => { if (dbp === p) dbp = null; };
         resolve(req.result);
       };
       req.onerror = () => reject(req.error || new Error('저장소 열기 실패'));
@@ -473,21 +477,39 @@
     return p;
   }
 
-  function tx(names, mode, fn) {
-    return open().then((db) => new Promise((resolve, reject) => {
-      const t = db.transaction(names, mode);
-      let out;
-      t.oncomplete = () => resolve(out);
-      t.onerror = () => reject(t.error || new Error('저장소 오류'));
-      t.onabort = () => reject(t.error || new Error('저장이 중단되었습니다'));
-      try {
-        out = fn(t);
-        if (out && typeof out.then === 'function') {
-          // 트랜잭션 안에서 await 를 쓰면 자동 커밋돼 깨지므로 금지
-          throw new Error('tx 콜백은 동기여야 합니다');
+  /* 모든 DB 접근의 관문. 연결이 이미 죽어 transaction() 이 동기로 던지면
+     (InvalidStateError — onclose 가 늦게 오는 경우가 있다) 한 번 다시 열어 재시도한다.
+     아직 시작도 못 한 트랜잭션이라 재시도가 안전하다. */
+  function run(fn) {
+    return open().then((db) => {
+      try { return fn(db); }
+      catch (e) {
+        if (e && e.name === 'InvalidStateError') {
+          dbp = null;
+          return open().then((db2) => fn(db2));
         }
-      } catch (e) { try { t.abort(); } catch (e2) {} reject(e); }
-    }));
+        throw e;
+      }
+    });
+  }
+
+  function tx(names, mode, fn) {
+    return run((db) => {
+      const t = db.transaction(names, mode);   // 죽은 연결이면 여기서 던진다 → run 이 재시도
+      return new Promise((resolve, reject) => {
+        let out;
+        t.oncomplete = () => resolve(out);
+        t.onerror = () => reject(t.error || new Error('저장소 오류'));
+        t.onabort = () => reject(t.error || new Error('저장이 중단되었습니다'));
+        try {
+          out = fn(t);
+          if (out && typeof out.then === 'function') {
+            // 트랜잭션 안에서 await 를 쓰면 자동 커밋돼 깨지므로 금지
+            throw new Error('tx 콜백은 동기여야 합니다');
+          }
+        } catch (e) { try { t.abort(); } catch (e2) {} reject(e); }
+      });
+    });
   }
 
   function reqp(r) {
@@ -508,7 +530,7 @@
   }
 
   function getPhoto(id) {
-    return open().then((db) => reqp(db.transaction('photos').objectStore('photos').get(id)));
+    return run((db) => reqp(db.transaction('photos').objectStore('photos').get(id)));
   }
 
   /* 빈 id 가 하나만 섞여도 IndexedDB 는 DataError 를 던진다.
@@ -517,7 +539,7 @@
   function getPhotos(ids) {
     const keys = (ids || []).filter((id) => id !== null && id !== undefined && id !== '');
     if (!keys.length) return Promise.resolve([]);
-    return open().then((db) => {
+    return run((db) => {
       const st = db.transaction('photos').objectStore('photos');
       return Promise.all(keys.map((id) => {
         try { return reqp(st.get(id)).catch(() => null); }
@@ -565,12 +587,12 @@
   }
 
   function getRecord(id) {
-    return open().then((db) => reqp(db.transaction('records').objectStore('records').get(id)))
+    return run((db) => reqp(db.transaction('records').objectStore('records').get(id)))
       .then(normRec);
   }
 
   function allRecords() {
-    return open().then((db) => reqp(db.transaction('records').objectStore('records').getAll()))
+    return run((db) => reqp(db.transaction('records').objectStore('records').getAll()))
       .then((arr) => (arr || []).map(normRec)
         .sort((a, b) => (b.ts - a.ts) || (b.createdAt - a.createdAt)));
   }
@@ -578,10 +600,10 @@
   /* 기록 삭제 — 다른 기록이 같이 쓰는 사진은 남긴다.
      (저장 재진입 등으로 photoId 를 공유하는 기록이 생겼을 때 사진이 통째로 날아가는 것을 막는다) */
   function deleteRecord(id) {
-    return Promise.all([
-      open().then((db) => reqp(db.transaction('records').objectStore('records').getAll())),
-      open().then((db) => reqp(db.transaction('tasks').objectStore('tasks').getAll()))
-    ])
+    return run((db) => Promise.all([
+      reqp(db.transaction('records').objectStore('records').getAll()),
+      reqp(db.transaction('tasks').objectStore('tasks').getAll())
+    ]))
       .then((res) => {
         const all = res[0] || [], tasks = res[1] || [];
         const target = all.filter((r) => r.id === id)[0];
@@ -606,7 +628,7 @@
   function gc(protectIds) {
     const keep = {};
     (protectIds || []).forEach((id) => { keep[id] = 1; });
-    return open().then((db) => Promise.all([
+    return run((db) => Promise.all([
       reqp(db.transaction('records').objectStore('records').getAll()),
       reqp(db.transaction('photos').objectStore('photos').getAllKeys()),
       reqp(db.transaction('tasks').objectStore('tasks').getAll())
@@ -636,7 +658,7 @@
   }
 
   function todosOf(day) {
-    return open().then((db) => reqp(
+    return run((db) => reqp(
       db.transaction('todos').objectStore('todos').index('byDay').getAll(IDBKeyRange.only(day))
     )).then((arr) => (arr || []).sort((a, b) => (a.order - b.order) || (a.createdAt - b.createdAt)));
   }
@@ -712,15 +734,22 @@
     return out;
   }
 
-  function putTask(t) {
+  /* day 가 비거나 깨진 채 저장되면 byDay 인덱스에서 빠져 **어느 날짜 목록에도 안 뜬다**
+     — 데이터가 증발한 것처럼 보이는 최악의 경로라 저장 시점에 반드시 막는다. */
+  const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+  function goodDay(v, alt) { return DAY_RE.test(v || '') ? v : alt; }
+
+  /* 작업 → 저장할 레코드(정규화). putTask 와 persist28 이 같이 쓴다 */
+  function taskRec(t) {
     liftDong(t);
     const now = Date.now();
     const isSub = Spec.hasSubs(t.specKey);
     const sub = isSub ? normalizeSub(t) : null;
-    const rec = {
+    const day = goodDay(t.day, goodDay(t.testDay, U.dayKey(now)));
+    return {
       id: t.id || U.uid(),
-      day: t.day,                          // 작업일 = 목록에 뜨는 날 (byDay 인덱스 키)
-      testDay: t.testDay || t.day,         // 시험일 = 보고·카톡 표기용
+      day: day,                            // 작업일 = 목록에 뜨는 날 (byDay 인덱스 키)
+      testDay: goodDay(t.testDay, day),    // 시험일 = 보고·카톡 표기용
       specKey: t.specKey || '',
       castDay: t.castDay || '',
       reportDay: t.reportDay || '',       // 비어 있으면 규칙대로 (Task.autoReportDay)
@@ -736,6 +765,10 @@
       createdAt: t.createdAt || now,
       updatedAt: now
     };
+  }
+
+  function putTask(t) {
+    const rec = taskRec(t);
     return tx(['tasks'], 'readwrite', (s) => { s.objectStore('tasks').put(rec); })
       .then(() => rec);
   }
@@ -787,6 +820,10 @@
         water: water[0] ? toSub(water[0]) : { photos: [], sets: [] },
         seal:  seal[0]  ? toSub(seal[0])  : { photos: [], sets: [] }
       };
+      // 화면이 이 in-memory 병합본을 바로 쓴다 — 저장(putTask) 전에 모양을 맞춰 둔다.
+      // 안 맞추면 첫 렌더에서 봉함 사진이 개수·썸네일에 안 잡힌다(감사에서 확인).
+      rec.photos = mergedPhotos(rec, rec.sub);
+      rec.sets = [];
       // 합쳐진 쪽(두 번째 레코드)은 지운다
       g.forEach((t) => { if (t.id !== base.id) gone[t.id] = 1; });
       changed.push(rec);
@@ -799,17 +836,21 @@
     return { rows: out, changed: changed, gone: Object.keys(gone) };
   }
 
-  /* 합친 결과를 저장한다. 실패해도 화면은 이미 합쳐진 걸 보고 있으므로 조용히 넘어간다. */
+  /* 합친 결과를 저장한다. 실패해도 화면은 이미 합쳐진 걸 보고 있으므로 조용히 넘어간다.
+     put 과 delete 는 **한 트랜잭션**이다 — 둘 사이에 다른 tasksOf 가 끼어들면
+     봉함만 남은 반쪽을 또 합쳐 중복 d28 이 생길 수 있다(감사에서 확인된 레이스). */
   function persist28(m) {
     if (!m.changed.length) return;
-    Promise.all(m.changed.map((r) => putTask(r)))
-      .then(() => Promise.all(m.gone.map((id) =>
-        tx(['tasks'], 'readwrite', (s) => { s.objectStore('tasks').delete(id); }))))
-      .catch((e) => console.warn('[merge28]', e));
+    const recs = m.changed.map(taskRec);
+    tx(['tasks'], 'readwrite', (s) => {
+      const st = s.objectStore('tasks');
+      recs.forEach((r) => st.put(r));
+      m.gone.forEach((id) => st.delete(id));
+    }).catch((e) => console.warn('[merge28]', e));
   }
 
   function tasksOf(day) {
-    return open().then((db) => reqp(
+    return run((db) => reqp(
       db.transaction('tasks').objectStore('tasks').index('byDay').getAll(IDBKeyRange.only(day))
     )).then((arr) => {
       const m = merge28((arr || []).map(liftDong));
@@ -819,16 +860,16 @@
   }
 
   function getTask(id) {
-    return open().then((db) => reqp(db.transaction('tasks').objectStore('tasks').get(id)))
+    return run((db) => reqp(db.transaction('tasks').objectStore('tasks').get(id)))
       .then(liftDong);
   }
 
   /* 기록 삭제와 같은 규칙: 다른 데서 안 쓰는 사진만 지운다 */
   function deleteTask(id) {
-    return Promise.all([
-      open().then((db) => reqp(db.transaction('tasks').objectStore('tasks').getAll())),
-      open().then((db) => reqp(db.transaction('records').objectStore('records').getAll()))
-    ]).then((res) => {
+    return run((db) => Promise.all([
+      reqp(db.transaction('tasks').objectStore('tasks').getAll()),
+      reqp(db.transaction('records').objectStore('records').getAll())
+    ])).then((res) => {
       const tasks = res[0] || [], recs = res[1] || [];
       const target = tasks.filter((t) => t.id === id)[0];
       const mine = (target && target.photos) || [];
@@ -849,13 +890,92 @@
     return Promise.resolve(null);
   }
 
+  /* ---------- 자동 백업 (마지막 안전판) ----------
+     IndexedDB 가 통째로 날아가는 사고(웹뷰 프로필 손상·저장소 정리 등)에 대비해
+     작업 메타 전부를 localStorage 에 하루 한 번 떠 둔다. 저장 계층이 달라 같이 죽는 일이 드물다.
+     사진(Blob)은 못 담는다 — 동·날짜·감리·강도값(sets)이 살면 일은 이어 갈 수 있다. */
+  const K_BAK = 'gsc.tasks.backup.v1';
+  const K_BAK2 = 'gsc.tasks.backup.prev.v1';   // 건수가 줄 때 한 세대 보관 — 부분 유실 대비
+
+  function taskCount() {
+    return run((db) => reqp(db.transaction('tasks').objectStore('tasks').count()));
+  }
+
+  function allTasks() {
+    return run((db) => reqp(db.transaction('tasks').objectStore('tasks').getAll()))
+      .then((arr) => (arr || []).map(liftDong));
+  }
+
+  function bakInfo(key) {
+    try {
+      const j = JSON.parse(localStorage.getItem(key));
+      return (j && Array.isArray(j.tasks) && j.tasks.length) ? j : null;
+    } catch (e) { return null; }
+  }
+  function backupInfo() { return bakInfo(K_BAK); }
+
+  function backupNow() {
+    return run((db) => reqp(db.transaction('tasks').objectStore('tasks').getAll()))
+      .then((rows) => {
+        rows = rows || [];
+        if (!rows.length) return 0;          // 빈 DB 로 멀쩡한 백업을 덮지 않는다
+        try {
+          const prev = backupInfo();
+          // 건수가 백업보다 줄었다 = 부분 유실일 수 있다 — 좋은 백업을 그냥 덮지 말고
+          // 한 세대 옆에 보관한다(감사 지적: 완전 증발만 막고 부분 유실은 못 막던 구멍)
+          if (prev && rows.length < prev.n) {
+            localStorage.setItem(K_BAK2, localStorage.getItem(K_BAK));
+          }
+          localStorage.setItem(K_BAK, JSON.stringify({
+            at: Date.now(), day: U.dayKey(Date.now()), n: rows.length, tasks: rows
+          }));
+        } catch (e) { return 0; }            // 용량 초과 등 — 백업은 보조라 조용히 넘어간다
+        return rows.length;
+      }).catch(() => 0);
+  }
+
+  /* 하루 한 번만 뜬다 — 부팅 때 불러도 부담이 없다 */
+  function backupDaily() {
+    const info = backupInfo();
+    if (info && info.day === U.dayKey(Date.now())) return Promise.resolve(0);
+    return backupNow();
+  }
+
+  /* 복원 — 사진 스토어도 같이 날아간 경우, 죽은 사진 id 가 남아 있으면
+     사진 0장짜리 작업이 「완료」로 위장한다(isDone 이 개수만 본다 — 감사 지적).
+     실존하는 사진 id 만 남기고 복원한다. */
+  function restoreBackup() {
+    const info = backupInfo() || bakInfo(K_BAK2);
+    if (!info) return Promise.resolve(0);
+    return run((db) => reqp(db.transaction('photos').objectStore('photos').getAllKeys()))
+      .catch(() => [])
+      .then((keys) => {
+        const live = Object.create(null);
+        (keys || []).forEach((k) => { live[k] = 1; });
+        const wash = (a) => (a || []).filter((id) => live[id]);
+        return Promise.all(info.tasks.map((t) => {
+          let c;
+          try { c = JSON.parse(JSON.stringify(t)); } catch (e) { return null; }
+          c.photos = wash(c.photos);
+          if (c.sub) Spec.SUBS.forEach((s) => {
+            if (c.sub[s.key]) c.sub[s.key].photos = wash(c.sub[s.key].photos);
+          });
+          return putTask(c).catch(() => null);
+        }));
+      })
+      .then((rs) => rs.filter(Boolean).length);
+  }
+
   global.Store = {
     open: open,
     putPhoto: putPhoto, getPhoto: getPhoto, getPhotos: getPhotos, deletePhotos: deletePhotos,
     putRecord: putRecord, getRecord: getRecord, allRecords: allRecords, deleteRecord: deleteRecord,
     putTodo: putTodo, todosOf: todosOf, deleteTodo: deleteTodo,
     putTask: putTask, tasksOf: tasksOf, getTask: getTask, deleteTask: deleteTask,
+    allTasks: allTasks,
     normalizeSets: normalizeSets,
+    taskCount: taskCount, backupInfo: backupInfo, backupNow: backupNow,
+    backupDaily: backupDaily, restoreBackup: restoreBackup,
     gc: gc, estimate: estimate
   };
 })(window);
@@ -1745,21 +1865,41 @@
       const dates = datesIn(text);
       // 날짜를 지우고 나서 재령을 찾는다 — "…-07-09" 꼬리가 "9일" 로 오독되는 걸 막는다
       const rest = text.replace(/(20\d{2})\s*[-./년]\s*\d{1,2}\s*[-./월]\s*\d{1,2}\s*일?/g, ' ');
-      const dm = rest.match(/(\d{2,3})\s*동/);
+      // 동은 여러 개일 수 있다 — "218동,208동,219동" (동 칸 하나에 나열).
+      // 연이은 「N동」 무리를 통째로 잡는다. 위치 칸이 같은 동을 되풀이해도 중복 제거로 접힌다.
+      const dm = rest.match(/(\d{2,3})\s*동(?:\s*[,，·]?\s*\d{2,3}\s*동)*/);
+      if (!dm || !dates.length) return;
+      const uniq = [];
+      (dm[0].match(/\d{2,3}(?=\s*동)/g) || []).forEach((d) => {
+        if (uniq.indexOf(d) < 0) uniq.push(d);
+      });
+      if (!uniq.length) return;
+      const dong = uniq.map((d) => d + '동').join(', ');
+      const dongMain = uniq[0] + '동';            // 담당 감리는 첫 동 기준(사용자 지시)
+
       const am = rest.match(/(?:^|[^\dF.\-])(\d{1,2})\s*일/);   // "28F바닥" 의 F 뒤는 제외
-      if (!dm || !am || !dates.length) return;
+      let age = am ? +am[1] : null;
+      let specKey = (age != null) ? AGE2SPEC[age] : null;
+      if (am && !specKey) return;                 // 재령이 적혀 있는데 모르는 값 — 만들지 않는다
 
-      const age = +am[1];
-      const specKey = AGE2SPEC[age];
-      if (!specKey) return;                       // 모르는 재령은 만들지 않는다
-
-      const dong = dm[1] + '동';
       dates.sort();
       let castDay = dates[0];
       let testDay = dates[dates.length - 1];
       let derived = false;
-      if (castDay === testDay && dates.length === 1) {
-        // 날짜가 하나면 타설일로 보고 시험일을 규칙으로 만든다
+
+      if (!am) {
+        // 재령 칸이 아예 없는 양식(필러 일정표 실측 — 날짜 두 칸이 둘 다 타설일이라 같다).
+        // 날짜 간격으로만 판정하고, 그 밖의 간격은 만들지 않는다(모르는 건 안 만든다).
+        const gap = Math.round((new Date(testDay) - new Date(castDay)) / 86400000);
+        if (gap === 0) age = 10;                       // 같은 날짜 = 필러 양식
+        else if (gap === 10 || gap === 11) age = 10;   // 일요일 이월 +1 허용
+        else if (gap === 28 || gap === 29) age = 28;   // 28일 표에서 재령 칸만 놓친 행
+        else return;
+        specKey = AGE2SPEC[age];
+      }
+
+      if (castDay === testDay) {
+        // 날짜가 하나(또는 같은 날짜 두 번 — 필러 양식)면 타설일로 보고 시험일을 규칙으로 만든다
         const t = Spec.testDayOf(new Date(castDay + 'T00:00:00'), age);
         testDay = U.dayKey(t.getTime());
         derived = true;
@@ -1771,7 +1911,7 @@
       const key = dong + '|' + specKey + '|' + castDay + '|' + testDay;
       if (seen[key]) return;                      // 같은 것이 여러 줄이면 하나만
       seen[key] = 1;
-      items.push({ dong: dong, specKey: specKey, age: age,
+      items.push({ dong: dong, dongMain: dongMain, specKey: specKey, age: age,
                    castDay: castDay, testDay: testDay,
                    derived: derived, offAge: offAge });
     });
@@ -2674,8 +2814,22 @@
     return Calc.statsOf((set && set.values) || [], set && set.factor);
   }
 
-  /* 값이 하나라도 들어 있는 세트만 — 빈 세트는 세지 않는다 */
-  function filledSets(t) { return setsOf(t).filter((s) => (s.values || []).length); }
+  /* 28일이면 수중·봉함 칸의 세트까지 통틀어 본다. t.sets 만 보면 d28 은 언제나 빈 것처럼
+     보인다 — AI 검수가 값이 멀쩡한 28일 작업마다 「강도값이 없습니다」를 내던 원인(감사 확인).
+     tag = 칸 이름(수중/봉함), 일반 작업은 ''. */
+  function allSets(t) {
+    if (!hasSubs(t)) return setsOf(t).map((s) => ({ set: s, tag: '' }));
+    const out = [];
+    Spec.SUBS.forEach((s) => {
+      Store.normalizeSets(subOf(t, s.key)).forEach((x) => out.push({ set: x, tag: s.name }));
+    });
+    return out;
+  }
+
+  /* 값이 하나라도 들어 있는 세트만 — 빈 세트는 세지 않는다. 28일은 두 칸 통틀어. */
+  function filledSets(t) {
+    return allSets(t).filter((p) => (p.set.values || []).length).map((p) => p.set);
+  }
 
   /* 목록 한 줄에 쓸 요약: 세트가 하나면 보정평균, 여럿이면 개수 */
   function setsBrief(t) {
@@ -2685,17 +2839,18 @@
     return '계산 ' + f.length + '세트';
   }
 
-  /* 카톡 등에 붙여넣을 한 줄 */
+  /* 카톡 등에 붙여넣을 한 줄. 28일은 수중/봉함 칸 이름을 앞에 붙인다 */
   function summary(t) {
     const s = Spec.byKey(t.specKey);
     const bits = [];
     bits.push('[' + (s ? s.name : '분류없음') + ']');
     if (t.part) bits.push(t.part);
-    const all = setsOf(t);
-    all.forEach((set, i) => {
-      const st = setStats(set);
+    const all = allSets(t);
+    all.forEach((p, i) => {
+      const st = setStats(p.set);
       if (!st.n) return;
-      const nm = (all.length > 1) ? (setName(set, i) + ' ') : '';
+      const nm = (p.tag ? p.tag + ' ' : '') +
+                 ((all.length > 1 && !p.tag) ? (setName(p.set, i) + ' ') : '');
       bits.push(nm + '보정평균 ' + U.fix2(st.corr) + ' N/mm²');
     });
     return bits.join(' ');
@@ -2850,7 +3005,7 @@
     testDayOf: testDayOf, dongText: dongText, dongOf: dongOf,
     hasSubs: hasSubs, subOf: subOf, subPhotos: subPhotos, pieces: pieces,
     pendingSubs: pendingSubs, doneNote: doneNote,
-    setsOf: setsOf, setName: setName, setStats: setStats,
+    setsOf: setsOf, allSets: allSets, setName: setName, setStats: setStats,
     filledSets: filledSets, setsBrief: setsBrief,
     actualAge: actualAge, label: label, summary: summary,
     autoReportDay: autoReportDay, reportDayOf: reportDayOf, exportLabel: exportLabel,
@@ -2916,8 +3071,9 @@
     try { localStorage.setItem(K_DIGITS, digits); } catch (e) {}
   }
 
-  /* 보정계수 문자열 → 숫자. 유효하지 않으면 NaN. 소수 4자리로 절단해
-     "화면 계수 × 화면 평균 = 화면 보정평균" 이 항상 성립하게 한다. */
+  /* 보정계수 문자열 → 숫자. 유효하지 않으면 NaN. 소수 4자리로 절단한다(입력 흔들림 방지).
+     ※ 보정평균은 「평균 × 계수」가 아니라 값별 보정 후 평균(corrOf)이다 —
+        화면의 평균 × 계수와 보정평균이 0.01 어긋나 보여도 그게 맞는 값이다. */
   function parseFactor(s) {
     const t = String(s == null ? '' : s).trim().replace(/,/g, '.');
     if (!/^\d*\.?\d*$/.test(t) || t === '' || t === '.') return NaN;
@@ -2973,6 +3129,21 @@
   }
 
   /* ---------- 통계 ---------- */
+
+  /* 보정평균 — 성적판에 손으로 적는 방식 그대로(사용자 지시):
+       ① 각 값 × 계수를 소수 셋째 자리에서 반올림(→ 두 자리)
+       ② 그 평균을 다시 셋째 자리에서 반올림
+     「평균 × 계수」 한 방과 0.01 차이가 날 수 있다 — 판(손계산)과 맞아야 하는 쪽은 이 방식이다.
+     AI 검수의 판 대조(audit.js)도 이 함수를 쓴다. */
+  function round2(x) { return Math.round(x * 100 + 1e-9) / 100; }
+  function corrOf(vals, fac) {
+    const n = (vals || []).length;
+    if (!n) return NaN;
+    let s = 0;
+    for (let i = 0; i < n; i++) s += round2(vals[i] * fac);
+    return round2(s / n);
+  }
+
   function stats() {
     const n = entries.length;
     if (!n) return { n: 0, factor: factor };
@@ -2990,7 +3161,8 @@
       for (let i = 0; i < n; i++) { const d = entries[i].v - avg; ss += d * d; }
       sd = Math.sqrt(ss / (n - 1));   // 표본표준편차
     }
-    return { n: n, sum: sum, avg: avg, min: min, max: max, sd: sd, factor: factor, corr: avg * factor };
+    return { n: n, sum: sum, avg: avg, min: min, max: max, sd: sd, factor: factor,
+             corr: corrOf(entries.map((e) => e.v), factor) };
   }
 
   /* ---------- 렌더 ---------- */
@@ -3397,24 +3569,29 @@
       items.push({ sep: true });
       tasks.forEach((t) => {
         const had = Task.filledSets(t).length;
-        items.push({
-          label: Task.label(t) + ' · ' + (t.dong || '동 미지정'),
+        const mk = (subKey, subName) => ({
+          label: Task.label(t) + (subName ? ' ' + subName : '') + ' · ' + (t.dong || '동 미지정'),
           // 덮어쓰지 않는다 — 세트를 하나 더 붙인다(회사·LOT 가 여러 개인 경우)
           sub: had ? ('계산 세트 ' + had + '개 있음 → 새 세트로 추가') : (t.supervisor || '첫 세트로 들어갑니다'),
-          onPick: () => putInto(t)
+          onPick: () => putInto(t, subKey)
         });
+        if (Task.hasSubs(t)) {
+          // 28일은 값이 수중/봉함 칸에 나뉘어 산다 — 칸을 안 물으면 putTask 가
+          // t.sets 를 통째로 버려 값이 증발한다(감사에서 확인된 실경로). 칸별로 내놓는다.
+          Spec.SUBS.forEach((s) => items.push(mk(s.key, s.name)));
+        } else {
+          items.push(mk('', ''));
+        }
       });
     }
 
     U.sheet('계산값 ' + entries.length + '개를 어디에 넣을까요?', items);
   }
 
-  async function putInto(t) {
+  async function putInto(t, subKey) {
     const n = entries.length;
-    t.sets = Task.setsOf(t).concat([
-      { id: U.uid(), name: '', values: entries.slice(), factor: factor }
-    ]);
-    delete t.values; delete t.factor;
+    // writeSet 이 28일(sub 칸)과 일반 작업을 모두 안다 — 직접 t.sets 를 만지면 d28 에서 증발한다
+    writeSet(t, entries.slice(), factor, null, subKey || '');
     try { await Store.putTask(t); }
     catch (e) { console.error(e); U.toast('저장하지 못했습니다'); return; }
     entries = []; digits = ''; save(); render();
@@ -3561,14 +3738,15 @@
       for (let i = 0; i < n; i++) { const d = entries[i].v - avg; ss += d * d; }
       sd = Math.sqrt(ss / (n - 1));
     }
-    return { n: n, sum: sum, avg: avg, min: min, max: max, sd: sd, factor: fac, corr: avg * fac };
+    return { n: n, sum: sum, avg: avg, min: min, max: max, sd: sd, factor: fac,
+             corr: corrOf((entries || []).map((e) => e.v), fac) };
   }
 
   global.Calc = {
     init: init,
     summaryText: summaryText,
     stats: stats,
-    statsOf: statsOf,
+    statsOf: statsOf, corrOf: corrOf,
     linkTo: linkTo, addValues: addValues, unlink: unlink,
     fit: fit,
     digitsToValue: digitsToValue,
@@ -3606,13 +3784,16 @@
   const isToday = () => Spec.sameDay(base, new Date());
 
   /* ---------------- 데이터 ---------------- */
+  let loadFail = false;      // 읽기 실패를 "작업 없음"과 구별해 보여준다
+
   async function load() {
     // 날짜를 빠르게 넘기면 먼저 시작한 조회가 나중에 끝나 새 날짜 목록을 덮어쓴다.
     // 조회 시작 시점의 날짜를 붙들고, 그 사이 바뀌었으면 결과를 버린다.
     const want = U.dayKey(base.getTime());
-    let rows = [];
-    try { rows = await Store.tasksOf(want); } catch (e) { console.error(e); }
+    let rows = [], fail = false;
+    try { rows = await Store.tasksOf(want); } catch (e) { console.error(e); fail = true; }
     if (want !== U.dayKey(base.getTime())) return;      // 지나간 조회 — 버린다
+    loadFail = fail;
     all = rows;
     const alive = Object.create(null);
     all.forEach((t) => { alive[t.id] = 1; });
@@ -3672,9 +3853,11 @@
 
     if (!rows.length) {
       list.innerHTML = '';
-      emptyNode.innerHTML = all.length
-        ? '조건에 맞는 작업이 없습니다.'
-        : '이 날짜에 작업이 없습니다.<br>오른쪽 위 <b>+</b> 로 등록하세요.';
+      emptyNode.innerHTML = loadFail
+        ? '목록을 불러오지 못했습니다.<br>위 날짜를 탭하면 다시 시도합니다.'
+        : (all.length
+          ? '조건에 맞는 작업이 없습니다.'
+          : '이 날짜에 작업이 없습니다.<br>오른쪽 위 <b>+</b> 로 등록하세요.');
       list.appendChild(emptyNode);
       updateBar();
       return;
@@ -4019,6 +4202,18 @@
 
   /* ---------------- 열기 ---------------- */
   function open(task, dayKey) {
+    // 목록이 들고 있던 사본은 그 사이의 저장(계산기 연결 저장 등)보다 낡았을 수 있다.
+    // 낡은 사본을 편집해 저장하면 최신 저장이 조용히 되돌아간다 — id 가 있으면 새로 읽는다.
+    if (task && task.id) {
+      Store.getTask(task.id)
+        .then((fresh) => openNow(fresh || task, dayKey))
+        .catch(() => openNow(task, dayKey));
+      return;
+    }
+    openNow(task, dayKey);
+  }
+
+  function openNow(task, dayKey) {
     tk = task ? JSON.parse(JSON.stringify(task)) : Task.draft(dayKey);
     dirty = false;
     $('#tk-heading').textContent = task ? '작업' : '새 작업';
@@ -4447,9 +4642,13 @@
   /* 작업을 먼저 저장해 id 를 확보한 뒤 계산 탭을 그 세트에 연결한다 */
   async function openCalc(setId) {
     if (!tk) return;
+    // await 너머에서 tk(다른 작업 열기)와 curSub(수중/봉함 탭 전환)가 바뀔 수 있다.
+    // 바뀐 curSub 로 반대편 칸을 뒤지면 엉뚱한 세트에 연결돼 실측값을 덮어쓴다(감사 확인).
+    const owner = tk;
+    const sub = Task.hasSubs(tk) ? curSub : '';
     const rec = await save(true);
     if (!rec) { U.toast('작업을 저장하지 못했습니다'); return; }
-    const sub = Task.hasSubs(rec) ? curSub : '';
+    if (tk !== owner) return;          // 저장 사이 다른 작업으로 갈아탔다 — 건드리지 않는다
     const sets = sub ? Store.normalizeSets(Task.subOf(rec, sub)) : Task.setsOf(rec);
     let idx = sets.findIndex((s) => s.id === setId);
     if (idx < 0) idx = sets.length - 1;
@@ -4512,9 +4711,17 @@
     });
   }
 
+  /* 처리 중인(아직 어느 작업에도 저장 안 된) 사진 id.
+     doSave 의 gc 가 이걸 모르면 방금 찍은 사진을 미참조로 오인해 지운다(감사에서 확인된 레이스).
+     gc 를 부르는 쪽은 반드시 이 목록을 보호 목록에 합친다. */
+  const pendingIds = [];
+  function unpend(id) { const i = pendingIds.indexOf(id); if (i >= 0) pendingIds.splice(i, 1); }
+
   async function addFiles(fileList) {
     if (!tk) return;
     const owner = tk;
+    // 그릇도 지금 스냅샷 — 처리 중 수중/봉함 탭이 바뀌어도 시작한 칸에 붙인다(감사 확인)
+    const box = bag();
     const files = Array.prototype.slice.call(fileList || []).filter((f) => f && f.size);
     if (!files.length) return;
 
@@ -4522,13 +4729,15 @@
     let ok = 0, fail = 0, aborted = false;
     try {
       for (const f of files) {
-        let id = null;
+        const id = U.uid();
+        pendingIds.push(id);           // putPhoto 커밋 전에 등록 — gc 와의 틈을 없앤다
         try {
           const img = await U.processImage(f, { maxSide: 1600, thumbSide: 320, quality: 0.82 });
-          id = await Store.putPhoto(img);
-        } catch (e) { console.error('[photo]', e); fail++; continue; }
-        if (tk !== owner) { aborted = true; Store.deletePhotos([id]).catch(() => {}); break; }
-        bag().photos.push(id); dirty = true; ok++;
+          await Store.putPhoto(Object.assign({ id: id }, img));
+        } catch (e) { console.error('[photo]', e); fail++; unpend(id); continue; }
+        if (tk !== owner) { aborted = true; unpend(id); Store.deletePhotos([id]).catch(() => {}); break; }
+        box.photos.push(id); dirty = true; ok++;
+        unpend(id);                    // 그릇에 들어갔다 — 이제부터는 photoIdsOf 가 지킨다
       }
       if (tk === owner) { await renderPhotos(); renderSubTabs(); }
     } finally {
@@ -4559,6 +4768,19 @@
     return p;
   }
 
+  /* 이 작업이 들고 있는 사진 id 전부(28일은 수중·봉함 칸 포함) — gc 보호 목록용.
+     owner.photos 스냅샷만 쓰면 d28 칸 사진과 방금 push 된 사진이 빠진다. */
+  function photoIdsOf(t) {
+    if (!t) return [];
+    const out = (t.photos || []).slice();
+    if (t.sub) Spec.SUBS.forEach((s) => {
+      (((t.sub[s.key] || {}).photos) || []).forEach((id) => {
+        if (out.indexOf(id) < 0) out.push(id);
+      });
+    });
+    return out;
+  }
+
   async function doSave(silent) {
     if (!tk) return null;
     collect();
@@ -4568,14 +4790,14 @@
     let rec;
     try { rec = await Store.putTask(owner); }
     catch (e) { console.error(e); U.toast('저장하지 못했습니다'); return null; }
-    const keep = (owner.photos || []).slice();
     owner.id = rec.id; owner.createdAt = rec.createdAt;
     if (tk === owner) {
       dirty = false;
       $('#tk-heading').textContent = '작업';
       $('#tk-delete').classList.remove('hidden');
     }
-    Store.gc(keep);
+    // 보호 목록은 저장 뒤 **지금** 다시 모은다 — 저장 사이에 붙은 사진과 처리 중 사진까지 지킨다
+    Store.gc(photoIdsOf(owner).concat(pendingIds));
     refreshLists();
     if (!silent) U.toast('저장했습니다');
     return rec;
@@ -4600,14 +4822,14 @@
     collect();
     const empty = !tk.id && !tk.part && !tk.supervisor &&
                   !anyPhoto() && !anyValue();
-    if (empty || !dirty) { tk = null; Nav.showTask(false); Store.gc([]); return; }
+    if (empty || !dirty) { tk = null; Nav.showTask(false); Store.gc(pendingIds.slice()); return; }
     U.sheet('저장하지 않은 변경이 있습니다', [
       { label: '저장하고 나가기', cls: 'strong', onPick: async () => {
           const r = await save(true);
           if (r) { tk = null; Nav.showTask(false); U.toast('저장했습니다'); }
         } },
       { label: '저장하지 않고 나가기', cls: 'danger', onPick: () => {
-          tk = null; Nav.showTask(false); Store.gc([]);
+          tk = null; Nav.showTask(false); Store.gc(pendingIds.slice());
         } }
     ]);
   }
@@ -5035,9 +5257,10 @@
     }
 
     // 판 자체의 손계산이 틀린 경우 (앱과 무관하게 판만 봐도 안 맞는다)
+    // 판과 같은 방식으로 계산해야 공정하다 — 값별 보정 후 평균(Calc.corrOf)
     if (hasNums && hasCorr) {
       const fac = num(r.factor) !== null && r.factor > 0 ? r.factor : Calc.DEFAULT_FACTOR;
-      const want = (nums.reduce((s, v) => s + v, 0) / nums.length) * fac;
+      const want = Calc.corrOf(nums, fac);
       if (!same2(want, r.corr)) {
         out.push({ level: 'bad', fromPhoto: true,
           text: '판에 적힌 보정평균이 계산과 안 맞습니다 — 적힘 ' + U.fix2(r.corr) +
@@ -5971,13 +6194,16 @@
       }
 
       // 이미 있는 작업과 겹치면 건너뛴다 (동·분류·타설일이 같으면 같은 작업으로 본다)
+      // 동이 여러 개인 행은 첫 동 기준으로 본다 — Task.dongOf 도 첫 「N동」만 뽑으므로 짝이 맞는다
+      // 날짜 버킷(tasksOf)으로 조회하면 목록날짜≠시험일인 「가라」 작업을 놓친다(감사 지적)
+      // → 전체와 대조한다. 동·분류·타설일 셋이 같으면 날짜와 무관하게 같은 타설이다.
+      let existing = [];
+      try { existing = await Store.allTasks(); } catch (e) {}
       const fresh = [];
       let dup = 0;
       for (const it of parsed.items) {
-        let rows = [];
-        try { rows = await Store.tasksOf(it.testDay); } catch (e) {}
-        const exists = rows.some((t) =>
-          Task.dongOf(t) === it.dong && t.specKey === it.specKey &&
+        const exists = existing.some((t) =>
+          Task.dongOf(t) === (it.dongMain || it.dong) && t.specKey === it.specKey &&
           (t.castDay || '') === it.castDay);
         if (exists) dup++; else fresh.push(it);
       }
@@ -6000,7 +6226,8 @@
         let ok = 0;
         for (const it of fresh) {
           // 동을 알면 담당 감리도 따라온다 (둘 이상이면 비워 둔다 — 짐작하지 않는다)
-          const sups = Contacts.byDong(it.dong);
+          // 동이 여러 개면 **첫 동 담당 감리가 전부 맡는다**(사용자 지시)
+          const sups = Contacts.byDong(it.dongMain || it.dong);
           const sup = (sups.length === 1) ? sups[0] : null;
           try {
             await Store.putTask({
@@ -6081,9 +6308,9 @@
 (function (global) {
   'use strict';
 
-  /* 근무 시간 (분 단위) */
+  /* 근무 시간 (분 단위) — 오전은 11:30 까지(사용자 지시) */
   const SHIFTS = [
-    { name: '오전근무', from: 7 * 60, to: 11 * 60 },
+    { name: '오전근무', from: 7 * 60, to: 11 * 60 + 30 },
     { name: '오후근무', from: 13 * 60, to: 17 * 60 }
   ];
 
@@ -6299,17 +6526,30 @@
   }
 
   /* ---------------- 작업 ---------------- */
+  let taskSeq = 0;      // 낡은 조회가 최신 목록을 덮지 않게 (작업 탭 load 와 같은 가드)
+
   async function renderTasks() {
+    const my = ++taskSeq;
     const list = U.$('#task-list');
     const day = U.dayKey(base.getTime());
     if (!emptyNode) emptyNode = U.el('p', 'todo-empty', '등록된 작업이 없습니다');
 
     U.$('#task-title').textContent = (isToday() ? '오늘' : Spec.shortDate(base)) + ' 작업';
 
-    let tasks = [];
-    try { tasks = await Task.list(day); } catch (e) { console.error(e); }
+    let tasks = [], failed = false;
+    try { tasks = await Task.list(day); } catch (e) { console.error(e); failed = true; }
+    if (my !== taskSeq) return;      // 그 사이 날짜가 또 바뀌었다 — 지나간 조회는 버린다
 
     list.innerHTML = '';
+    // 읽기 실패를 "작업 없음"으로 보여주면 데이터가 다 날아간 걸로 오인한다(실제 사고).
+    // 실패는 실패라고 말하고, 탭 한 번으로 다시 읽게 한다.
+    if (failed) {
+      U.$('#task-count').textContent = '–';
+      const err = U.el('p', 'todo-empty', '목록을 불러오지 못했습니다 — 탭해서 다시 시도');
+      err.addEventListener('click', () => renderTasks());
+      list.appendChild(err);
+      return;
+    }
     const c = Task.counts(tasks);
     U.$('#task-count').textContent = c.done + '/' + c.all;
     if (!tasks.length) { list.appendChild(emptyNode); return; }
@@ -6555,6 +6795,29 @@
     if (navigator.storage && navigator.storage.persist) {
       try { navigator.storage.persist(); } catch (e) {}
     }
+
+    // 데이터 안전판 — 부팅이 자리 잡은 뒤에(1.5초) 하루 한 번 작업 메타를 백업한다.
+    // DB 는 비었는데 백업이 남아 있으면(증발 사고) 그냥 덮지 말고 복원을 권한다.
+    setTimeout(() => {
+      Store.taskCount().then((n) => {
+        const bak = Store.backupInfo();
+        if (!n && bak) {
+          // 사용자가 이미 다른 시트를 보고 있으면 치환하지 않는다(잘못 누름 방지).
+          // DB 가 빈 상태면 다음 부팅에 다시 제안된다.
+          if (!U.$('#sheet-back').classList.contains('hidden')) return;
+          U.confirmSheet(
+            '저장된 작업이 하나도 없는데\n' + U.dayLabel(bak.at) + ' 백업(' + bak.n + '건)이 있습니다\n' +
+            '복원할까요? (사진은 복원되지 않습니다)', '복원',
+            async () => {
+              const k = await Store.restoreBackup();
+              U.toast('작업 ' + k + '건을 복원했습니다');
+              try { Home.refresh(); } catch (e) {}
+            });
+          return;
+        }
+        Store.backupDaily();
+      }).catch(() => {});
+    }, 1500);
   }
 
   if (document.readyState === 'loading') {
