@@ -3949,7 +3949,7 @@
   /* ---------- 랜덤값 채우기 (beta) ----------
      입력된 값을 기준으로 비슷한 값을 만들어 3개(한 세트) 또는 9개(판 전체)까지 채운다.
      직접 입력한 **마지막 값은 항상 맨 끝자리**(3번 또는 9번)로 옮긴다(사용자 지시).
-     퍼짐: 입력값들의 표본편차(1개뿐이면 값의 약 0.6%), 최소 0.15 — 판에 적힌 값처럼 흩어진다. */
+     퍼짐: 입력값들의 표본편차(1개뿐이면 값의 1.5%), 최소 0.35 — 판에 적힌 값처럼 흩어진다. */
   function fillRandom(target) {
     const n = entries.length;
     if (!n) { U.toast('기준이 될 값을 먼저 입력하세요'); return; }
@@ -3958,12 +3958,14 @@
       return;
     }
     const s = stats();
+    // 퍼짐: 입력값들의 표본편차(1개뿐이면 값의 1.5%), 최소 0.35.
+    // 처음(±1.5×0.15)엔 값들이 너무 몰렸다(사용자 피드백) — 전형 편차가 spread 수준이 되게 ×3.
     const spread = Math.max(
-      (s.sd != null && isFinite(s.sd)) ? s.sd : s.avg * 0.006, 0.15);
+      (s.sd != null && isFinite(s.sd)) ? s.sd : s.avg * 0.015, 0.35);
     const made = [];
     for (let i = target - n; i > 0; i--) {
       // 균등난수 둘의 합 → 가운데가 두터운 종 모양 (자연스러운 흩어짐)
-      const jitter = ((Math.random() + Math.random()) - 1) * spread * 1.5;
+      const jitter = ((Math.random() + Math.random()) - 1) * spread * 3;
       const v = Math.round(Math.max(0.01, Math.min(MAX_VALUE, s.avg + jitter)) * 100) / 100;
       const e = normalizeEntry({ v: v, r: 1 });   // r = 랜덤 표식 — 칩이 색으로 구분된다
       if (e) made.push(e);
@@ -4227,7 +4229,6 @@
     U.$('#btn-clear').addEventListener('click', clearAll);
     U.$('#btn-fill3').addEventListener('click', () => fillRandom(3));
     U.$('#btn-fill9').addEventListener('click', () => fillRandom(9));
-    U.$('#btn-attach').addEventListener('click', attachToRecord);
 
     U.$('#calc-menu-btn').addEventListener('click', () => {
       U.sheet('계산 옵션', [
