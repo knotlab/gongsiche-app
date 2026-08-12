@@ -528,13 +528,73 @@
   }
 
   /* ---------------- photos ----------------
-     네이티브(안드로이드)에서는 원본(full)을 IndexedDB 가 아니라 **앱 데이터 파일**로 둔다
+     네이티브(안드로이드): 원본(full)을 IndexedDB 가 아니라 **앱 데이터 파일**로 둔다
      (rec.file=1, 파일은 photos/<id>.jpg). IndexedDB 가 통째로 날아가는 사고에서 원본이 살고,
-     DB 가 가벼워져 손상·축출 압박도 준다. 웹(PWA)은 기존대로 blob 을 DB 에 둔다. */
-  const K_FSFLAG = 'gsc.photos.fs.v1';   // 'done' = 기존 blob 사진의 파일 이전 완료
+     DB 가 가벼워져 손상·축출 압박도 준다.
+     웹(아이폰 PWA): WebKit 은 IDB 의 **Blob 을 별도 파일로 빼서** 저장하다 그 파일만 잃는다
+     — "레코드는 살고 사진만 증발"의 실사고 원인(조사 확정). Blob 저장을 피한다:
+     원본은 OPFS 파일로(지원 시), 안 되면 ArrayBuffer 인라인. 썸네일은 항상 ArrayBuffer. */
+  const K_FSFLAG = 'gsc.photos.fs.v1';   // 'done' = 기존 blob 사진의 이전 완료
 
   function photoFsOk() {
     return !!(global.Native && Native.photoFsOk && Native.photoFsOk());
+  }
+
+  /* ---- OPFS (웹 전용 사진 파일 저장소) ---- */
+  function opfsDir() {
+    if (!(navigator.storage && navigator.storage.getDirectory)) return Promise.resolve(null);
+    return navigator.storage.getDirectory()
+      .then((root) => root.getDirectoryHandle('photos', { create: true }))
+      .catch(() => null);
+  }
+  async function opfsWrite(id, blob) {
+    const dir = await opfsDir();
+    if (!dir) throw new Error('NOOPFS');
+    const fh = await dir.getFileHandle(id + '.jpg', { create: true });
+    if (!fh.createWritable) throw new Error('NOWRITABLE');   // 구형 사파리 — ArrayBuffer 로 폴백
+    const w = await fh.createWritable();
+    await w.write(blob);
+    await w.close();
+  }
+  async function opfsRead(id) {
+    try {
+      const dir = await opfsDir();
+      if (!dir) return null;
+      const fh = await dir.getFileHandle(id + '.jpg');
+      return await fh.getFile();
+    } catch (e) { return null; }
+  }
+  function opfsRemove(ids) {
+    opfsDir().then((dir) => {
+      if (!dir) return;
+      (ids || []).forEach((id) => { dir.removeEntry(id + '.jpg').catch(() => {}); });
+    }).catch(() => {});
+  }
+
+  /* 저장 형식(ArrayBuffer/OPFS)을 읽는 쪽이 몰라도 되게 Blob 으로 되살린다 */
+  function hydratePhoto(p) {
+    if (!p) return p;
+    if (p.thumbBuf && !p.thumb) p.thumb = new Blob([p.thumbBuf], { type: p.thumbType || 'image/jpeg' });
+    if (p.fullBuf && !p.full) p.full = new Blob([p.fullBuf], { type: p.fullType || 'image/jpeg' });
+    return p;
+  }
+
+  /* 웹 저장용 레코드 만들기 — Blob 을 남기지 않는다 */
+  async function webPhotoRec(base, p) {
+    const rec = Object.assign({}, base);
+    delete rec.thumb;
+    try {
+      if (p.thumb) { rec.thumbBuf = await p.thumb.arrayBuffer(); rec.thumbType = p.thumb.type || 'image/jpeg'; }
+    } catch (e) { rec.thumb = p.thumb; }
+    if (p.full) {
+      let stored = false;
+      try { await opfsWrite(rec.id, p.full); rec.opfs = 1; stored = true; } catch (e) {}
+      if (!stored) {
+        try { rec.fullBuf = await p.full.arrayBuffer(); rec.fullType = p.full.type || 'image/jpeg'; }
+        catch (e) { rec.full = p.full; }   // 최후 폴백 — 예전 방식(Blob)
+      }
+    }
+    return rec;
   }
 
   function putPhoto(p) {
@@ -561,21 +621,29 @@
         })
         .then(() => id);
     }
-    return tx(['photos'], 'readwrite', (t) => {
-      t.objectStore('photos').put(Object.assign({ full: p.full }, base));
-    }).then(() => id);
+    // 웹(PWA) — Blob 대신 OPFS/ArrayBuffer
+    return webPhotoRec(base, p)
+      .then((rec) => tx(['photos'], 'readwrite', (t) => { t.objectStore('photos').put(rec); })
+        .catch((e) => {
+          if (rec.opfs) opfsRemove([id]);   // DB 실패 시 OPFS 고아 방지
+          throw e;
+        }))
+      .then(() => id);
   }
 
-  /* 사진 원본 blob — DB 에 있으면 그대로, 파일이면 읽어 온다. 없으면 null */
+  /* 사진 원본 blob — 인라인(Blob/ArrayBuffer)·앱 파일·OPFS 어디에 있든 Blob 으로 돌려준다 */
   function fullBlob(p) {
     if (!p) return Promise.resolve(null);
     if (p.full) return Promise.resolve(p.full);
+    if (p.fullBuf) return Promise.resolve(new Blob([p.fullBuf], { type: p.fullType || 'image/jpeg' }));
     if (p.file && global.Native && Native.photoRead) return Native.photoRead(p.id);
+    if (p.opfs) return opfsRead(p.id);
     return Promise.resolve(null);
   }
 
   function getPhoto(id) {
-    return run((db) => reqp(db.transaction('photos').objectStore('photos').get(id)));
+    return run((db) => reqp(db.transaction('photos').objectStore('photos').get(id)))
+      .then(hydratePhoto);
   }
 
   /* 빈 id 가 하나만 섞여도 IndexedDB 는 DataError 를 던진다.
@@ -590,7 +658,7 @@
         try { return reqp(st.get(id)).catch(() => null); }
         catch (e) { return Promise.resolve(null); }
       }));
-    }).then((arr) => arr.filter(Boolean));
+    }).then((arr) => arr.filter(Boolean).map(hydratePhoto));
   }
 
   function deletePhotos(ids) {
@@ -599,8 +667,9 @@
       const st = t.objectStore('photos');
       ids.forEach((id) => st.delete(id));
     }).then(() => {
-      // 파일로 옮겨진 원본도 같이 지운다 (없으면 조용히 넘어간다)
+      // 파일(앱 데이터·OPFS)로 옮겨진 원본도 같이 지운다 (없으면 조용히 넘어간다)
       if (global.Native && Native.photoRemove) Native.photoRemove(ids);
+      opfsRemove(ids);
     });
   }
 
@@ -686,7 +755,10 @@
       rs.onsuccess = ready;
       ts.onsuccess = ready;
     }).then(() => {
-      if (orphan.length && global.Native && Native.photoRemove) Native.photoRemove(orphan);
+      if (orphan.length) {
+        if (global.Native && Native.photoRemove) Native.photoRemove(orphan);
+        opfsRemove(orphan);
+      }
     });
   }
 
@@ -720,7 +792,10 @@
       ts.onsuccess = ready;
       ks.onsuccess = ready;
     }).then(() => {
-      if (dead.length && global.Native && Native.photoRemove) Native.photoRemove(dead);
+      if (dead.length) {
+        if (global.Native && Native.photoRemove) Native.photoRemove(dead);
+        opfsRemove(dead);
+      }
       return dead.length;
     }).catch(() => 0);
   }
@@ -855,10 +930,53 @@
     };
   }
 
+  /* ---------- 상시 미러 (근본 예방 — 조사 결론) ----------
+     웹뷰의 IndexedDB 는 손상 시 통삭제·저장공간 축출을 앱이 못 막는다
+     (persist() 는 웹뷰에서 무력 — 크로미움 팀 확인). 그래서 작업 전체의 진실 사본을
+     **웹뷰 밖**에 상시 유지한다:
+       네이티브 = SharedPreferences (OS 가 fsync+원자 교체를 보장하는 AtomicFile 패턴)
+       웹      = localStorage (실사고에서 IndexedDB 와 달리 생존한 별도 계층)
+     쓰기마다 800ms 디바운스로 전체를 미러링하고, 복원 때 1순위로 쓴다. */
+  const K_MIRROR = 'gsc.tasks.mirror.v1';
+  let mirrorTimer = null;
+
+  function mirrorSoon() {
+    clearTimeout(mirrorTimer);
+    mirrorTimer = setTimeout(() => {
+      run((db) => reqp(db.transaction('tasks').objectStore('tasks').getAll()))
+        .then((rows) => {
+          rows = rows || [];
+          if (!rows.length) return;              // 빈 DB 로 미러를 덮지 않는다
+          const body = JSON.stringify({
+            at: Date.now(), day: U.dayKey(Date.now()), n: rows.length, tasks: rows
+          });
+          if (global.Native && Native.prefOk && Native.prefOk()) {
+            return Native.prefSet(K_MIRROR, body);
+          }
+          try { localStorage.setItem(K_MIRROR, body); } catch (e) {}
+        })
+        .catch(() => {});
+    }, 800);
+  }
+
+  function mirrorInfo() {
+    const parse = (s) => {
+      try {
+        const j = JSON.parse(s);
+        return (j && Array.isArray(j.tasks) && j.tasks.length) ? j : null;
+      } catch (e) { return null; }
+    };
+    if (global.Native && Native.prefOk && Native.prefOk()) {
+      return Native.prefGet(K_MIRROR).then(parse).catch(() => null);
+    }
+    try { return Promise.resolve(parse(localStorage.getItem(K_MIRROR))); }
+    catch (e) { return Promise.resolve(null); }
+  }
+
   function putTask(t) {
     const rec = taskRec(t);
     return tx(['tasks'], 'readwrite', (s) => { s.objectStore('tasks').put(rec); })
-      .then(() => rec);
+      .then(() => { mirrorSoon(); return rec; });
   }
 
   /* ---------- 구버전 수중·봉함 → 28일 합치기 ----------
@@ -934,7 +1052,7 @@
       const st = s.objectStore('tasks');
       recs.forEach((r) => st.put(r));
       m.gone.forEach((id) => st.delete(id));
-    }).catch((e) => console.warn('[merge28]', e));
+    }).then(() => mirrorSoon()).catch((e) => console.warn('[merge28]', e));
   }
 
   function tasksOf(day) {
@@ -977,7 +1095,11 @@
       ts.onsuccess = ready;
       rs.onsuccess = ready;
     }).then(() => {
-      if (orphan.length && global.Native && Native.photoRemove) Native.photoRemove(orphan);
+      if (orphan.length) {
+        if (global.Native && Native.photoRemove) Native.photoRemove(orphan);
+        opfsRemove(orphan);
+      }
+      mirrorSoon();
     });
   }
 
@@ -1076,11 +1198,12 @@
     }).catch(() => null);
   }
 
-  /* ---------- 기존 blob 사진 → 파일 이전 (P2 마이그레이션) ----------
-     한 번에 하나씩, 사이사이 쉬면서 옮긴다 — 87장이어도 UI 를 막지 않는다.
-     중간에 죽어도 안전: 옮긴 것만 file=1 로 바뀌고, 남은 건 다음 부팅에 이어서. */
+  /* ---------- 기존 blob 사진 이전 (P2 마이그레이션) ----------
+     네이티브: 원본 → 앱 데이터 파일. 웹: 원본 → OPFS/ArrayBuffer, 썸네일 → ArrayBuffer
+     (WebKit 의 Blob 외부 파일화 회피). 한 번에 하나씩, 사이사이 쉬면서 —
+     중간에 죽어도 안전: 옮긴 것만 표식이 바뀌고, 남은 건 다음 부팅에 이어서. */
   function migratePhotosToFiles() {
-    if (!photoFsOk()) return Promise.resolve(0);
+    const nativeFs = photoFsOk();
     try { if (localStorage.getItem(K_FSFLAG) === 'done') return Promise.resolve(0); } catch (e) {}
     return run((db) => reqp(db.transaction('photos').objectStore('photos').getAllKeys()))
       .then(async (keys) => {
@@ -1088,11 +1211,20 @@
         for (const id of (keys || [])) {
           let rec = null;
           try { rec = await getPhoto(id); } catch (e) { left++; continue; }
-          if (!rec || !rec.full || rec.file) continue;
+          // 이미 옮겨진 것(file/opfs/fullBuf)은 건너뛴다 — getPhoto 가 되살린 full 에 속지 말 것
+          if (!rec || rec.file || rec.opfs || rec.fullBuf || !rec.full) continue;
           try {
-            await Native.photoWrite(id, rec.full);
-            const slim = { id: rec.id, thumb: rec.thumb, w: rec.w || 0, h: rec.h || 0,
-                           createdAt: rec.createdAt || Date.now(), file: 1 };
+            let slim;
+            if (nativeFs) {
+              await Native.photoWrite(id, rec.full);
+              slim = { id: rec.id, thumb: rec.thumb, w: rec.w || 0, h: rec.h || 0,
+                       createdAt: rec.createdAt || Date.now(), file: 1 };
+            } else {
+              slim = await webPhotoRec(
+                { id: rec.id, w: rec.w || 0, h: rec.h || 0,
+                  createdAt: rec.createdAt || Date.now() },
+                { thumb: rec.thumb, full: rec.full });
+            }
             await tx(['photos'], 'readwrite', (t) => { t.objectStore('photos').put(slim); });
             moved++;
           } catch (e) { console.warn('[photo migrate]', e); left++; }
@@ -1117,29 +1249,38 @@
         const canFs = photoFsOk();
         const revived = Object.create(null);
 
-        // DB 는 죽었어도 원본이 파일로 살아 있으면(P2 구조 덕) 사진까지 되살린다 —
+        // DB 는 죽었어도 원본이 파일(앱 데이터 or OPFS)로 살아 있으면 사진까지 되살린다 —
         // 썸네일을 다시 뽑아 레코드를 재생성. 파일도 없으면 그때만 목록에서 뺀다.
         const washAll = async (ids) => {
           const out = [];
           for (const id of (ids || [])) {
             if (live[id] || revived[id]) { out.push(id); continue; }
-            if (canFs && global.Native && Native.photoRead) {
-              try {
-                const blob = await Native.photoRead(id);
-                if (blob) {
-                  // 유일하게 살아남은 원본이다 — **파일은 절대 다시 쓰지 않는다**(재기록 중
-                  // 끊기면 마지막 사본이 손상된다 + 재인코딩 화질 열화, 반대심문 확인).
-                  // 썸네일만 다시 뽑아 DB 레코드를 재생성한다.
-                  const img = await U.processImage(blob, { maxSide: 1600, thumbSide: 320, quality: 0.82 });
-                  const slim = { id: id, thumb: img.thumb, w: img.w, h: img.h,
-                                 createdAt: uidTime(id) || Date.now(), file: 1 };
-                  await tx(['photos'], 'readwrite', (t) => { t.objectStore('photos').put(slim); });
-                  revived[id] = 1;
-                  out.push(id);
-                  continue;
+            try {
+              const blob = canFs
+                ? (global.Native && Native.photoRead ? await Native.photoRead(id) : null)
+                : await opfsRead(id);
+              if (blob) {
+                // 유일하게 살아남은 원본이다 — **파일은 절대 다시 쓰지 않는다**(재기록 중
+                // 끊기면 마지막 사본이 손상된다 + 재인코딩 화질 열화, 반대심문 확인).
+                // 썸네일만 다시 뽑아 DB 레코드를 재생성한다.
+                const img = await U.processImage(blob, { maxSide: 1600, thumbSide: 320, quality: 0.82 });
+                const slim = { id: id, w: img.w, h: img.h, createdAt: uidTime(id) || Date.now() };
+                if (canFs) {
+                  slim.file = 1;
+                  slim.thumb = img.thumb;
+                } else {
+                  slim.opfs = 1;
+                  try {
+                    slim.thumbBuf = await img.thumb.arrayBuffer();
+                    slim.thumbType = img.thumb.type || 'image/jpeg';
+                  } catch (e) { slim.thumb = img.thumb; }
                 }
-              } catch (e) { console.warn('[restore photo]', e); }
-            }
+                await tx(['photos'], 'readwrite', (t) => { t.objectStore('photos').put(slim); });
+                revived[id] = 1;
+                out.push(id);
+                continue;
+              }
+            } catch (e) { console.warn('[restore photo]', e); }
           }
           return out;
         };
@@ -1172,6 +1313,7 @@
     taskCount: taskCount, backupInfo: backupInfo, backupNow: backupNow,
     backupDaily: backupDaily, restoreBackup: restoreBackup,
     backupToFileDaily: backupToFileDaily, fileBackupInfo: fileBackupInfo,
+    mirrorInfo: mirrorInfo, mirrorSoon: mirrorSoon,
     migratePhotosToFiles: migratePhotosToFiles,
     gc: gc, estimate: estimate
   };
@@ -1423,26 +1565,58 @@
     });
   }
 
+  /* ---------- Preferences (SharedPreferences) ----------
+     웹뷰가 관리하지 않는 저장 계층. 안드로이드 SharedPreferences 는 OS 가
+     임시파일+fsync+rename(AtomicFile 패턴)으로 원자성을 보장한다(조사 확정) —
+     작업 데이터의 상시 미러(진실 사본)를 여기에 둔다. */
+  function prefPlugin() {
+    const C = global.Capacitor;
+    return (isNative() && C && C.Plugins && C.Plugins.Preferences) ? C.Plugins.Preferences : null;
+  }
+  function prefOk() { return !!prefPlugin(); }
+  async function prefSet(key, value) {
+    const P = prefPlugin();
+    if (!P) return false;
+    await P.set({ key: key, value: value });
+    return true;
+  }
+  async function prefGet(key) {
+    const P = prefPlugin();
+    if (!P) return null;
+    const r = await P.get({ key: key });
+    return (r && r.value) || null;
+  }
+
   /* ---------- 파일 백업 (데이터 증발 대책 P0) ----------
      작업 메타 JSON 을 IndexedDB·localStorage 와 **다른 계층**(파일)에 남긴다.
      1차: 앱 데이터(DATA/backup) — 항상 됨. IndexedDB 만 죽는 사고(진단된 원인)에서 생존.
      2차: 공용 문서(DOCUMENTS/공시체백업) — 되면 앱 삭제에서도 생존(권한에 따라 실패 가능, 최선 노력). */
   function backupOk() { return !!fsPlugin(); }
 
+  /* writeFile 은 대상 파일을 **먼저 비우고** 쓴다 — 원자성이 없다(플러그인 소스로 확정).
+     같은 이름에 바로 쓰면 쓰다 죽는 순간 멀쩡하던 백업까지 잃는다.
+     임시 이름에 쓰고 rename(리눅스에서 원자 교체)으로 자리에 넣는다. */
+  async function atomicWrite(F, dir, folder, name, text) {
+    const tmp = folder + '.tmp-' + name;
+    const fin = folder + name;
+    await F.writeFile({ path: tmp, directory: dir, data: text, encoding: 'utf8', recursive: true });
+    try {
+      await F.rename({ from: tmp, to: fin, directory: dir, toDirectory: dir });
+    } catch (e) {
+      // 기존 파일 위 rename 을 거부하는 구현 대비 — 지우고 다시
+      try { await F.deleteFile({ path: fin, directory: dir }); } catch (e2) {}
+      await F.rename({ from: tmp, to: fin, directory: dir, toDirectory: dir });
+    }
+  }
+
   async function backupWrite(name, text) {
     const F = fsPlugin();
     if (!F) return false;
     let ok = false;
-    try {
-      await F.writeFile({ path: 'backup/' + name, directory: 'DATA',
-                          data: text, encoding: 'utf8', recursive: true });
-      ok = true;
-    } catch (e) { console.warn('[backup DATA]', e); }
-    try {
-      await F.writeFile({ path: '공시체백업/' + name, directory: 'DOCUMENTS',
-                          data: text, encoding: 'utf8', recursive: true });
-      ok = true;
-    } catch (e) { /* 공용 저장소는 기기·권한 따라 막힐 수 있다 — 1차가 있으니 조용히 */ }
+    try { await atomicWrite(F, 'DATA', 'backup/', name, text); ok = true; }
+    catch (e) { console.warn('[backup DATA]', e); }
+    try { await atomicWrite(F, 'DOCUMENTS', '공시체백업/', name, text); ok = true; }
+    catch (e) { /* 공용 저장소는 기기·권한 따라 막힐 수 있다 — 1차가 있으니 조용히 */ }
     return ok;
   }
 
@@ -1559,6 +1733,7 @@
                     galleryPref: galleryPref, setGalleryPref: setGalleryPref,
                     photoFsOk: photoFsOk, photoWrite: photoWrite,
                     photoRead: photoRead, photoRemove: photoRemove,
+                    prefOk: prefOk, prefSet: prefSet, prefGet: prefGet,
                     backupOk: backupOk, backupWrite: backupWrite,
                     backupList: backupList, backupRead: backupRead, backupTrim: backupTrim,
                     hasShot: function () { return !!shotPlugin(); } };
@@ -3575,17 +3750,30 @@
     if (!wrap) return;
     let st = null;
 
-    const stop = () => {
+    /* revert=true 는 브라우저가 제스처를 뺏어간 경우(pointercancel) —
+       반쯤 옮겨진 DOM 을 커밋하지 말고 원래 순서로 되돌린다 */
+    const stop = (revert) => {
       if (!st) return;
       clearTimeout(st.timer);
       if (st.dragging) {
         if (st.ghost && st.ghost.parentNode) st.ghost.parentNode.removeChild(st.ghost);
         st.chip.classList.remove('drag-src');
         wrap.classList.remove('dragging');
-        commitChipOrder(wrap);
+        if (revert === true) render(); else commitChipOrder(wrap);
       }
       st = null;
     };
+
+    /* 집은 뒤 손가락을 움직이면 브라우저가 스크롤 제스처로 가로채 pointercancel 을 쏜다
+       — "집어도 드래그하면 풀리는" 원인(실기기 증상). touch-action 을 제스처 도중에 바꾸는
+       건(.dragging 클래스) 소용없고, **touchmove 자체를 막아야** 스크롤을 안 뺏긴다.
+       집기 전(스크롤 의도 판별 중)에는 막지 않는다 — 등록값 3줄 초과 스크롤은 살아야 한다. */
+    wrap.addEventListener('touchmove', (e) => {
+      if (st && st.dragging) e.preventDefault();
+    }, { passive: false });
+
+    // 길게 누르기가 컨텍스트 메뉴로 새는 것도 드래그를 끊는다
+    wrap.addEventListener('contextmenu', (e) => { if (st) e.preventDefault(); });
 
     wrap.addEventListener('pointerdown', (e) => {
       const chip = e.target.closest && e.target.closest('.chip');
@@ -3634,8 +3822,8 @@
       }
     }, { passive: false });
 
-    wrap.addEventListener('pointerup', stop);
-    wrap.addEventListener('pointercancel', stop);
+    wrap.addEventListener('pointerup', () => stop(false));
+    wrap.addEventListener('pointercancel', () => stop(true));
   }
 
   function renderStats() {
@@ -7223,8 +7411,10 @@
     setTimeout(() => {
       Store.taskCount().then(async (n) => {
         if (!n) {
-          // localStorage 백업 → 파일 백업 순으로 찾는다 — 저장 계층이 같이 죽는 사고까지 커버
-          let bak = Store.backupInfo();
+          // 상시 미러(가장 최신) → localStorage 일일 백업 → 파일 백업 순으로 찾는다
+          let bak = null;
+          try { bak = await Store.mirrorInfo(); } catch (e) {}
+          if (!bak) bak = Store.backupInfo();
           if (!bak) { try { bak = await Store.fileBackupInfo(); } catch (e) { bak = null; } }
           if (!bak) return;
           // 사용자가 이미 다른 시트를 보고 있으면 치환하지 않는다(잘못 누름 방지).
@@ -7242,6 +7432,7 @@
         }
         Store.backupDaily();            // localStorage (즉시 계층)
         Store.backupToFileDaily();      // 파일 계층 (DATA + 공용문서, 7세대)
+        Store.mirrorSoon();             // 상시 미러 씨딩 — 첫 저장 전에 죽어도 미러가 있게
         // 기존 blob 사진을 파일로 이전(P2) — 조용히, 조금씩. 중단돼도 다음 부팅에 이어서.
         Store.migratePhotosToFiles().then((m) => { if (m) console.log('[사진 파일 이전]', m + '장'); });
       }).catch(() => {});
