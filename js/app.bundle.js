@@ -363,6 +363,43 @@
     return { full: fullBlob, thumb: thumbBlob, w: big.w, h: big.h };
   }
 
+  /* ---- 사진 도장 (워터마크) ----
+     저장본은 절대 건드리지 않는다 — **내보낼 때만** 사본에 찍는다(사용자 지시).
+     실패하면 원본을 그대로 돌려준다 — 도장 때문에 전송이 막히면 안 된다. */
+  async function stampImage(blob, text) {
+    if (!text) return blob;
+    try {
+      const src = await decodeImage(blob);
+      const w = src.width || src.naturalWidth, h = src.height || src.naturalHeight;
+      if (!w || !h) return blob;
+      const cv = document.createElement('canvas');
+      cv.width = w; cv.height = h;
+      const ctx = cv.getContext('2d');
+      ctx.drawImage(src, 0, 0);
+      if (src.close) { try { src.close(); } catch (e) {} }
+      const fs = Math.max(18, Math.round(w * 0.035));      // 글자 크기 = 사진 폭의 3.5%
+      ctx.font = '700 ' + fs + 'px sans-serif';
+      const pad = Math.round(fs * 0.45);
+      const tw = Math.ceil(ctx.measureText(text).width);
+      const bx = w - tw - pad * 3, by = h - fs - pad * 2;  // 오른쪽 아래
+      ctx.fillStyle = 'rgba(0,0,0,.55)';
+      ctx.fillRect(bx, by, tw + pad * 2, fs + Math.round(pad * 1.4));
+      ctx.fillStyle = '#fff';
+      ctx.textBaseline = 'top';
+      ctx.fillText(text, bx + pad, by + Math.round(pad * 0.6));
+      return await canvasToBlob(cv, 'image/jpeg', 0.88);
+    } catch (e) { console.warn('[stamp]', e); return blob; }
+  }
+
+  /* 도장 켬/끔 — 내보내기 시트에서 토글하고 다음에도 기억한다 */
+  const WM_KEY = 'gsc.wm.v1';
+  function wmPref() {
+    try { return localStorage.getItem(WM_KEY) === '1'; } catch (e) { return false; }
+  }
+  function setWmPref(v) {
+    try { localStorage.setItem(WM_KEY, v ? '1' : '0'); } catch (e) {}
+  }
+
   /* ---- 테마 ----
      시스템(prefers-color-scheme)을 따르지 않고 앱 설정을 쓴다.
      첫 실행 때만 시스템 값을 씨앗으로 받는다 — 그 뒤로는 여기서 정한 게 전부다.
@@ -409,7 +446,8 @@
     tsToLocalInput: tsToLocalInput, localInputToTs: localInputToTs,
     uid: uid, safeName: safeName,
     thumbUrl: thumbUrl, dropUrl: dropUrl,
-    processImage: processImage
+    processImage: processImage,
+    stampImage: stampImage, wmPref: wmPref, setWmPref: setWmPref
   };
 })(window);
 
@@ -920,6 +958,7 @@
       supervisor: (t.supervisor || '').trim(),
       supPhone: (t.supPhone || '').trim(),
       part: (t.part || '').trim(),
+      photoMark: !!t.photoMark,            // 목록의 「사진」 배지 — 표시 전용(완료 판정과 무관)
       // 28일은 두 칸의 사진이 곧 이 작업의 사진이다(gc 가 여기만 본다)
       photos: isSub ? mergedPhotos(t, sub) : (t.photos || []).slice(),
       sets: isSub ? [] : normalizeSets(t),
@@ -3462,6 +3501,20 @@
              label: (day ? (Spec.md(day) + ' ') : '') + name };
   }
 
+  /* 사진 도장 문구: "211동 28일 수중 · 8/13" — 내보내기 도장(U.stampImage)에 쓴다 */
+  function wmText(t, subKey) {
+    const s = Spec.byKey(t && t.specKey);
+    const bits = [];
+    const d = dongOf(t);
+    if (d) bits.push(d);
+    if (s) {
+      const sub = subKey ? (Spec.subByKey(subKey) || {}).name : '';
+      bits.push(s.name + (sub ? ' ' + sub : ''));
+    }
+    const day = reportDayOf(t);
+    return bits.join(' ') + (day ? ' · ' + Spec.md(day) : '');
+  }
+
   /* 한 작업이 내보내기에 내놓는 조각들.
      보통은 작업 하나 = 조각 하나지만, 28일은 수중·봉함 두 조각이다
      (사진이 칸마다 다르므로 조각이 자기 사진 목록을 직접 들고 다닌다). */
@@ -3483,12 +3536,17 @@
         if (!map[g.key]) {
           map[g.key] = { key: g.key, label: g.label, sup: g.sup || '',
                          dong: g.dong || '', day: g.day || '', subKey: pc.subKey,
-                         items: [], photoIds: [] };
+                         items: [], photoIds: [], photoSrc: {} };
           order.push(g.key);
         }
         const box = map[g.key];
         if (box.items.indexOf(pc.t) < 0) box.items.push(pc.t);
-        pc.photos.forEach((id) => { if (box.photoIds.indexOf(id) < 0) box.photoIds.push(id); });
+        pc.photos.forEach((id) => {
+          if (box.photoIds.indexOf(id) < 0) {
+            box.photoIds.push(id);
+            box.photoSrc[id] = pc;      // 사진 도장용 — 이 사진이 어느 작업·칸 것인지
+          }
+        });
       });
     });
     return order.map((k) => {
@@ -3522,6 +3580,7 @@
     filledSets: filledSets, setsBrief: setsBrief,
     actualAge: actualAge, label: label, summary: summary,
     autoReportDay: autoReportDay, reportDayOf: reportDayOf, exportLabel: exportLabel,
+    wmText: wmText,
     supAxisOff: supAxisOff,
     exportGroup: exportGroup, groupForExport: groupForExport, groupByDay: groupByDay
   };
@@ -4554,6 +4613,7 @@
     head.appendChild(U.el('span', 'rec-title', Task.dongOf(t) || '동 미지정'));
     // 동수와 담당 감리는 한 줄에 같이 간다(사용자 지시)
     if (t.supervisor) head.appendChild(U.el('span', 'row-sup', t.supervisor));
+    if (t.photoMark) head.appendChild(U.el('span', 'photo-mark', '사진'));   // 표시 전용 배지
     body.appendChild(head);
 
     // 28일은 어느 칸이 남았는지 이름으로 알린다 — "미완료"만으론 뭘 더 찍을지 모른다
@@ -4632,8 +4692,13 @@
       const photos = await Store.getPhotos(ids);
       const byId = {};
       photos.forEach((p) => { byId[p.id] = p; });
+      const wm = U.wmPref();      // 사진 도장 — 내보내는 사본에만 찍는다(저장본 보존)
       for (const id of ids) {
-        const b = byId[id] ? await Store.fullBlob(byId[id]) : null;   // 파일로 옮겨진 원본 포함
+        let b = byId[id] ? await Store.fullBlob(byId[id]) : null;   // 파일로 옮겨진 원본 포함
+        if (b && wm) {
+          const pc = (g.photoSrc || {})[id];
+          if (pc) b = await U.stampImage(b, Task.wmText(pc.t, pc.subKey));
+        }
         if (b) blobs.push(b); else missing++;
       }
     } catch (e) { console.error(e); }
@@ -4680,6 +4745,13 @@
     }
 
     const items = [];
+    // 사진 도장(동·분류·날짜) — 원할 때만(사용자 지시). 설정은 다음에도 기억된다.
+    items.push({
+      label: '사진 도장: ' + (U.wmPref() ? '켬' : '끔'),
+      sub: '사진 귀퉁이에 동·분류·날짜를 찍어 보냅니다 — 탭해서 ' + (U.wmPref() ? '끄기' : '켜기'),
+      onPick: () => { U.setWmPref(!U.wmPref()); askSend(axis); }
+    });
+    items.push({ sep: true });
     groups.forEach((g) => {
       const over = g.photos > WARN_PHOTOS;
       const who = bySup ? (g.sup || '감리 미지정') : (g.items.length + '건');
@@ -4784,6 +4856,8 @@
     $('#tk-cast').value = tk.castDay || '';
     $('#tk-day').value = Task.testDayOf(tk);
     $('#tk-part').value = tk.part || '';
+    const pm = $('#tk-photomark');
+    if (pm) pm.checked = !!tk.photoMark;
     clearHints();          // 앞서 연 작업의 추천 칩이 남아 있으면 안 된다
     curSub = 'water';      // 열 때는 항상 수중부터
     renderSubTabs();
@@ -5416,6 +5490,11 @@
     const n = (rec.photos || []).length;
     const items = [];
     if (n) {
+      items.push({
+        label: '사진 도장: ' + (U.wmPref() ? '켬' : '끔'),
+        sub: '사진 귀퉁이에 동·분류·날짜를 찍어 보냅니다 — 탭해서 ' + (U.wmPref() ? '끄기' : '켜기'),
+        onPick: () => { U.setWmPref(!U.wmPref()); exportTask(); }
+      });
       items.push({ label: '사진 ' + n + '장 보내기 + 제목 복사', cls: 'strong',
         sub: title, onPick: () => doExport(rec, true) });
       items.push({ label: '사진 ' + n + '장만 보내기', sub: '클립보드는 그대로 둡니다',
@@ -5435,8 +5514,17 @@
       try {
         const photos = await Store.getPhotos(rec.photos);
         const byId = {}; photos.forEach((p) => { byId[p.id] = p; });
+        const wm = U.wmPref();      // 사진 도장 — 내보내는 사본에만
+        const subKeyOf = (id) => {
+          if (!Task.hasSubs(rec)) return '';
+          for (const s of Spec.SUBS) {
+            if (Task.subPhotos(rec, s.key).indexOf(id) >= 0) return s.key;
+          }
+          return '';
+        };
         for (const id of rec.photos) {
-          const b = byId[id] ? await Store.fullBlob(byId[id]) : null;   // 파일로 옮겨진 원본 포함
+          let b = byId[id] ? await Store.fullBlob(byId[id]) : null;   // 파일로 옮겨진 원본 포함
+          if (b && wm) b = await U.stampImage(b, Task.wmText(rec, subKeyOf(id)));
           if (b) blobs.push(b);
         }
       } catch (e) { console.error(e); }
@@ -5470,6 +5558,13 @@
     $('#tk-export').addEventListener('click', () => { exportTask(); });
 
     $('#tk-part').addEventListener('input', () => { dirty = true; });
+    // 「사진」 배지 체크 — 표시 전용, 아무 기능에도 영향 없음(사용자 지시)
+    const pmBox = $('#tk-photomark');
+    if (pmBox) pmBox.addEventListener('change', () => {
+      if (!tk) return;
+      tk.photoMark = pmBox.checked;
+      dirty = true;
+    });
     $('#tk-dong-pick').addEventListener('click', openDongPicker);
     $('#tk-sup-pick').addEventListener('click', openSupPicker);
     $('#tk-sup-call').addEventListener('click', callSup);
@@ -7197,6 +7292,7 @@
       // 동수와 담당 감리는 한 줄에 같이 간다(사용자 지시) — 짝으로 봐야 뜻이 있다
       const title = U.el('div', 'task-part', Task.dongOf(t) || '동 미지정');
       if (t.supervisor) title.appendChild(U.el('span', 'row-sup', t.supervisor));
+      if (t.photoMark) title.appendChild(U.el('span', 'photo-mark', '사진'));   // 표시 전용 배지
       // 28일은 수중·봉함 중 남은 칸을 이름으로 알린다
       const note = Task.doneNote(t);
       if (note) title.appendChild(U.el('span', 'sub-left', note));

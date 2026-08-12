@@ -605,6 +605,20 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
 .chip.rand{background:#fef3c7;color:#b45309}
 :root[data-theme="dark"] .chip.rand{background:#2a2110;color:#fcd34d}
 
+/* 작업의 「사진」 배지 — 표시 전용, 완료 판정과 무관(사용자 지시) */
+.photo-mark{
+  background:var(--accent-soft);color:var(--accent);
+  border-radius:var(--r-sm);padding:1px 7px;font-size:11px;font-weight:700;
+  flex:0 0 auto;
+}
+/* 편집기 사진 머리줄의 체크 — 히트영역은 세로 패딩으로 확보 */
+.photo-head{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+.photomark-check{
+  margin-left:auto;display:inline-flex;align-items:center;gap:6px;
+  font-size:12px;font-weight:500;color:var(--text-2);padding:8px 0 8px 10px;
+}
+.photomark-check input{width:18px;height:18px;accent-color:var(--accent)}
+
 /* 드래그로 순서 바꾸기 */
 .chips.dragging{touch-action:none}
 .chip.drag-src{opacity:.22}

@@ -520,7 +520,10 @@
 
     <!-- 사진 -->
     <div class="field">
-      <span class="field-label">사진 <b id="tk-pcount">0</b>장 <span id="tk-pdone"></span></span>
+      <span class="field-label photo-head">사진 <b id="tk-pcount">0</b>장 <span id="tk-pdone"></span>
+        <!-- 표시 전용 체크 — 켜면 목록에 「사진」 배지가 뜬다. 완료 판정과 무관(사용자 지시) -->
+        <label class="photomark-check"><input type="checkbox" id="tk-photomark">목록에 「사진」 표시</label>
+      </span>
       <div class="photo-grid" id="tk-photos"></div>
       <div class="photo-btns">
         <button class="btn" id="tk-shoot">
