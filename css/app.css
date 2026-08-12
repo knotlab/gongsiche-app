@@ -601,6 +601,9 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
 }
 .chip .val{flex:1 1 auto;text-align:center;overflow:hidden}
 .chip.new{animation:pop .18s ease-out}   /* 새로 등록된 칩만 튄다 */
+/* 랜덤으로 채운 값은 색으로 구분한다(사용자 지시) — 직접 입력값과 섞이면 안 된다 */
+.chip.rand{background:#fef3c7;color:#b45309}
+:root[data-theme="dark"] .chip.rand{background:#2a2110;color:#fcd34d}
 
 /* 드래그로 순서 바꾸기 */
 .chips.dragging{touch-action:none}

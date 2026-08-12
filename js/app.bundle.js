@@ -468,7 +468,15 @@
         req.result.onclose = () => { if (dbp === p) dbp = null; };
         resolve(req.result);
       };
-      req.onerror = () => reject(req.error || new Error('저장소 열기 실패'));
+      req.onerror = () => {
+        const err = req.error || new Error('저장소 열기 실패');
+        // 구버전 APK 를 새 데이터 위에 깔면 여기서 VersionError 가 나는데,
+        // 그냥 빈 목록으로 보이면 "데이터 증발"로 오인한다 — 원인을 말해 준다.
+        if (err && err.name === 'VersionError') {
+          err.userMsg = '앱이 데이터보다 오래되었습니다 — 최신 버전을 설치해 주세요';
+        }
+        reject(err);
+      };
       req.onblocked = () => reject(new Error('저장소가 다른 탭에서 사용 중입니다'));
     });
     dbp = p;
@@ -519,14 +527,51 @@
     });
   }
 
-  /* ---------------- photos ---------------- */
+  /* ---------------- photos ----------------
+     네이티브(안드로이드)에서는 원본(full)을 IndexedDB 가 아니라 **앱 데이터 파일**로 둔다
+     (rec.file=1, 파일은 photos/<id>.jpg). IndexedDB 가 통째로 날아가는 사고에서 원본이 살고,
+     DB 가 가벼워져 손상·축출 압박도 준다. 웹(PWA)은 기존대로 blob 을 DB 에 둔다. */
+  const K_FSFLAG = 'gsc.photos.fs.v1';   // 'done' = 기존 blob 사진의 파일 이전 완료
+
+  function photoFsOk() {
+    return !!(global.Native && Native.photoFsOk && Native.photoFsOk());
+  }
+
   function putPhoto(p) {
-    const rec = {
-      id: p.id || U.uid(), full: p.full, thumb: p.thumb,
-      w: p.w || 0, h: p.h || 0, createdAt: Date.now()
-    };
-    return tx(['photos'], 'readwrite', (t) => { t.objectStore('photos').put(rec); })
-      .then(() => rec.id);
+    const id = p.id || U.uid();
+    const base = { id: id, thumb: p.thumb, w: p.w || 0, h: p.h || 0, createdAt: Date.now() };
+    if (photoFsOk() && p.full) {
+      return Native.photoWrite(id, p.full)
+        .then(() => tx(['photos'], 'readwrite', (t) => {
+          t.objectStore('photos').put(Object.assign({ file: 1 }, base));
+        }))
+        .catch((e) => {
+          // 파일 쓰기가 막히면(용량 등) 예전 방식으로 물러선다 — 사진을 잃는 것보단 낫다.
+          // 이전 완료 표시를 지워 다음 부팅 때 다시 파일로 옮기게 한다.
+          console.warn('[putPhoto fs]', e);
+          try { localStorage.removeItem(K_FSFLAG); } catch (e2) {}
+          return tx(['photos'], 'readwrite', (t) => {
+            t.objectStore('photos').put(Object.assign({ full: p.full }, base));
+          }).catch((e3) => {
+            // DB 까지 막혔다 — 이미 써 둔 파일이 어떤 정리 경로에도 안 걸리는 영구 고아가 된다
+            // (gc 는 DB 키에서 출발한다, 반대심문 확인). 파일을 걷어내고 실패를 알린다.
+            if (global.Native && Native.photoRemove) Native.photoRemove([id]);
+            throw e3;
+          });
+        })
+        .then(() => id);
+    }
+    return tx(['photos'], 'readwrite', (t) => {
+      t.objectStore('photos').put(Object.assign({ full: p.full }, base));
+    }).then(() => id);
+  }
+
+  /* 사진 원본 blob — DB 에 있으면 그대로, 파일이면 읽어 온다. 없으면 null */
+  function fullBlob(p) {
+    if (!p) return Promise.resolve(null);
+    if (p.full) return Promise.resolve(p.full);
+    if (p.file && global.Native && Native.photoRead) return Native.photoRead(p.id);
+    return Promise.resolve(null);
   }
 
   function getPhoto(id) {
@@ -553,6 +598,9 @@
     return tx(['photos'], 'readwrite', (t) => {
       const st = t.objectStore('photos');
       ids.forEach((id) => st.delete(id));
+    }).then(() => {
+      // 파일로 옮겨진 원본도 같이 지운다 (없으면 조용히 넘어간다)
+      if (global.Native && Native.photoRemove) Native.photoRemove(ids);
     });
   }
 
@@ -597,47 +645,83 @@
         .sort((a, b) => (b.ts - a.ts) || (b.createdAt - a.createdAt)));
   }
 
+  /* 작업 하나가 참조하는 사진 id 전부 — t.photos(합집합)에 더해 sub 칸까지 이중으로 본다.
+     putTask 가 합집합을 보장하지만, 사진 삭제 판단은 틀리면 복구가 없으므로 벨트에 멜빵이다. */
+  function refPhotos(t, mark) {
+    (t.photos || []).forEach((p) => { mark[p] = 1; });
+    if (t.sub) Spec.SUBS.forEach((s) => {
+      (((t.sub[s.key] || {}).photos) || []).forEach((p) => { mark[p] = 1; });
+    });
+  }
+
+  /* uid 앞부분이 생성 시각(36진수)이다 — 스키마 변경 없이 사진 나이를 알 수 있다 */
+  function uidTime(id) {
+    const t = parseInt(String(id).split('-')[0], 36);
+    return isFinite(t) ? t : 0;
+  }
+  const GC_GRACE = 24 * 3600 * 1000;   // 이 나이 미만 사진은 지우지 않는다(진행 중 세션 보호)
+
   /* 기록 삭제 — 다른 기록이 같이 쓰는 사진은 남긴다.
-     (저장 재진입 등으로 photoId 를 공유하는 기록이 생겼을 때 사진이 통째로 날아가는 것을 막는다) */
+     읽기와 삭제를 **한 트랜잭션**에서 한다 — 나눠 하면 그 사이에 커밋된 저장을 못 보고
+     남의 사진을 고아로 오판한다(버그리포트 TOCTOU 지적). */
   function deleteRecord(id) {
-    return run((db) => Promise.all([
-      reqp(db.transaction('records').objectStore('records').getAll()),
-      reqp(db.transaction('tasks').objectStore('tasks').getAll())
-    ]))
-      .then((res) => {
-        const all = res[0] || [], tasks = res[1] || [];
+    let orphan = [];
+    return tx(['records', 'tasks', 'photos'], 'readwrite', (t) => {
+      const rs = t.objectStore('records').getAll();
+      const ts = t.objectStore('tasks').getAll();
+      let got = 0;
+      const ready = () => {
+        if (++got < 2) return;
+        const all = rs.result || [], tasks = ts.result || [];
         const target = all.filter((r) => r.id === id)[0];
         const mine = (target && target.photos) || [];
         const used = {};
-        all.forEach((r) => {
-          if (r.id === id) return;
-          (r.photos || []).forEach((p) => { used[p] = 1; });
-        });
-        tasks.forEach((t) => (t.photos || []).forEach((p) => { used[p] = 1; }));
-        const orphan = mine.filter((p) => !used[p]);
-        return tx(['records', 'photos'], 'readwrite', (t) => {
-          t.objectStore('records').delete(id);
-          const ps = t.objectStore('photos');
-          orphan.forEach((pid) => ps.delete(pid));
-        });
-      });
+        all.forEach((r) => { if (r.id !== id) (r.photos || []).forEach((p) => { used[p] = 1; }); });
+        tasks.forEach((k) => refPhotos(k, used));
+        orphan = mine.filter((p) => !used[p]);
+        t.objectStore('records').delete(id);
+        const ps = t.objectStore('photos');
+        orphan.forEach((pid) => ps.delete(pid));
+      };
+      rs.onsuccess = ready;
+      ts.onsuccess = ready;
+    }).then(() => {
+      if (orphan.length && global.Native && Native.photoRemove) Native.photoRemove(orphan);
+    });
   }
 
   /* 기록에도 작업에도 속하지 않은 사진 정리 (저장 안 하고 나간 편집기 잔여물).
-     ※ 사진을 쓰는 스토어가 늘어나면 반드시 여기에도 추가할 것 — 빠지면 남의 사진을 지운다 */
+     ※ 사진을 쓰는 스토어가 늘어나면 반드시 여기에도 추가할 것 — 빠지면 남의 사진을 지운다.
+     - 읽기·계산·삭제를 **한 트랜잭션**으로 (스냅숏 일관성 — TOCTOU 차단)
+     - 24시간 미만 사진은 안 지운다 (커밋됐지만 아직 어느 작업에도 안 붙은 진행 중 사진 보호) */
   function gc(protectIds) {
     const keep = {};
     (protectIds || []).forEach((id) => { keep[id] = 1; });
-    return run((db) => Promise.all([
-      reqp(db.transaction('records').objectStore('records').getAll()),
-      reqp(db.transaction('photos').objectStore('photos').getAllKeys()),
-      reqp(db.transaction('tasks').objectStore('tasks').getAll())
-    ])).then((res) => {
-      (res[0] || []).forEach((r) => (r.photos || []).forEach((p) => { keep[p] = 1; }));
-      (res[2] || []).forEach((t) => (t.photos || []).forEach((p) => { keep[p] = 1; }));
-      const dead = (res[1] || []).filter((k) => !keep[k]);
-      if (!dead.length) return 0;
-      return deletePhotos(dead).then(() => dead.length);
+    const now = Date.now();
+    let dead = [];
+    return tx(['records', 'tasks', 'photos'], 'readwrite', (t) => {
+      const rs = t.objectStore('records').getAll();
+      const ts = t.objectStore('tasks').getAll();
+      const ph = t.objectStore('photos');
+      const ks = ph.getAllKeys();
+      let got = 0;
+      const ready = () => {
+        if (++got < 3) return;
+        (rs.result || []).forEach((r) => (r.photos || []).forEach((p) => { keep[p] = 1; }));
+        (ts.result || []).forEach((k) => refPhotos(k, keep));
+        (ks.result || []).forEach((key) => {
+          if (keep[key]) return;
+          if (now - uidTime(key) < GC_GRACE) return;   // 오늘 찍은 건 건드리지 않는다
+          dead.push(key);
+          ph.delete(key);
+        });
+      };
+      rs.onsuccess = ready;
+      ts.onsuccess = ready;
+      ks.onsuccess = ready;
+    }).then(() => {
+      if (dead.length && global.Native && Native.photoRemove) Native.photoRemove(dead);
+      return dead.length;
     }).catch(() => 0);
   }
 
@@ -678,7 +762,11 @@
     const fac = (f) => (typeof f === 'number' && isFinite(f) && f > 0) ? f : 0.97;
     const vals = (a) => (Array.isArray(a) ? a : []).filter(
       (e) => e && typeof e.v === 'number' && isFinite(e.v)
-    ).map((e) => ({ v: e.v, d: (typeof e.d === 'string') ? e.d : '' }));
+    ).map((e) => {
+      const o = { v: e.v, d: (typeof e.d === 'string') ? e.d : '' };
+      if (e.r) o.r = 1;      // 랜덤 생성 표식 — 작업에 넣었다 다시 열어도 색 구분이 산다
+      return o;
+    });
 
     if (Array.isArray(t.sets) && t.sets.length) {
       return t.sets.map((s) => ({
@@ -864,24 +952,32 @@
       .then(liftDong);
   }
 
-  /* 기록 삭제와 같은 규칙: 다른 데서 안 쓰는 사진만 지운다 */
+  /* 기록 삭제와 같은 규칙: 다른 데서 안 쓰는 사진만 지운다.
+     읽기와 삭제가 한 트랜잭션이다 (deleteRecord 와 같은 이유). */
   function deleteTask(id) {
-    return run((db) => Promise.all([
-      reqp(db.transaction('tasks').objectStore('tasks').getAll()),
-      reqp(db.transaction('records').objectStore('records').getAll())
-    ])).then((res) => {
-      const tasks = res[0] || [], recs = res[1] || [];
-      const target = tasks.filter((t) => t.id === id)[0];
-      const mine = (target && target.photos) || [];
-      const used = {};
-      tasks.forEach((t) => { if (t.id !== id) (t.photos || []).forEach((p) => { used[p] = 1; }); });
-      recs.forEach((r) => (r.photos || []).forEach((p) => { used[p] = 1; }));
-      const orphan = mine.filter((p) => !used[p]);
-      return tx(['tasks', 'photos'], 'readwrite', (t) => {
+    let orphan = [];
+    return tx(['tasks', 'records', 'photos'], 'readwrite', (t) => {
+      const ts = t.objectStore('tasks').getAll();
+      const rs = t.objectStore('records').getAll();
+      let got = 0;
+      const ready = () => {
+        if (++got < 2) return;
+        const tasks = ts.result || [], recs = rs.result || [];
+        const target = tasks.filter((k) => k.id === id)[0];
+        const mineMark = {};
+        if (target) refPhotos(target, mineMark);
+        const used = {};
+        tasks.forEach((k) => { if (k.id !== id) refPhotos(k, used); });
+        recs.forEach((r) => (r.photos || []).forEach((p) => { used[p] = 1; }));
+        orphan = Object.keys(mineMark).filter((p) => !used[p]);
         t.objectStore('tasks').delete(id);
         const ps = t.objectStore('photos');
         orphan.forEach((pid) => ps.delete(pid));
-      });
+      };
+      ts.onsuccess = ready;
+      rs.onsuccess = ready;
+    }).then(() => {
+      if (orphan.length && global.Native && Native.photoRemove) Native.photoRemove(orphan);
     });
   }
 
@@ -941,34 +1037,133 @@
     return backupNow();
   }
 
+  /* ---------- 파일 백업 (P0 — localStorage 와 다른 계층) ----------
+     IndexedDB 와 localStorage 가 같이 죽는 사고까지 대비해 파일로도 하루 한 번 남긴다.
+     쓰는 곳: 앱데이터(DATA/backup) 항상 + 공용문서(DOCUMENTS/공시체백업) 최선 노력. 7세대 보관. */
+  const K_FBAK_DAY = 'gsc.filebak.day.v1';
+
+  function backupToFileDaily() {
+    if (!(global.Native && Native.backupOk && Native.backupOk())) return Promise.resolve(false);
+    const today = U.dayKey(Date.now());
+    try { if (localStorage.getItem(K_FBAK_DAY) === today) return Promise.resolve(false); } catch (e) {}
+    return run((db) => reqp(db.transaction('tasks').objectStore('tasks').getAll()))
+      .then((rows) => {
+        rows = rows || [];
+        if (!rows.length) return false;
+        const name = 'gsc-' + today.replace(/-/g, '') + '.json';
+        const body = JSON.stringify({ at: Date.now(), day: today, n: rows.length, tasks: rows });
+        return Native.backupWrite(name, body).then((ok) => {
+          if (ok) {
+            try { localStorage.setItem(K_FBAK_DAY, today); } catch (e) {}
+            Native.backupTrim(7);
+          }
+          return ok;
+        });
+      }).catch(() => false);
+  }
+
+  /* 최신 파일 백업을 localStorage 백업과 같은 모양(info)으로 읽어 온다 */
+  function fileBackupInfo() {
+    if (!(global.Native && Native.backupOk && Native.backupOk())) return Promise.resolve(null);
+    return Native.backupList().then((list) => {
+      if (!list.length) return null;
+      return Native.backupRead(list[0]).then((text) => {
+        try {
+          const j = JSON.parse(text);
+          return (j && Array.isArray(j.tasks) && j.tasks.length) ? j : null;
+        } catch (e) { return null; }
+      });
+    }).catch(() => null);
+  }
+
+  /* ---------- 기존 blob 사진 → 파일 이전 (P2 마이그레이션) ----------
+     한 번에 하나씩, 사이사이 쉬면서 옮긴다 — 87장이어도 UI 를 막지 않는다.
+     중간에 죽어도 안전: 옮긴 것만 file=1 로 바뀌고, 남은 건 다음 부팅에 이어서. */
+  function migratePhotosToFiles() {
+    if (!photoFsOk()) return Promise.resolve(0);
+    try { if (localStorage.getItem(K_FSFLAG) === 'done') return Promise.resolve(0); } catch (e) {}
+    return run((db) => reqp(db.transaction('photos').objectStore('photos').getAllKeys()))
+      .then(async (keys) => {
+        let moved = 0, left = 0;
+        for (const id of (keys || [])) {
+          let rec = null;
+          try { rec = await getPhoto(id); } catch (e) { left++; continue; }
+          if (!rec || !rec.full || rec.file) continue;
+          try {
+            await Native.photoWrite(id, rec.full);
+            const slim = { id: rec.id, thumb: rec.thumb, w: rec.w || 0, h: rec.h || 0,
+                           createdAt: rec.createdAt || Date.now(), file: 1 };
+            await tx(['photos'], 'readwrite', (t) => { t.objectStore('photos').put(slim); });
+            moved++;
+          } catch (e) { console.warn('[photo migrate]', e); left++; }
+          await new Promise((r) => setTimeout(r, 25));   // UI 양보
+        }
+        if (!left) { try { localStorage.setItem(K_FSFLAG, 'done'); } catch (e) {} }
+        return moved;
+      }).catch(() => 0);
+  }
+
   /* 복원 — 사진 스토어도 같이 날아간 경우, 죽은 사진 id 가 남아 있으면
      사진 0장짜리 작업이 「완료」로 위장한다(isDone 이 개수만 본다 — 감사 지적).
-     실존하는 사진 id 만 남기고 복원한다. */
-  function restoreBackup() {
-    const info = backupInfo() || bakInfo(K_BAK2);
+     실존하는 사진 id 만 남기고 복원한다. info 를 주면 그걸(파일 백업 등), 없으면 localStorage 백업. */
+  function restoreBackup(given) {
+    const info = given || backupInfo() || bakInfo(K_BAK2);
     if (!info) return Promise.resolve(0);
     return run((db) => reqp(db.transaction('photos').objectStore('photos').getAllKeys()))
       .catch(() => [])
-      .then((keys) => {
+      .then(async (keys) => {
         const live = Object.create(null);
         (keys || []).forEach((k) => { live[k] = 1; });
-        const wash = (a) => (a || []).filter((id) => live[id]);
-        return Promise.all(info.tasks.map((t) => {
+        const canFs = photoFsOk();
+        const revived = Object.create(null);
+
+        // DB 는 죽었어도 원본이 파일로 살아 있으면(P2 구조 덕) 사진까지 되살린다 —
+        // 썸네일을 다시 뽑아 레코드를 재생성. 파일도 없으면 그때만 목록에서 뺀다.
+        const washAll = async (ids) => {
+          const out = [];
+          for (const id of (ids || [])) {
+            if (live[id] || revived[id]) { out.push(id); continue; }
+            if (canFs && global.Native && Native.photoRead) {
+              try {
+                const blob = await Native.photoRead(id);
+                if (blob) {
+                  // 유일하게 살아남은 원본이다 — **파일은 절대 다시 쓰지 않는다**(재기록 중
+                  // 끊기면 마지막 사본이 손상된다 + 재인코딩 화질 열화, 반대심문 확인).
+                  // 썸네일만 다시 뽑아 DB 레코드를 재생성한다.
+                  const img = await U.processImage(blob, { maxSide: 1600, thumbSide: 320, quality: 0.82 });
+                  const slim = { id: id, thumb: img.thumb, w: img.w, h: img.h,
+                                 createdAt: uidTime(id) || Date.now(), file: 1 };
+                  await tx(['photos'], 'readwrite', (t) => { t.objectStore('photos').put(slim); });
+                  revived[id] = 1;
+                  out.push(id);
+                  continue;
+                }
+              } catch (e) { console.warn('[restore photo]', e); }
+            }
+          }
+          return out;
+        };
+
+        let n = 0;
+        for (const t of info.tasks) {
           let c;
-          try { c = JSON.parse(JSON.stringify(t)); } catch (e) { return null; }
-          c.photos = wash(c.photos);
-          if (c.sub) Spec.SUBS.forEach((s) => {
-            if (c.sub[s.key]) c.sub[s.key].photos = wash(c.sub[s.key].photos);
-          });
-          return putTask(c).catch(() => null);
-        }));
-      })
-      .then((rs) => rs.filter(Boolean).length);
+          try { c = JSON.parse(JSON.stringify(t)); } catch (e) { continue; }
+          c.photos = await washAll(c.photos);
+          if (c.sub) {
+            for (const s of Spec.SUBS) {
+              if (c.sub[s.key]) c.sub[s.key].photos = await washAll(c.sub[s.key].photos);
+            }
+          }
+          try { await putTask(c); n++; } catch (e) {}
+        }
+        return n;
+      });
   }
 
   global.Store = {
     open: open,
     putPhoto: putPhoto, getPhoto: getPhoto, getPhotos: getPhotos, deletePhotos: deletePhotos,
+    fullBlob: fullBlob,
     putRecord: putRecord, getRecord: getRecord, allRecords: allRecords, deleteRecord: deleteRecord,
     putTodo: putTodo, todosOf: todosOf, deleteTodo: deleteTodo,
     putTask: putTask, tasksOf: tasksOf, getTask: getTask, deleteTask: deleteTask,
@@ -976,6 +1171,8 @@
     normalizeSets: normalizeSets,
     taskCount: taskCount, backupInfo: backupInfo, backupNow: backupNow,
     backupDaily: backupDaily, restoreBackup: restoreBackup,
+    backupToFileDaily: backupToFileDaily, fileBackupInfo: fileBackupInfo,
+    migratePhotosToFiles: migratePhotosToFiles,
     gc: gc, estimate: estimate
   };
 })(window);
@@ -1174,6 +1371,128 @@
     } catch (e) { return null; }
   }
 
+  /* ---------- 사진 파일 저장소 (데이터 증발 대책 P2) ----------
+     사진 원본(full)을 IndexedDB 가 아니라 **앱 데이터 디렉터리의 파일**로 둔다.
+     - IndexedDB 가 통째로 날아가는 사고(손상 후 재생성·할당량 축출)에서 원본이 산다
+     - DB 용량이 수십 MB → 수백 KB 로 줄어 축출·손상 압박 자체가 준다
+     웹(PWA)에는 Filesystem 이 없으므로 기존대로 IndexedDB 에 blob 을 둔다. */
+  function fsPlugin() {
+    const C = global.Capacitor;
+    return (isNative() && C && C.Plugins && C.Plugins.Filesystem) ? C.Plugins.Filesystem : null;
+  }
+
+  function blobToB64(blob) {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result).split(',')[1] || '');
+      r.onerror = () => reject(r.error || new Error('read fail'));
+      r.readAsDataURL(blob);
+    });
+  }
+  function b64ToBlob(b64, type) {
+    const bin = atob(b64);
+    const arr = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    return new Blob([arr], { type: type || 'image/jpeg' });
+  }
+
+  function photoFsOk() { return !!fsPlugin(); }
+
+  async function photoWrite(id, blob) {
+    const F = fsPlugin();
+    if (!F) throw new Error('NOFS');
+    await F.writeFile({ path: 'photos/' + id + '.jpg', directory: 'DATA',
+                        data: await blobToB64(blob), recursive: true });
+  }
+
+  async function photoRead(id) {
+    const F = fsPlugin();
+    if (!F) return null;
+    try {
+      const r = await F.readFile({ path: 'photos/' + id + '.jpg', directory: 'DATA' });
+      return (r && r.data) ? b64ToBlob(r.data) : null;
+    } catch (e) { return null; }
+  }
+
+  /* 지우기는 최선 노력 — 파일이 없어도(구버전 사진) 조용히 넘어간다 */
+  function photoRemove(ids) {
+    const F = fsPlugin();
+    if (!F) return;
+    (ids || []).forEach((id) => {
+      F.deleteFile({ path: 'photos/' + id + '.jpg', directory: 'DATA' }).catch(() => {});
+    });
+  }
+
+  /* ---------- 파일 백업 (데이터 증발 대책 P0) ----------
+     작업 메타 JSON 을 IndexedDB·localStorage 와 **다른 계층**(파일)에 남긴다.
+     1차: 앱 데이터(DATA/backup) — 항상 됨. IndexedDB 만 죽는 사고(진단된 원인)에서 생존.
+     2차: 공용 문서(DOCUMENTS/공시체백업) — 되면 앱 삭제에서도 생존(권한에 따라 실패 가능, 최선 노력). */
+  function backupOk() { return !!fsPlugin(); }
+
+  async function backupWrite(name, text) {
+    const F = fsPlugin();
+    if (!F) return false;
+    let ok = false;
+    try {
+      await F.writeFile({ path: 'backup/' + name, directory: 'DATA',
+                          data: text, encoding: 'utf8', recursive: true });
+      ok = true;
+    } catch (e) { console.warn('[backup DATA]', e); }
+    try {
+      await F.writeFile({ path: '공시체백업/' + name, directory: 'DOCUMENTS',
+                          data: text, encoding: 'utf8', recursive: true });
+      ok = true;
+    } catch (e) { /* 공용 저장소는 기기·권한 따라 막힐 수 있다 — 1차가 있으니 조용히 */ }
+    return ok;
+  }
+
+  const BAK_DIRS = [
+    { path: 'backup', directory: 'DATA' },
+    { path: '공시체백업', directory: 'DOCUMENTS' }
+  ];
+
+  /* 백업 파일 목록 — 이름에 날짜가 있어 이름 역순 = 최신순 */
+  async function backupList() {
+    const F = fsPlugin();
+    if (!F) return [];
+    const out = [];
+    for (const d of BAK_DIRS) {
+      try {
+        const r = await F.readdir({ path: d.path, directory: d.directory });
+        ((r && r.files) || []).forEach((f) => {
+          const name = (typeof f === 'string') ? f : (f && f.name);
+          if (name && /^gsc-\d{8}\.json$/.test(name)) {
+            out.push({ name: name, path: d.path + '/' + name, directory: d.directory });
+          }
+        });
+      } catch (e) {}
+    }
+    return out.sort((a, b) => b.name.localeCompare(a.name));
+  }
+
+  async function backupRead(entry) {
+    const F = fsPlugin();
+    if (!F || !entry) return null;
+    try {
+      const r = await F.readFile({ path: entry.path, directory: entry.directory, encoding: 'utf8' });
+      return (r && r.data) || null;
+    } catch (e) { return null; }
+  }
+
+  /* 디렉터리별로 최신 keep 개만 남긴다 */
+  async function backupTrim(keep) {
+    const F = fsPlugin();
+    if (!F) return;
+    const list = await backupList();
+    const byDir = {};
+    list.forEach((e) => { (byDir[e.directory] = byDir[e.directory] || []).push(e); });
+    for (const dir of Object.keys(byDir)) {
+      byDir[dir].slice(keep || 7).forEach((e) => {
+        F.deleteFile({ path: e.path, directory: e.directory }).catch(() => {});
+      });
+    }
+  }
+
   /* 본체/SD카드 여유 용량. [{label, free, total, removable}] */
   async function storage() {
     const C = global.Capacitor;
@@ -1238,6 +1557,10 @@
                     shootPath: shootPath, pickPath: pickPath,
                     storage: storage, geo: geo,
                     galleryPref: galleryPref, setGalleryPref: setGalleryPref,
+                    photoFsOk: photoFsOk, photoWrite: photoWrite,
+                    photoRead: photoRead, photoRemove: photoRemove,
+                    backupOk: backupOk, backupWrite: backupWrite,
+                    backupList: backupList, backupRead: backupRead, backupTrim: backupTrim,
                     hasShot: function () { return !!shotPlugin(); } };
 })(window);
 
@@ -1867,15 +2190,30 @@
       const rest = text.replace(/(20\d{2})\s*[-./년]\s*\d{1,2}\s*[-./월]\s*\d{1,2}\s*일?/g, ' ');
       // 동은 여러 개일 수 있다 — "218동,208동,219동" (동 칸 하나에 나열).
       // 연이은 「N동」 무리를 통째로 잡는다. 위치 칸이 같은 동을 되풀이해도 중복 제거로 접힌다.
+      let dong = '', dongMain = '';
       const dm = rest.match(/(\d{2,3})\s*동(?:\s*[,，·]?\s*\d{2,3}\s*동)*/);
-      if (!dm || !dates.length) return;
-      const uniq = [];
-      (dm[0].match(/\d{2,3}(?=\s*동)/g) || []).forEach((d) => {
-        if (uniq.indexOf(d) < 0) uniq.push(d);
-      });
-      if (!uniq.length) return;
-      const dong = uniq.map((d) => d + '동').join(', ');
-      const dongMain = uniq[0] + '동';            // 담당 감리는 첫 동 기준(사용자 지시)
+      if (dm) {
+        const uniq = [];
+        (dm[0].match(/\d{2,3}(?=\s*동)/g) || []).forEach((d) => {
+          if (uniq.indexOf(d) < 0) uniq.push(d);
+        });
+        if (!uniq.length) return;
+        dong = uniq.map((d) => d + '동').join(', ');
+        dongMain = uniq[0] + '동';            // 담당 감리는 첫 동 기준(사용자 지시)
+        // "215동 특화동"은 본동과 다른 구역이다 — 같은 날 215동 본동과 한 작업으로 접히면 안 된다
+        if (uniq.length === 1 && new RegExp(uniq[0] + '\\s*동\\s*특화동').test(rest)) {
+          dong = dongMain + ' 특화동';
+        }
+      } else {
+        // 「A9」 같은 블록명(영문+숫자) — 동 칸이 숫자동이 아닌 단지가 있다(실측 양식)
+        const bm = rest.match(/(?:^|[^A-Za-z0-9가-힣])([A-Z]{1,2}\d{1,3})(?![A-Za-z0-9])/);
+        if (!bm) return;
+        dong = dongMain = bm[1];
+      }
+      if (!dates.length) return;
+
+      // 「탈형(기타)」 행은 작업으로 만들지 않는다(사용자 지시 — 무시)
+      if (/탈형/.test(rest)) return;
 
       const am = rest.match(/(?:^|[^\dF.\-])(\d{1,2})\s*일/);   // "28F바닥" 의 F 뒤는 제외
       let age = am ? +am[1] : null;
@@ -3097,7 +3435,9 @@
 
     let d = (e && typeof e.d === 'string') ? e.d : '';
     if (!/^\d{1,6}$/.test(d) || Math.abs(digitsToValue(d) - v) > 1e-9) d = valueToDigits(v);
-    return { v: v, d: d };
+    const out = { v: v, d: d };
+    if (e && typeof e === 'object' && e.r) out.r = 1;   // 랜덤 생성 표식(색 구분용) 보존
+    return out;
   }
 
   function load() {
@@ -3191,7 +3531,7 @@
     if (!entries.length) { justAdded = -1; return; }
     let newChip = null;
     entries.forEach((e, i) => {
-      const chip = U.el('div', 'chip' + (i === justAdded ? ' new' : ''));
+      const chip = U.el('div', 'chip' + (i === justAdded ? ' new' : '') + (e.r ? ' rand' : ''));
       chip.dataset.i = i;                 // 드래그 정렬 시 원래 위치를 되짚는 데 쓴다
       chip.appendChild(U.el('span', 'idx', (i + 1) + ''));
       chip.appendChild(U.el('span', 'val', U.fix2(e.v)));
@@ -3416,6 +3756,37 @@
     save(); render();
     U.buzz(10);
     U.toast(U.fix2(gone.v) + ' 삭제됨');
+  }
+
+  /* ---------- 랜덤값 채우기 (beta) ----------
+     입력된 값을 기준으로 비슷한 값을 만들어 3개(한 세트) 또는 9개(판 전체)까지 채운다.
+     직접 입력한 **마지막 값은 항상 맨 끝자리**(3번 또는 9번)로 옮긴다(사용자 지시).
+     퍼짐: 입력값들의 표본편차(1개뿐이면 값의 약 0.6%), 최소 0.15 — 판에 적힌 값처럼 흩어진다. */
+  function fillRandom(target) {
+    const n = entries.length;
+    if (!n) { U.toast('기준이 될 값을 먼저 입력하세요'); return; }
+    if (n >= target) {
+      U.toast('이미 ' + n + '개가 있습니다 — ' + target + '개보다 적을 때 채워집니다');
+      return;
+    }
+    const s = stats();
+    const spread = Math.max(
+      (s.sd != null && isFinite(s.sd)) ? s.sd : s.avg * 0.006, 0.15);
+    const made = [];
+    for (let i = target - n; i > 0; i--) {
+      // 균등난수 둘의 합 → 가운데가 두터운 종 모양 (자연스러운 흩어짐)
+      const jitter = ((Math.random() + Math.random()) - 1) * spread * 1.5;
+      const v = Math.round(Math.max(0.01, Math.min(MAX_VALUE, s.avg + jitter)) * 100) / 100;
+      const e = normalizeEntry({ v: v, r: 1 });   // r = 랜덤 표식 — 칩이 색으로 구분된다
+      if (e) made.push(e);
+    }
+    const last = entries.pop();          // 직접 입력한 마지막 값 → 맨 끝으로
+    entries = entries.concat(made, [last]);
+    digits = '';
+    justAdded = entries.length - 1;
+    save(); render();
+    U.buzz(12);
+    U.toast(made.length + '개를 채웠습니다 · 입력한 값이 맨 끝(' + entries.length + '번)입니다');
   }
 
   /* 되묻지 않고 바로 지운다. 대신 토스트에서 한 번에 되돌릴 수 있다. */
@@ -3666,7 +4037,8 @@
 
     U.$('#calc-link-save').addEventListener('click', saveToTask);
     U.$('#btn-clear').addEventListener('click', clearAll);
-    U.$('#btn-copy').addEventListener('click', copySummary);
+    U.$('#btn-fill3').addEventListener('click', () => fillRandom(3));
+    U.$('#btn-fill9').addEventListener('click', () => fillRandom(9));
     U.$('#btn-attach').addEventListener('click', attachToRecord);
 
     U.$('#calc-menu-btn').addEventListener('click', () => {
@@ -3784,14 +4156,14 @@
   const isToday = () => Spec.sameDay(base, new Date());
 
   /* ---------------- 데이터 ---------------- */
-  let loadFail = false;      // 읽기 실패를 "작업 없음"과 구별해 보여준다
+  let loadFail = null;      // 읽기 실패를 "작업 없음"과 구별해 보여준다 (실패면 에러 객체)
 
   async function load() {
     // 날짜를 빠르게 넘기면 먼저 시작한 조회가 나중에 끝나 새 날짜 목록을 덮어쓴다.
     // 조회 시작 시점의 날짜를 붙들고, 그 사이 바뀌었으면 결과를 버린다.
     const want = U.dayKey(base.getTime());
-    let rows = [], fail = false;
-    try { rows = await Store.tasksOf(want); } catch (e) { console.error(e); fail = true; }
+    let rows = [], fail = null;
+    try { rows = await Store.tasksOf(want); } catch (e) { console.error(e); fail = e || true; }
     if (want !== U.dayKey(base.getTime())) return;      // 지나간 조회 — 버린다
     loadFail = fail;
     all = rows;
@@ -3854,7 +4226,8 @@
     if (!rows.length) {
       list.innerHTML = '';
       emptyNode.innerHTML = loadFail
-        ? '목록을 불러오지 못했습니다.<br>위 날짜를 탭하면 다시 시도합니다.'
+        // userMsg 는 store.js 가 만든 고정 문구다(사용자 입력 아님)
+        ? ((loadFail.userMsg || '목록을 불러오지 못했습니다.') + '<br>위 날짜를 탭하면 다시 시도합니다.')
         : (all.length
           ? '조건에 맞는 작업이 없습니다.'
           : '이 날짜에 작업이 없습니다.<br>오른쪽 위 <b>+</b> 로 등록하세요.');
@@ -4070,10 +4443,10 @@
       const photos = await Store.getPhotos(ids);
       const byId = {};
       photos.forEach((p) => { byId[p.id] = p; });
-      ids.forEach((id) => {
-        const b = byId[id] && byId[id].full;
+      for (const id of ids) {
+        const b = byId[id] ? await Store.fullBlob(byId[id]) : null;   // 파일로 옮겨진 원본 포함
         if (b) blobs.push(b); else missing++;
-      });
+      }
     } catch (e) { console.error(e); }
 
     if (!blobs.length) { U.toast('보낼 사진이 없습니다'); return; }
@@ -4357,19 +4730,6 @@
     });
     const lab = $('#tk-sets-label');
     if (lab) lab.textContent = (Spec.subByKey(curSub) || {}).name + ' 압축강도';
-  }
-
-  /* 28일이면 두 칸을 통틀어 본다 — 한쪽만 보고 "빈 작업"이라 판단하면 안 된다 */
-  function anyPhoto() {
-    if (!tk) return false;
-    if (!Task.hasSubs(tk)) return (tk.photos || []).length > 0;
-    return Spec.SUBS.some((s) => Task.subPhotos(tk, s.key).length > 0);
-  }
-  function anyValue() {
-    if (!tk) return false;
-    if (!Task.hasSubs(tk)) return Task.filledSets(tk).length > 0;
-    return Spec.SUBS.some((s) =>
-      Store.normalizeSets(Task.subOf(tk, s.key)).some((x) => (x.values || []).length));
   }
 
   /* ---------------- 동수 ----------------
@@ -4717,13 +5077,19 @@
   const pendingIds = [];
   function unpend(id) { const i = pendingIds.indexOf(id); if (i >= 0) pendingIds.splice(i, 1); }
 
-  async function addFiles(fileList) {
+  async function addFiles(fileList, fromCamera) {
     if (!tk) return;
     const owner = tk;
     // 그릇도 지금 스냅샷 — 처리 중 수중/봉함 탭이 바뀌어도 시작한 칸에 붙인다(감사 확인)
     const box = bag();
     const files = Array.prototype.slice.call(fileList || []).filter((f) => f && f.size);
     if (!files.length) return;
+
+    // 아이폰(PWA)의 <input capture> 촬영본은 사진 앱에 안 남는다 — 공유 시트로 저장할 수 있게
+    // 처리본을 들고 있는다(사용자 지시: PWA 에서도 사진이 기기에 같이 남아야 한다).
+    const shareFiles = [];
+    const wantShare = fromCamera && !Native.isNative() &&
+                      typeof navigator.share === 'function' && !!navigator.canShare;
 
     U.toast('사진 처리 중…', 60000);
     let ok = 0, fail = 0, aborted = false;
@@ -4734,17 +5100,35 @@
         try {
           const img = await U.processImage(f, { maxSide: 1600, thumbSide: 320, quality: 0.82 });
           await Store.putPhoto(Object.assign({ id: id }, img));
+          if (wantShare) {
+            try { shareFiles.push(new File([img.full], 'gongsiche_' + id + '.jpg', { type: 'image/jpeg' })); }
+            catch (e) {}
+          }
         } catch (e) { console.error('[photo]', e); fail++; unpend(id); continue; }
         if (tk !== owner) { aborted = true; unpend(id); Store.deletePhotos([id]).catch(() => {}); break; }
         box.photos.push(id); dirty = true; ok++;
-        unpend(id);                    // 그릇에 들어갔다 — 이제부터는 photoIdsOf 가 지킨다
+        // **장마다** 즉시 작업에 연결해 저장한다 — putPhoto 와 putTask 사이에서 앱이 죽으면
+        // 사진이 고아가 되는 창을 한 장 분량으로 줄인다(반대심문 확인). 새 작업도 첫 장에서 생긴다.
+        if (tk === owner) await save(true);
+        unpend(id);                    // 작업 레코드에 실렸다 — 이제부터는 DB 가 지킨다
       }
       if (tk === owner) { await renderPhotos(); renderSubTabs(); }
     } finally {
       if (aborted) U.toast('편집기를 벗어나 사진 추가를 중단했습니다');
       else if (fail && ok) U.toast(ok + '장 추가 · ' + fail + '장 실패');
       else if (fail) U.toast(fail + '장 모두 불러오지 못했습니다');
-      else U.toast(ok + '장 추가했습니다' + (Task.isDone(tk) ? ' · 완료' : ''));
+      else {
+        const done = ok + '장 추가했습니다' + ((tk && Task.isDone(tk)) ? ' · 완료' : '');
+        if (ok && shareFiles.length && navigator.canShare({ files: shareFiles })) {
+          // 자동 저장은 브라우저가 막는다(사용자 제스처 필요) — 한 번 눌러 사진 앱에 저장
+          U.toast(done + '\n촬영본은 앱 안에만 있습니다', 8000, {
+            label: '사진 앱에 저장',
+            onClick: () => { navigator.share({ files: shareFiles }).catch(() => {}); }
+          });
+        } else {
+          U.toast(done);
+        }
+      }
     }
   }
 
@@ -4820,9 +5204,10 @@
   function tryClose() {
     if (!tk) { Nav.showTask(false); return; }
     collect();
-    const empty = !tk.id && !tk.part && !tk.supervisor &&
-                  !anyPhoto() && !anyValue();
-    if (empty || !dirty) { tk = null; Nav.showTask(false); Store.gc(pendingIds.slice()); return; }
+    // 예전의 "빈 작업" 판정은 동·분류·날짜만 고른 작업을 빈 것으로 오판해 경고 없이
+    // 버렸다(작업 증발 신고의 실제 원인 — 버그리포트). 규칙을 단순화한다:
+    // 바뀐 게 없으면 조용히 닫고, 바뀌었으면 무조건 묻는다.
+    if (!dirty) { tk = null; Nav.showTask(false); Store.gc(pendingIds.slice()); return; }
     U.sheet('저장하지 않은 변경이 있습니다', [
       { label: '저장하고 나가기', cls: 'strong', onPick: async () => {
           const r = await save(true);
@@ -4861,7 +5246,10 @@
       try {
         const photos = await Store.getPhotos(rec.photos);
         const byId = {}; photos.forEach((p) => { byId[p.id] = p; });
-        blobs = rec.photos.map((id) => byId[id] && byId[id].full).filter(Boolean);
+        for (const id of rec.photos) {
+          const b = byId[id] ? await Store.fullBlob(byId[id]) : null;   // 파일로 옮겨진 원본 포함
+          if (b) blobs.push(b);
+        }
       } catch (e) { console.error(e); }
       const missing = rec.photos.length - blobs.length;
       if (!blobs.length) { U.toast('사진을 불러오지 못했습니다'); return; }
@@ -4914,20 +5302,36 @@
     $('#tk-add-set').addEventListener('click', () => { addSet(); });
 
     const shootInput = $('#file-shoot'), pickInput = $('#file-pick');
-    shootInput.addEventListener('change', (e) => addFiles(e.target.files));
+    shootInput.addEventListener('change', (e) => addFiles(e.target.files, true));
     pickInput.addEventListener('change', (e) => addFiles(e.target.files));
+
+    /* 카메라·앨범 인텐트가 뜨는 동안 안드로이드가 앱을 죽일 수 있다(저사양·메모리 압박).
+       떠나기 전에 무음 저장해 두면 돌아왔을 때 콜드부팅이어도 작업이 산다(버그리포트 P1). */
+    const holdBeforeLeave = async () => { if (tk && dirty) await save(true); };
 
     // 네이티브(APK)면 Camera 플러그인, 아니면 <input type=file> 폴백
     $('#tk-shoot').addEventListener('click', async () => {
+      await holdBeforeLeave();
       const files = await Native.shoot();
       if (files === null) { shootInput.value = ''; shootInput.click(); return; }
-      if (files.length) addFiles(files);
+      if (files.length) addFiles(files, true);
     });
     $('#tk-pick').addEventListener('click', async () => {
+      await holdBeforeLeave();
       const files = await Native.pick();
       if (files === null) { pickInput.value = ''; pickInput.click(); return; }
       if (files.length) addFiles(files);
     });
+
+    // 카톡 전환·홈버튼 등 모든 이탈을 커버하는 안전망 — 가려지는 순간 무음 저장.
+    // ※ 완료 보장은 못 한다(브라우저가 기다려 주지 않는다) — 최선 노력이고,
+    //   확실한 보장은 카메라/사진추가 경로의 await 저장(holdBeforeLeave·addFiles)이 맡는다.
+    //   pagehide 도 같이 받아 신호를 이중화한다.
+    const flushEdit = () => { if (tk && dirty) save(true); };
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') flushEdit();
+    });
+    window.addEventListener('pagehide', flushEdit);
   }
 
   function init() { bind(); }
@@ -5045,8 +5449,8 @@
     try { rows = await Store.getPhotos(ids); } catch (e) { return []; }
     const out = [];
     for (const p of rows) {
-      // 손글씨 숫자는 썸네일(320px)로 안 읽힌다 — 원본(최대 1600px)을 쓴다
-      const blob = p.full || p.thumb;
+      // 손글씨 숫자는 썸네일(320px)로 안 읽힌다 — 원본(최대 1600px)을 쓴다 (파일 이전분 포함)
+      const blob = (await Store.fullBlob(p)) || p.thumb;
       if (!blob) continue;
       try { out.push({ b64: await blobToB64(blob), mime: blob.type || 'image/jpeg' }); }
       catch (e) {}
@@ -6199,11 +6603,17 @@
       // → 전체와 대조한다. 동·분류·타설일 셋이 같으면 날짜와 무관하게 같은 타설이다.
       let existing = [];
       try { existing = await Store.allTasks(); } catch (e) {}
+      // 동 비교는 적힌 그대로(공백·괄호만 접어서) — dongOf(첫 「N동」만)로 비교하면
+      // "215동"과 "215동 특화동"이 같은 것으로 보여 본동 행이 중복으로 잘못 걸러진다.
+      // 괄호도 접는 이유: 수동 등록은 명부 표기 「215동(특화동)」, OCR 은 「215동 특화동」이라
+      // 같은 작업이 다르게 보인다(감사 지적 — 안 접으면 이중 등록).
+      const dkey = (s) => String(s || '').replace(/[\s()（）]/g, '');
       const fresh = [];
       let dup = 0;
       for (const it of parsed.items) {
+        const want = dkey(it.dong);
         const exists = existing.some((t) =>
-          Task.dongOf(t) === (it.dongMain || it.dong) && t.specKey === it.specKey &&
+          (dkey(t.dong) || dkey(Task.dongOf(t))) === want && t.specKey === it.specKey &&
           (t.castDay || '') === it.castDay);
         if (exists) dup++; else fresh.push(it);
       }
@@ -6213,10 +6623,23 @@
         return;
       }
 
+      // 담당 감리를 여기서 정해 **미리보기에 보여준다** — 오배정은 등록 전에 사람이 잡는다(감사 지적).
+      // 동이 여러 개면 첫 동 감리(사용자 지시). 특화동은 명부에 「N동(특화동)」 담당이 따로 있다 —
+      // 본동 감리로 붙이면 카톡이 엉뚱한 사람에게 간다(감사 확인). 확실치 않으면 비워 둔다.
+      fresh.forEach((it) => {
+        const special = /특화동$/.test(it.dong || '');
+        const key = special
+          ? String(it.dongMain || '').replace(/동$/, '동(특화동)')
+          : (it.dongMain || it.dong);
+        const sups = Contacts.byDong(key);
+        it.sup = (sups.length === 1) ? sups[0] : null;
+      });
+
       const linesTxt = fresh.map((it) => {
         const s = Spec.byKey(it.specKey);
         return it.dong + ' ' + (s ? s.name : it.age + '일') +
                ' · 타설 ' + Spec.md(it.castDay) + ' → 시험 ' + Spec.md(it.testDay) +
+               ' · ' + (it.sup ? Contacts.label(it.sup) : '감리 미지정') +
                (it.offAge ? ' (재령 확인!)' : '');
       }).join('\n');
       const title = '읽은 작업 ' + fresh.length + '건' +
@@ -6225,10 +6648,7 @@
       U.confirmSheet(title, fresh.length + '건 등록', async () => {
         let ok = 0;
         for (const it of fresh) {
-          // 동을 알면 담당 감리도 따라온다 (둘 이상이면 비워 둔다 — 짐작하지 않는다)
-          // 동이 여러 개면 **첫 동 담당 감리가 전부 맡는다**(사용자 지시)
-          const sups = Contacts.byDong(it.dongMain || it.dong);
-          const sup = (sups.length === 1) ? sups[0] : null;
+          const sup = it.sup || null;      // 미리보기에서 보여준 그 감리 그대로
           try {
             await Store.putTask({
               day: it.testDay, testDay: it.testDay,
@@ -6536,16 +6956,18 @@
 
     U.$('#task-title').textContent = (isToday() ? '오늘' : Spec.shortDate(base)) + ' 작업';
 
-    let tasks = [], failed = false;
-    try { tasks = await Task.list(day); } catch (e) { console.error(e); failed = true; }
+    let tasks = [], failed = null;
+    try { tasks = await Task.list(day); } catch (e) { console.error(e); failed = e || true; }
     if (my !== taskSeq) return;      // 그 사이 날짜가 또 바뀌었다 — 지나간 조회는 버린다
 
     list.innerHTML = '';
     // 읽기 실패를 "작업 없음"으로 보여주면 데이터가 다 날아간 걸로 오인한다(실제 사고).
     // 실패는 실패라고 말하고, 탭 한 번으로 다시 읽게 한다.
+    // 구버전 설치(VersionError) 같은 건 원인 문구(userMsg)를 그대로 보여준다.
     if (failed) {
       U.$('#task-count').textContent = '–';
-      const err = U.el('p', 'todo-empty', '목록을 불러오지 못했습니다 — 탭해서 다시 시도');
+      const err = U.el('p', 'todo-empty',
+        (failed.userMsg || '목록을 불러오지 못했습니다') + ' — 탭해서 다시 시도');
       err.addEventListener('click', () => renderTasks());
       list.appendChild(err);
       return;
@@ -6799,23 +7221,29 @@
     // 데이터 안전판 — 부팅이 자리 잡은 뒤에(1.5초) 하루 한 번 작업 메타를 백업한다.
     // DB 는 비었는데 백업이 남아 있으면(증발 사고) 그냥 덮지 말고 복원을 권한다.
     setTimeout(() => {
-      Store.taskCount().then((n) => {
-        const bak = Store.backupInfo();
-        if (!n && bak) {
+      Store.taskCount().then(async (n) => {
+        if (!n) {
+          // localStorage 백업 → 파일 백업 순으로 찾는다 — 저장 계층이 같이 죽는 사고까지 커버
+          let bak = Store.backupInfo();
+          if (!bak) { try { bak = await Store.fileBackupInfo(); } catch (e) { bak = null; } }
+          if (!bak) return;
           // 사용자가 이미 다른 시트를 보고 있으면 치환하지 않는다(잘못 누름 방지).
           // DB 가 빈 상태면 다음 부팅에 다시 제안된다.
           if (!U.$('#sheet-back').classList.contains('hidden')) return;
           U.confirmSheet(
             '저장된 작업이 하나도 없는데\n' + U.dayLabel(bak.at) + ' 백업(' + bak.n + '건)이 있습니다\n' +
-            '복원할까요? (사진은 복원되지 않습니다)', '복원',
+            '복원할까요? (파일로 남은 사진은 함께 살립니다)', '복원',
             async () => {
-              const k = await Store.restoreBackup();
+              const k = await Store.restoreBackup(bak);
               U.toast('작업 ' + k + '건을 복원했습니다');
               try { Home.refresh(); } catch (e) {}
             });
           return;
         }
-        Store.backupDaily();
+        Store.backupDaily();            // localStorage (즉시 계층)
+        Store.backupToFileDaily();      // 파일 계층 (DATA + 공용문서, 7세대)
+        // 기존 blob 사진을 파일로 이전(P2) — 조용히, 조금씩. 중단돼도 다음 부팅에 이어서.
+        Store.migratePhotosToFiles().then((m) => { if (m) console.log('[사진 파일 이전]', m + '장'); });
       }).catch(() => {});
     }, 1500);
   }
