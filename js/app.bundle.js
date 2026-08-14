@@ -7258,6 +7258,597 @@
 })(window);
 
 ;
+/* ===== js/powder.js ===== */
+/* ============ powder.js — 몰래 파우더 (건설현장판, 숨김 기능) ============
+   지하 대기시간용 낙하 모래 물리 장난감(사용자 요청). 숨김 입구: 홈 인사말 5연타.
+   뒤로가기로 닫힌다. 완전 오프라인.
+
+   시스템:
+   - 배합 체인: 시멘트+물→시멘트풀, +모래→모르타르, +자갈→레미콘 → 양생 → 콘크리트
+   - 온도: 셀마다 온도(열전도·상변화). 물↔얼음↔증기, 모래 고온→유리, 철근 고온→쇳물,
+     아스팔트 온도로 녹고 굳음. **양생 속도가 온도를 따른다 — 영하면 양생 정지(한중콘크리트)**
+   - 하중: 받침 없는 구조체는 무너지고(철근·옹벽이 앵커), 약한 재료는 위 하중에 압괴돼 잔해가 된다
+   - 폭발물: 다이너마이트·화약·니트로(열·불로 기폭, 연쇄)
+   - 시간: 배속(½·1·2·4)과 멈춤
+========================================================================= */
+(function (global) {
+  'use strict';
+
+  /* ---------------- 재료 ----------------
+     kind: solid/powder/liquid/slurry/gas/empty
+     flam: 인화(불 접촉·발화온도 ign 이상이면 불붙음)
+     cureTo/cure: 양생 결과/기본 소요(온도가 배속·정지시킨다)
+     crush: 압괴 한계(위에 쌓인 셀 수) — 넘으면 잔해가 된다. 없으면 안 부서짐
+     anchor: 구조 앵커(자신·이웃 구조체가 안 떨어진다) */
+  const M = [
+    { id: 0,  name: '지우개',   color: [13, 17, 23],    kind: 'empty' },
+    { id: 1,  name: '옹벽',     color: [72, 76, 84],    kind: 'solid', anchor: 1, boom: 0 },
+    { id: 2,  name: '모래',     color: [217, 192, 122], kind: 'powder' },
+    { id: 3,  name: '자갈',     color: [143, 138, 128], kind: 'powder', heavy: 1 },
+    { id: 4,  name: '시멘트',   color: [154, 160, 168], kind: 'powder' },
+    { id: 5,  name: '물',       color: [77, 159, 232],  kind: 'liquid' },
+    { id: 6,  name: '시멘트풀', color: [184, 188, 196], kind: 'slurry', cureTo: 16, cure: 120 },
+    { id: 7,  name: '모르타르', color: [169, 169, 163], kind: 'slurry', cureTo: 17, cure: 150 },
+    { id: 8,  name: '레미콘',   color: [125, 131, 140], kind: 'slurry', cureTo: 18, cure: 180 },
+    { id: 9,  name: '고강도',   color: [91, 100, 114],  kind: 'slurry', cureTo: 19, cure: 140 },
+    { id: 10, name: '기름',     color: [181, 141, 61],  kind: 'liquid', flam: 1, ign: 260 },
+    { id: 11, name: '우레탄폼', color: [240, 208, 96],  kind: 'slurry', cureTo: 20, cure: 55, grow: 1, flam: 1, ign: 320 },
+    { id: 12, name: '용접불꽃', color: [255, 122, 48],  kind: 'gas', fire: 1, life: 26 },
+    { id: 13, name: '연기',     color: [107, 107, 107], kind: 'gas', life: 90 },
+    { id: 14, name: '증기',     color: [207, 216, 224], kind: 'gas', life: 160 },
+    { id: 15, name: '얼음',     color: [191, 227, 255], kind: 'solid', crush: 60 },
+    { id: 16, name: '굳은시멘트', color: [194, 198, 205], kind: 'solid', crush: 40, hidden: 1 },
+    { id: 17, name: '굳은몰탈', color: [151, 151, 143], kind: 'solid', crush: 55, hidden: 1 },
+    { id: 18, name: '콘크리트', color: [111, 117, 128], kind: 'solid', crush: 110 },
+    { id: 19, name: '고강도콘크리트', color: [74, 81, 96], kind: 'solid', crush: 200, hidden: 1 },
+    { id: 20, name: '굳은폼',   color: [230, 217, 160], kind: 'solid', crush: 14, flam: 1, ign: 300, hidden: 1 },
+    { id: 21, name: '거푸집',   color: [165, 113, 63],  kind: 'solid', crush: 90, flam: 1, ign: 280 },
+    { id: 22, name: '철근',     color: [85, 96, 108],   kind: 'solid', anchor: 1 },
+    { id: 23, name: '녹슨철근', color: [138, 90, 58],   kind: 'solid', anchor: 1, crush: 130, hidden: 1 },
+    { id: 24, name: '쇳물',     color: [255, 176, 82],  kind: 'liquid', hot: 1400 },
+    { id: 25, name: '벽돌',     color: [176, 96, 70],   kind: 'solid', crush: 90 },
+    { id: 26, name: '유리',     color: [168, 205, 214], kind: 'solid', crush: 25 },
+    { id: 27, name: '눈',       color: [242, 247, 251], kind: 'powder', light: 1 },
+    { id: 28, name: '염화칼슘', color: [232, 226, 242], kind: 'powder' },
+    { id: 29, name: '흙',       color: [122, 92, 62],   kind: 'powder' },
+    { id: 30, name: '진흙',     color: [93, 70, 48],    kind: 'slurry', cureTo: 29, cure: 240 },
+    { id: 31, name: '다이너마이트', color: [214, 60, 48], kind: 'solid', expl: 9, ign: 150, crush: 999 },
+    { id: 32, name: '화약',     color: [58, 58, 62],    kind: 'powder', expl: 4, ign: 180 },
+    { id: 33, name: '잔해',     color: [120, 116, 110], kind: 'powder', heavy: 1 },
+    { id: 34, name: '아스팔트', color: [46, 46, 52],    kind: 'solid', crush: 70 },
+    { id: 35, name: '아스팔트(액)', color: [64, 60, 66], kind: 'liquid', hot: 130, hidden: 1 },
+    { id: 36, name: '히터',     color: [255, 96, 64],   kind: 'solid', anchor: 1, heat: 600 },
+    { id: 37, name: '쿨러',     color: [96, 180, 255],  kind: 'solid', anchor: 1, heat: -60 },
+    { id: 38, name: '니트로',   color: [98, 190, 98],   kind: 'liquid', expl: 6, ign: 60 }
+  ];
+  const KIND = M.map((m) => m.kind);
+  const CRUSH = M.map((m) => m.crush || 0);
+  const ANCHOR = M.map((m) => m.anchor ? 1 : 0);
+
+  /* ---------------- 격자 ---------------- */
+  const W = 120, H = 176, AMBIENT = 20;
+  let mat = new Uint8Array(W * H);
+  let life = new Uint16Array(W * H);
+  let temp = new Int16Array(W * H).fill(AMBIENT);
+  let moved = new Uint8Array(W * H);
+  const I = (x, y) => y * W + x;
+  const inb = (x, y) => x >= 0 && x < W && y >= 0 && y < H;
+  const N4 = [[0, -1], [0, 1], [-1, 0], [1, 0]];
+
+  /* ---------------- 상태·화면 ---------------- */
+  let root = null, cv = null, ctx = null, imgData = null;
+  let running = false, paused = false, raf = 0;
+  let curMat = 8, brush = 3;
+  let speed = 2;                                    // 프레임당 틱 수 (½ 은 0.5 → 프레임 걸러 1틱)
+  let halfFlip = false;
+  let boomQ = [];                                   // 연쇄 폭발 큐
+  const noise = new Uint8Array(W * H);
+  for (let i = 0; i < noise.length; i++) noise[i] = (Math.random() * 3) | 0;
+
+  /* ---------------- UI ---------------- */
+  function buildUI() {
+    root = document.createElement('div');
+    root.id = 'powder';
+    root.className = 'pd hidden';
+    root.innerHTML =
+      '<div class="pd-top">' +
+      '  <b>몰래 파우더 <span class="beta">건설현장판</span></b>' +
+      '  <span class="pd-top-btns">' +
+      '    <button class="pd-btn" id="pd-speed">×2</button>' +
+      '    <button class="pd-btn" id="pd-brush">붓 3</button>' +
+      '    <button class="pd-btn" id="pd-pause">멈춤</button>' +
+      '    <button class="pd-btn" id="pd-clear">비우기</button>' +
+      '    <button class="pd-btn" id="pd-close">닫기</button>' +
+      '  </span>' +
+      '</div>' +
+      '<div class="pd-stage"><canvas id="pd-cv"></canvas></div>' +
+      '<div class="pd-hint" id="pd-info">시멘트+물→시멘트풀 · +모래→몰탈 · +자갈→레미콘 · 영하면 양생이 안 된다</div>' +
+      '<div class="pd-pal" id="pd-pal"></div>';
+    document.body.appendChild(root);
+
+    cv = root.querySelector('#pd-cv');
+    cv.width = W; cv.height = H;
+    ctx = cv.getContext('2d');
+    imgData = ctx.createImageData(W, H);
+
+    const pal = root.querySelector('#pd-pal');
+    // 손에 잡히는 순서: 건설 → 위험물 → 환경 → 지우개
+    const order = [8, 9, 6, 7, 4, 2, 3, 5, 22, 21, 25, 34, 26, 11, 15, 1,
+                   12, 10, 32, 31, 38, 24, 36, 37, 27, 28, 29, 33, 0];
+    order.forEach((id) => pal.appendChild(palBtn(M[id])));
+
+    root.querySelector('#pd-close').addEventListener('click', close);
+    root.querySelector('#pd-clear').addEventListener('click', () => {
+      mat.fill(0); life.fill(0); temp.fill(AMBIENT); boomQ.length = 0;
+      U.buzz(10);
+    });
+    root.querySelector('#pd-pause').addEventListener('click', (e) => {
+      paused = !paused;
+      e.target.textContent = paused ? '재생' : '멈춤';
+    });
+    root.querySelector('#pd-brush').addEventListener('click', (e) => {
+      brush = brush === 3 ? 6 : (brush === 6 ? 1 : 3);
+      e.target.textContent = '붓 ' + brush;
+    });
+    root.querySelector('#pd-speed').addEventListener('click', (e) => {
+      // ½ → 1 → 2 → 4 순환 (시간 조절)
+      speed = speed === 0.5 ? 1 : (speed === 1 ? 2 : (speed === 2 ? 4 : 0.5));
+      e.target.textContent = '×' + (speed === 0.5 ? '½' : speed);
+    });
+
+    let drawing = false, last = null;
+    const pos = (e) => {
+      const r = cv.getBoundingClientRect();
+      return { x: ((e.clientX - r.left) / r.width * W) | 0,
+               y: ((e.clientY - r.top) / r.height * H) | 0 };
+    };
+    cv.addEventListener('pointerdown', (e) => {
+      drawing = true; last = pos(e); paint(last.x, last.y); info(last.x, last.y);
+      try { cv.setPointerCapture(e.pointerId); } catch (err) {}
+    });
+    cv.addEventListener('pointermove', (e) => {
+      if (!drawing) return;
+      const p = pos(e);
+      line(last.x, last.y, p.x, p.y);
+      last = p;
+    });
+    const up = () => { drawing = false; last = null; };
+    cv.addEventListener('pointerup', up);
+    cv.addEventListener('pointercancel', up);
+    cv.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
+  }
+
+  function palBtn(m) {
+    const b = document.createElement('button');
+    b.className = 'pd-mat' + (m.id === curMat ? ' on' : '');
+    b.dataset.m = m.id;
+    b.innerHTML = '<i style="background:rgb(' + m.color.join(',') + ')"></i>' + m.name;
+    b.addEventListener('click', () => {
+      curMat = m.id;
+      root.querySelectorAll('.pd-mat').forEach((x) => x.classList.toggle('on', +x.dataset.m === curMat));
+      U.buzz(4);
+    });
+    return b;
+  }
+
+  function info(x, y) {
+    const el = root.querySelector('#pd-info');
+    if (!el || !inb(x, y)) return;
+    const i = I(x, y);
+    el.textContent = M[mat[i]].name + ' · ' + temp[i] + '°C · 붓: ' + M[curMat].name;
+  }
+
+  function paint(cx0, cy0) {
+    const r = brush;
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (dx * dx + dy * dy > r * r) continue;
+        const x = cx0 + dx, y = cy0 + dy;
+        if (!inb(x, y)) continue;
+        const k = KIND[curMat];
+        if ((k === 'powder' || k === 'liquid' || k === 'slurry' || k === 'gas') && Math.random() < 0.4) continue;
+        const i = I(x, y);
+        if (curMat !== 0 && mat[i] !== 0 && KIND[mat[i]] === 'solid') continue;
+        mat[i] = curMat;
+        life[i] = 0;
+        temp[i] = M[curMat].hot || (curMat === 12 ? 700 : (M[curMat].heat || AMBIENT));
+      }
+    }
+  }
+
+  function line(x0, y0, x1, y1) {
+    const n = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0), 1);
+    for (let s = 0; s <= n; s++) {
+      paint(Math.round(x0 + (x1 - x0) * s / n), Math.round(y0 + (y1 - y0) * s / n));
+    }
+  }
+
+  /* ---------------- 반응(배합·용해) ---------------- */
+  function react(a, b) {
+    if ((a === 4 && b === 5) || (a === 5 && b === 4)) return [6, 6];      // 시멘트+물 → 시멘트풀
+    if ((a === 6 && b === 2) || (a === 2 && b === 6)) return [7, 7];      // +모래 → 모르타르
+    if ((a === 7 && b === 3) || (a === 3 && b === 7)) return [8, 8];      // +자갈 → 레미콘
+    if (a === 28 && (b === 15 || b === 27)) return [5, 5];                // 염화칼슘 — 제설
+    if ((a === 15 || a === 27) && b === 28) return [5, 5];
+    if ((a === 28 && b === 5) || (a === 5 && b === 28)) return [5, 5];
+    if ((a === 29 && b === 5) || (a === 5 && b === 29)) return [30, 30];  // 흙+물 → 진흙
+    return null;
+  }
+
+  function tryReact(i, x, y) {
+    const a = mat[i];
+    for (let k = 0; k < 4; k++) {
+      const nx = x + N4[k][0], ny = y + N4[k][1];
+      if (!inb(nx, ny)) continue;
+      const j = I(nx, ny);
+      const r = react(a, mat[j]);
+      if (r) {
+        mat[i] = r[0]; mat[j] = r[1];
+        life[i] = 0; life[j] = 0;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function swap(i, j) {
+    const m = mat[i], l = life[i], t = temp[i];
+    mat[i] = mat[j]; life[i] = life[j]; temp[i] = temp[j];
+    mat[j] = m; life[j] = l; temp[j] = t;
+    moved[i] = 1; moved[j] = 1;
+  }
+  const passable = (id) => id === 0 || KIND[id] === 'gas';
+  const sinkIn = (id) => KIND[id] === 'liquid';
+
+  /* ---------------- 폭발 ---------------- */
+  function boom(cx, cy, r) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        const d2 = dx * dx + dy * dy;
+        if (d2 > r * r) continue;
+        const x = cx + dx, y = cy + dy;
+        if (!inb(x, y)) continue;
+        const i = I(x, y);
+        const id = mat[i];
+        if (id === 1) continue;                       // 옹벽은 발파로도 안 깨진다
+        if (M[id].expl && !(dx === 0 && dy === 0)) {  // 연쇄 기폭
+          boomQ.push([x, y, M[id].expl]);
+          mat[i] = 0;
+          continue;
+        }
+        temp[i] = 900;
+        if (d2 < r * r * 0.36) {
+          mat[i] = Math.random() < 0.5 ? 12 : 0;      // 중심부 — 화염
+          life[i] = 0;
+        } else if (KIND[id] === 'solid') {
+          mat[i] = 33; life[i] = 0;                   // 구조물 → 잔해
+        } else if (id && Math.random() < 0.5) {
+          mat[i] = 13; life[i] = 0;
+        }
+      }
+    }
+    U.buzz(30);
+  }
+
+  function fuse(i, x, y) {                            // 폭발물 기폭 조건
+    const id = mat[i];
+    if (!M[id].expl) return false;
+    if (temp[i] >= (M[id].ign || 150) || nearFire(x, y)) {
+      mat[i] = 0;
+      boomQ.push([x, y, M[id].expl]);
+      return true;
+    }
+    return false;
+  }
+
+  /* ---------------- 온도 ---------------- */
+  function condOf(id) {
+    const k = KIND[id];
+    if (id === 22 || id === 23) return 0.5;           // 철 — 잘 통한다
+    if (id === 20 || id === 11) return 0.03;          // 폼 — 단열재
+    if (k === 'solid') return 0.2;
+    if (k === 'liquid' || k === 'slurry') return 0.3;
+    if (k === 'powder') return 0.15;
+    return 0.12;                                      // 공기·가스
+  }
+
+  function heatPass() {
+    // 위→아래 한 방향 이웃 섞기 — 싸고 그럴듯하다
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const i = I(x, y);
+        const id = mat[i];
+        if (M[id].heat != null) { temp[i] = M[id].heat; continue; }   // 히터·쿨러는 온도원
+        if (id === 12) { temp[i] = Math.max(temp[i], 700); }
+        if (id === 24) { temp[i] = Math.max(temp[i], 1300); }
+        let sum = 0, n = 0;
+        if (x > 0) { sum += temp[i - 1]; n++; }
+        if (x < W - 1) { sum += temp[i + 1]; n++; }
+        if (y > 0) { sum += temp[i - W]; n++; }
+        if (y < H - 1) { sum += temp[i + W]; n++; }
+        const c = condOf(id);
+        temp[i] += ((sum / n - temp[i]) * c) | 0;
+        if (!id) temp[i] += ((AMBIENT - temp[i]) * 0.02) | 0;         // 공기는 서서히 제자리로
+      }
+    }
+  }
+
+  /* 온도에 따른 상변화 — true 면 이 셀은 이번 틱 끝 */
+  function phase(i, x, y) {
+    const id = mat[i], t = temp[i];
+    switch (id) {
+      case 5:  if (t <= -1) { mat[i] = 15; return true; }
+               if (t >= 100) { mat[i] = 14; life[i] = 0; return true; }
+               break;
+      case 15: if (t >= 1) { mat[i] = 5; return true; } break;
+      case 27: if (t >= 1) { mat[i] = 5; return true; } break;
+      case 14: if (t < 95 && Math.random() < 0.03) { mat[i] = 5; return true; } break;
+      case 2:  if (t >= 450) { mat[i] = 26; return true; } break;      // 모래 → 유리 (불더미·쇳물로 구워진다)
+      case 22: case 23:
+               if (t >= 1300) { mat[i] = 24; return true; } break;     // 철근 → 쇳물
+      case 24: if (t < 1000) { mat[i] = 22; return true; } break;      // 쇳물 → 철
+      case 34: if (t >= 90) { mat[i] = 35; return true; } break;       // 아스팔트 녹음
+      case 35: if (t < 60) { mat[i] = 34; return true; } break;
+    }
+    // 인화물 자연 발화
+    if (M[id].flam && M[id].ign && t >= M[id].ign) { mat[i] = 12; life[i] = 0; return true; }
+    return false;
+  }
+
+  /* ---------------- 하중·지지 ---------------- */
+  function solidStep(i, x, y) {
+    const id = mat[i];
+    if (ANCHOR[id]) {
+      if (id === 22) rustCheck(i, x, y);
+      return;
+    }
+    // 지지 검사 — 아래 3칸 중 하나라도 고체거나, 이웃에 앵커(철근·옹벽)가 있으면 버틴다
+    let held = (y === H - 1);
+    if (!held) {
+      for (const dx of [0, -1, 1]) {
+        const nx = x + dx;
+        if (inb(nx, y + 1) && KIND[mat[I(nx, y + 1)]] === 'solid') { held = true; break; }
+      }
+    }
+    if (!held) {
+      for (let k = 0; k < 4 && !held; k++) {
+        const nx = x + N4[k][0], ny = y + N4[k][1];
+        if (inb(nx, ny) && ANCHOR[mat[I(nx, ny)]]) held = true;
+      }
+    }
+    if (!held) {                                       // 받침이 없다 — 무너진다
+      const below = I(x, y + 1);
+      if (passable(mat[below]) || sinkIn(mat[below])) { swap(i, below); return; }
+    }
+    // 압괴 — 위에 쌓인 무게가 한계를 넘으면 잔해가 된다 (가끔만 재서 싸게)
+    const lim = CRUSH[id];
+    if (lim && lim < 999 && Math.random() < 0.04) {
+      let load = 0;
+      for (let yy = y - 1; yy >= 0 && load <= lim; yy--) {
+        const m2 = mat[I(x, yy)];
+        if (!m2 || KIND[m2] === 'gas') break;
+        load += (KIND[m2] === 'solid') ? 2 : 1;        // 구조체가 더 무겁다
+      }
+      if (load > lim) { mat[i] = 33; life[i] = 0; U.buzz(6); }
+    }
+  }
+
+  function rustCheck(i, x, y) {
+    for (let k = 0; k < 4; k++) {
+      const nx = x + N4[k][0], ny = y + N4[k][1];
+      if (inb(nx, ny) && mat[I(nx, ny)] === 5) {
+        if (++life[i] > 300) { mat[i] = 23; life[i] = 0; }
+        return;
+      }
+    }
+  }
+
+  /* ---------------- 한 틱 ---------------- */
+  function step() {
+    moved.fill(0);
+    heatPass();
+    const ltr = (Math.random() < 0.5);
+
+    for (let y = H - 1; y >= 0; y--) {
+      for (let xx = 0; xx < W; xx++) {
+        const x = ltr ? xx : (W - 1 - xx);
+        const i = I(x, y);
+        const id = mat[i];
+        if (!id || moved[i]) continue;
+
+        if (phase(i, x, y)) continue;
+        if (M[id].expl && fuse(i, x, y)) continue;
+
+        const kind = KIND[id];
+
+        if (kind === 'solid') { solidStep(i, x, y); continue; }
+
+        if (kind === 'gas') {
+          if (id === 12) fireStep(i, x, y);
+          else gasStep(i, x, y, id);
+          continue;
+        }
+
+        if (tryReact(i, x, y)) continue;
+
+        if (kind === 'powder') {
+          const p = M[id];
+          if (p.light && Math.random() < 0.4) continue;
+          const below = y + 1 < H ? I(x, y + 1) : -1;
+          if (below >= 0 && (passable(mat[below]) || sinkIn(mat[below]))) { swap(i, below); continue; }
+          const dir = Math.random() < 0.5 ? -1 : 1;
+          if (Math.random() < (p.heavy ? 0.25 : 1)) {
+            for (const d of [dir, -dir]) {
+              if (inb(x + d, y + 1) && passable(mat[I(x + d, y + 1)])) { swap(i, I(x + d, y + 1)); break; }
+            }
+          }
+          continue;
+        }
+
+        if (kind === 'slurry') {
+          // 걸쭉함 — 밑이 뚫려 있으면 흘러내리고, 받쳐지면 **정착해서 양생이 쌓인다**.
+          // (예전엔 바닥에서 옆으로 계속 흘러다녀 양생이 영영 안 됐다 — 실측 버그)
+          const below = y + 1 < H ? I(x, y + 1) : -1;
+          if (below >= 0 && passable(mat[below])) {
+            swap(i, below); life[i] = 0; life[below] = 0;
+            continue;
+          }
+          cureStep(i, x, y, id);
+          // 갓 부은 것만 퍼진다 — 양생이 시작됐거나 얼었으면 그 자리에 멈춘다
+          if (temp[i] > 0 && life[i] < 30 && Math.random() < 0.15) {
+            const dir = Math.random() < 0.5 ? -1 : 1;
+            for (const d of [dir, -dir]) {
+              if (inb(x + d, y + 1) && passable(mat[I(x + d, y + 1)])) { swap(i, I(x + d, y + 1)); break; }
+              if (inb(x + d, y) && passable(mat[I(x + d, y)])) { swap(i, I(x + d, y)); break; }
+            }
+          }
+          continue;
+        }
+
+        if (kind === 'liquid') {
+          const below = y + 1 < H ? I(x, y + 1) : -1;
+          if (below >= 0 && passable(mat[below])) { swap(i, below); continue; }
+          if (id === 5 && below >= 0 && mat[below] === 10) { swap(i, below); continue; }   // 물이 기름 밑으로
+          const dir = Math.random() < 0.5 ? -1 : 1;
+          let m1 = false;
+          for (const d of [dir, -dir]) {
+            if (inb(x + d, y + 1) && passable(mat[I(x + d, y + 1)])) { swap(i, I(x + d, y + 1)); m1 = true; break; }
+          }
+          if (m1) continue;
+          for (const d of [dir, -dir]) {
+            if (inb(x + d, y) && passable(mat[I(x + d, y)])) { swap(i, I(x + d, y)); break; }
+          }
+          continue;
+        }
+      }
+    }
+
+    // 폭발은 순회가 끝난 뒤 한꺼번에 — 순회 중 터뜨리면 반쪽짜리 프레임이 된다
+    if (boomQ.length) {
+      const q = boomQ; boomQ = [];
+      let n = 0;
+      for (const b of q) { boom(b[0], b[1], b[2]); if (++n > 24) break; }   // 연쇄 폭주 제한
+    }
+  }
+
+  /* 양생 — 온도를 따른다: 영하 정지(한중), 10도 미만 반속, 35도 초과 급결(서중) */
+  function cureStep(i, x, y, id) {
+    const p = M[id];
+    if (!p.cureTo) return;
+    const t = temp[i];
+    if (t <= 0) return;                                // 동결 — 양생이 멈춘다
+    if (p.grow && life[i] < 20 && Math.random() < 0.25) {
+      const k = (Math.random() * 4) | 0;
+      const nx = x + N4[k][0], ny = y + N4[k][1];
+      if (inb(nx, ny) && mat[I(nx, ny)] === 0) { mat[I(nx, ny)] = id; life[I(nx, ny)] = 10; }
+    }
+    const gain = t < 10 ? 1 : (t > 35 ? 3 : 2);
+    if ((life[i] += gain) >= p.cure) { mat[i] = p.cureTo; life[i] = 0; }
+  }
+
+  function nearFire(x, y) {
+    for (let k = 0; k < 4; k++) {
+      const nx = x + N4[k][0], ny = y + N4[k][1];
+      if (inb(nx, ny) && mat[I(nx, ny)] === 12) return true;
+    }
+    return false;
+  }
+
+  function fireStep(i, x, y) {
+    for (let k = 0; k < 4; k++) {
+      const nx = x + N4[k][0], ny = y + N4[k][1];
+      if (!inb(nx, ny)) continue;
+      const j = I(nx, ny);
+      const t = mat[j];
+      if (M[t].flam && Math.random() < 0.22) { mat[j] = 12; life[j] = 0; }
+      else if (t === 5 && Math.random() < 0.5) { mat[j] = 14; mat[i] = 0; return; }
+      else if ((t === 15 || t === 27) && Math.random() < 0.3) mat[j] = 5;
+    }
+    if (Math.random() < 0.12 && y > 0 && mat[I(x, y - 1)] === 0) mat[I(x, y - 1)] = 13;
+    if (++life[i] > M[12].life) { mat[i] = Math.random() < 0.25 ? 13 : 0; life[i] = 0; return; }
+    const dx = ((Math.random() * 3) | 0) - 1;
+    if (inb(x + dx, y - 1) && mat[I(x + dx, y - 1)] === 0) swap(i, I(x + dx, y - 1));
+  }
+
+  function gasStep(i, x, y, id) {
+    if (++life[i] > M[id].life) {
+      mat[i] = (id === 14 && Math.random() < 0.25) ? 5 : 0;
+      life[i] = 0;
+      return;
+    }
+    const dx = ((Math.random() * 3) | 0) - 1;
+    if (inb(x + dx, y - 1) && mat[I(x + dx, y - 1)] === 0) { swap(i, I(x + dx, y - 1)); return; }
+    if (inb(x + dx, y) && mat[I(x + dx, y)] === 0 && Math.random() < 0.5) swap(i, I(x + dx, y));
+  }
+
+  /* ---------------- 렌더 ---------------- */
+  function render() {
+    const d = imgData.data;
+    for (let i = 0, p = 0; i < mat.length; i++, p += 4) {
+      const id = mat[i];
+      const c = M[id].color;
+      let r = c[0], g = c[1], b = c[2];
+      if (id) {
+        const n = noise[i] * 6 - 6;
+        r += n; g += n; b += n;
+        // 뜨거우면 붉게 달아오른다 (철근·콘크리트 가열 표현)
+        const t = temp[i];
+        if (t > 300 && KIND[id] === 'solid') {
+          const glow = Math.min(140, (t - 300) >> 2);
+          r += glow; g += glow >> 2;
+        }
+      }
+      d[p] = r; d[p + 1] = g; d[p + 2] = b; d[p + 3] = 255;
+    }
+    ctx.putImageData(imgData, 0, 0);
+  }
+
+  function loop() {
+    if (!running) return;
+    if (!paused) {
+      if (speed === 0.5) { halfFlip = !halfFlip; if (halfFlip) step(); }
+      else for (let k = 0; k < speed; k++) step();
+    }
+    render();
+    raf = requestAnimationFrame(loop);
+  }
+
+  /* ---------------- 열기/닫기 ---------------- */
+  function open() {
+    if (!root) buildUI();
+    root.classList.remove('hidden');
+    running = true; paused = false;
+    loop();
+    U.toast('발견! 지하 대기시간 전용입니다', 2000);
+  }
+
+  function close() {
+    running = false;
+    cancelAnimationFrame(raf);
+    if (root) root.classList.add('hidden');
+  }
+
+  function isOpen() { return !!(root && !root.classList.contains('hidden')); }
+
+  global.Powder = {
+    open: open, close: close, isOpen: isOpen,
+    // 테스트용
+    _paint: function (x, y, m, r) { const c = curMat, b = brush; curMat = m; brush = r || 1; paint(x, y); curMat = c; brush = b; },
+    _set: function (x, y, m) {
+      const i = I(x, y);
+      mat[i] = m; life[i] = 0;
+      temp[i] = M[m].hot || (m === 12 ? 700 : (M[m].heat != null ? M[m].heat : AMBIENT));
+    },
+    _tick: function (n) { for (let k = 0; k < (n || 1); k++) step(); },
+    _at: function (x, y) { return mat[I(x, y)]; },
+    _temp: function (x, y) { return temp[I(x, y)]; },
+    _setTemp: function (x, y, t) { temp[I(x, y)] = t; },
+    _count: function (m) { let c = 0; for (let i = 0; i < mat.length; i++) if (mat[i] === m) c++; return c; },
+    _clear: function () { mat.fill(0); life.fill(0); temp.fill(AMBIENT); boomQ.length = 0; }
+  };
+})(window);
+
+;
 /* ===== js/home.js ===== */
 /* ============ home.js — 메인(홈) 화면 ============
    하루의 출발점.
@@ -7576,6 +8167,15 @@
   /* ---------------- 바인딩 ---------------- */
   function bind() {
     U.$('#wx-card').addEventListener('click', () => renderWeather(true));
+
+    // 숨김 장난감(몰래 파우더) — 인사말을 빠르게 5번 탭(사용자 요청)
+    let eggN = 0, eggT = 0;
+    U.$('#hello').addEventListener('click', () => {
+      const now = Date.now();
+      if (now - eggT > 1600) eggN = 0;
+      eggT = now;
+      if (++eggN >= 5) { eggN = 0; if (global.Powder) Powder.open(); }
+    });
     bindSettings();
     U.$('#day-prev').addEventListener('click', () => goDay(-1));
     U.$('#day-next').addEventListener('click', () => goDay(1));
@@ -7672,6 +8272,7 @@
 
   /* 뒤로가기 한 단계 처리. 더 이상 물러설 곳이 없으면 false */
   function goBack() {
+    if (global.Powder && Powder.isOpen()) { Powder.close(); return true; }
     if (!U.$('#sheet-back').classList.contains('hidden')) {
       if (U.sheet.close) U.sheet.close();
       return true;
