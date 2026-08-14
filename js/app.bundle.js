@@ -5515,6 +5515,29 @@
     Calc.linkTo(rec.id, set.id, bits.join(' · '), set.values, set.factor, sub);
   }
 
+  /* 사진 크게 보기 — 원본(파일·OPFS 이전분 포함)을 라이트박스로.
+     균열·표면 확인이 이 앱의 목적이라 핀치 확대는 라이트박스에서만 풀린다(Nav.setZoomable). */
+  async function openLightbox(pid) {
+    let blob = null;
+    try {
+      const p = await Store.getPhoto(pid);
+      blob = (await Store.fullBlob(p)) || (p && p.thumb) || null;
+    } catch (e) { console.error(e); }
+    if (!blob) { U.toast('사진을 불러오지 못했습니다'); return; }
+    const img = $('#lightbox-img');
+    const url = URL.createObjectURL(blob);
+    img.src = url;
+    $('#lightbox').classList.remove('hidden');
+    Nav.setZoomable(true);
+    Nav.setLightboxCloser(() => {
+      $('#lightbox').classList.add('hidden');
+      Nav.setZoomable(false);
+      img.removeAttribute('src');
+      URL.revokeObjectURL(url);
+      Nav.setLightboxCloser(null);
+    });
+  }
+
   /* ---------------- 사진 ---------------- */
   async function renderPhotos() {
     if (!tk) return;
@@ -5547,6 +5570,8 @@
         img.src = U.thumbUrl(p.id, p.thumb || p.full);
         img.alt = (i + 1) + '번 사진';
         cell.appendChild(img);
+        // 탭하면 원본 크게 보기(사용자 지시) — 삭제 X 는 stopPropagation 이라 안 겹친다
+        cell.addEventListener('click', () => openLightbox(pid));
       } else { cell.classList.add('loading'); cell.textContent = '불러오기 실패'; }
       const del = U.el('button', 'del');
       del.appendChild(U.icon('close'));
