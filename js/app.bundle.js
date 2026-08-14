@@ -958,6 +958,7 @@
       supervisor: (t.supervisor || '').trim(),
       supPhone: (t.supPhone || '').trim(),
       part: (t.part || '').trim(),
+      jugu: (t.jugu === '1' || t.jugu === '24') ? t.jugu : '',   // 비면 동 번호로 추정(Task.juguOf)
       photoMark: !!t.photoMark,            // 목록의 「사진」 배지 — 표시 전용(완료 판정과 무관)
       // 28일은 두 칸의 사진이 곧 이 작업의 사진이다(gc 가 여기만 본다)
       photos: isSub ? mergedPhotos(t, sub) : (t.photos || []).slice(),
@@ -3479,7 +3480,21 @@
      한 장이라도 올라오면 그 작업은 끝난 것으로 본다. */
   function today() { return U.dayKey(Date.now()); }
 
-  function list(day) { return Store.tasksOf(day || today()); }
+  /* ---------- 주구 분리 (사용자 지시: 1주구와 2·4주구 데이터는 따로) ----------
+     작업엔 만들 때의 주구가 박힌다(draft·OCR 등록). 주구가 없는 구버전 작업은
+     동 번호로 추정한다 — 1주구는 101~119동, 나머지(2xx·3xx·A9 등)는 2·4주구. */
+  function juguOf(t) {
+    if (t && (t.jugu === '1' || t.jugu === '24')) return t.jugu;
+    const m = String((t && t.dong) || '').match(/^(\d{3})/);
+    const n = m ? +m[1] : 0;
+    return (n >= 101 && n <= 119) ? '1' : '24';
+  }
+
+  /* 목록은 항상 현재 주구 것만 — 반대편 주구 작업은 세그를 바꿔야 보인다 */
+  function list(day) {
+    return Store.tasksOf(day || today())
+      .then((rows) => rows.filter((t) => juguOf(t) === U.jugu()));
+  }
   function get(id) { return Store.getTask(id); }
   function save(t) { return Store.putTask(t); }
   function remove(id) { return Store.deleteTask(id); }
@@ -3540,6 +3555,7 @@
     const key = specKey || Spec.SPECS[0].key;
     return {
       id: null, day: day, testDay: day, specKey: key, dong: '',
+      jugu: U.jugu(),                  // 만들 때의 주구가 이 작업의 소속이다
       castDay: defaultCast(key, day),
       supervisor: '', part: '', photos: [], values: [],
       factor: Calc.DEFAULT_FACTOR
@@ -3781,7 +3797,7 @@
   global.Task = {
     today: today, list: list, get: get, save: save, remove: remove,
     isDone: isDone, counts: counts, draft: draft, defaultCast: defaultCast,
-    testDayOf: testDayOf, dongText: dongText, dongOf: dongOf,
+    testDayOf: testDayOf, dongText: dongText, dongOf: dongOf, juguOf: juguOf,
     hasSubs: hasSubs, subOf: subOf, subPhotos: subPhotos, pieces: pieces,
     pendingSubs: pendingSubs, doneNote: doneNote,
     setsOf: setsOf, allSets: allSets, setName: setName, setStats: setStats,
@@ -4378,7 +4394,10 @@
 
     const day = U.dayKey(Date.now());
     let tasks = [];
-    try { tasks = await Store.tasksOf(day); } catch (e) { console.error(e); }
+    try {
+      tasks = (await Store.tasksOf(day))
+        .filter((t) => Task.juguOf(t) === U.jugu());   // 주구 분리 — 목록과 같은 눈높이
+    } catch (e) { console.error(e); }
 
     const items = [];
     items.push({
@@ -4622,7 +4641,8 @@
     try { rows = await Store.tasksOf(want); } catch (e) { console.error(e); fail = e || true; }
     if (want !== U.dayKey(base.getTime())) return;      // 지나간 조회 — 버린다
     loadFail = fail;
-    all = rows;
+    // 주구 분리(사용자 지시) — 현재 주구 작업만. 반대편은 홈 설정에서 세그를 바꿔야 보인다
+    all = rows.filter((t) => Task.juguOf(t) === U.jugu());
     const alive = Object.create(null);
     all.forEach((t) => { alive[t.id] = 1; });
     Object.keys(sel).forEach((id) => { if (!alive[id]) delete sel[id]; });
@@ -7094,7 +7114,11 @@
       // 날짜 버킷(tasksOf)으로 조회하면 목록날짜≠시험일인 「가라」 작업을 놓친다(감사 지적)
       // → 전체와 대조한다. 동·분류·타설일 셋이 같으면 날짜와 무관하게 같은 타설이다.
       let existing = [];
-      try { existing = await Store.allTasks(); } catch (e) {}
+      try {
+        // 중복 대조도 **현재 주구 안에서만** — 반대편 주구에 잘못 등록된 같은 행이 있어도
+        // 이번(맞는) 주구 등록을 막으면 안 된다
+        existing = (await Store.allTasks()).filter((t) => Task.juguOf(t) === U.jugu());
+      } catch (e) {}
       // 동 비교는 적힌 그대로(공백·괄호만 접어서) — dongOf(첫 「N동」만)로 비교하면
       // "215동"과 "215동 특화동"이 같은 것으로 보여 본동 행이 중복으로 잘못 걸러진다.
       // 괄호도 접는 이유: 수동 등록은 명부 표기 「215동(특화동)」, OCR 은 「215동 특화동」이라
@@ -7146,6 +7170,8 @@
               day: it.testDay, testDay: it.testDay,
               specKey: it.specKey, castDay: it.castDay,
               dong: it.dong,
+              jugu: U.jugu(),               // 스캔한 시점의 주구 소속으로 등록
+
               supervisor: sup ? Contacts.label(sup) : '',
               supPhone: sup ? sup.phone : '',
               part: '', photos: [], sets: []
