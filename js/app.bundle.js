@@ -980,6 +980,8 @@
   let mirrorTimer = null;
 
   function mirrorSoon() {
+    // 관리자 서버 실시간 백업도 같은 훅을 탄다(있을 때만) — 저장 경로가 늘면 여기 하나로 충분
+    try { if (global.Sync) Sync.poke(); } catch (e) {}
     clearTimeout(mirrorTimer);
     mirrorTimer = setTimeout(() => {
       run((db) => reqp(db.transaction('tasks').objectStore('tasks').getAll()))
@@ -1776,6 +1778,212 @@
                     backupOk: backupOk, backupWrite: backupWrite,
                     backupList: backupList, backupRead: backupRead, backupTrim: backupTrim,
                     hasShot: function () { return !!shotPlugin(); } };
+})(window);
+
+;
+/* ===== js/sync.js ===== */
+/* ============ sync.js — 관리자 서버 실시간 백업 (beta) ============
+   설계: 관리자프로그램_설계.md (v2).
+   저장이 일어날 때마다(30초 디바운스) 작업 스냅숏 전체를 개인 PC 관리자 서버로 push 한다.
+   실패는 유실이 아니라 지연이다 — 보류로 남겨 두고 60초마다 재시도한다(서버=PC 가 꺼져 있을 수 있다).
+   서버 주소·토큰은 설정에서 넣는다(하드코딩 금지 — API 키 사고의 교훈, 설계 명시).
+   본업은 이 기능 없이도 완전 동작한다 — 지하(오프라인)에선 그냥 보류만 쌓인다.
+=================================================================== */
+(function (global) {
+  'use strict';
+
+  const K_URL = 'gsc.sync.url.v1';
+  const K_TOKEN = 'gsc.sync.token.v1';
+  const K_LAST = 'gsc.sync.last.v1';        // 마지막 성공 시각(epoch)
+
+  const DEBOUNCE = 30000;                   // 저장 후 30초 묶어서 한 번 (설계)
+  const RETRY = 60000;                      // 실패 시 재시도 간격
+
+  let timer = null;
+  let retryTimer = null;
+  let sending = false;
+  let pending = false;                      // 보내야 하는데 아직 못 보냈다
+
+  const lsGet = (k) => { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } };
+  const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
+  const lsDel = (k) => { try { localStorage.removeItem(k); } catch (e) {} };
+
+  function serverUrl() { return lsGet(K_URL).trim().replace(/\/+$/, ''); }
+  function token() { return lsGet(K_TOKEN).trim(); }
+  function isOn() { return !!(serverUrl() && token()); }
+  function lastOk() { return +lsGet(K_LAST) || 0; }
+
+  /* 네이티브면 CapacitorHttp — https 웹뷰에서 http(Tailscale IP) 를 부르는
+     혼합 콘텐츠 차단을 우회한다(AI 호출과 같은 경로). 웹은 fetch. */
+  async function call(method, path, body) {
+    const full = serverUrl() + path;
+    const headers = { 'Content-Type': 'application/json', 'X-Token': token() };
+    const C = global.Capacitor;
+    const H = C && C.Plugins && C.Plugins.CapacitorHttp;
+    if (H && C.isNativePlatform && C.isNativePlatform()) {
+      const r = await H.request({
+        url: full, method: method, headers: headers,
+        data: body || undefined, connectTimeout: 8000, readTimeout: 12000
+      });
+      if (!r || r.status < 200 || r.status >= 300) throw new Error('HTTP ' + (r && r.status));
+      return (typeof r.data === 'string') ? JSON.parse(r.data || '{}') : (r.data || {});
+    }
+    const ctrl = (typeof AbortController === 'function') ? new AbortController() : null;
+    const t = ctrl ? setTimeout(() => ctrl.abort(), 12000) : null;
+    try {
+      const r = await fetch(full, {
+        method: method, headers: headers,
+        body: body ? JSON.stringify(body) : undefined,
+        signal: ctrl ? ctrl.signal : undefined
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return await r.json();
+    } finally { if (t) clearTimeout(t); }
+  }
+
+  /* 지금 상태 전체를 스냅숏으로 push. 최신 상태가 항상 이기므로 큐 대신
+     "보류 플래그 + 보낼 때 다시 뜨기"로 충분하다(중간 상태는 서버가 이미 보존 중). */
+  async function pushNow() {
+    if (!isOn() || sending) return false;
+    sending = true;
+    try {
+      const rows = await Store.allTasks();
+      if (!rows.length) { pending = false; return false; }   // 빈 스냅숏은 안 보낸다(보존본 오염 방지)
+      const snap = { at: Date.now(), day: U.dayKey(Date.now()), n: rows.length, tasks: rows };
+      await call('POST', '/sync/backup', snap);
+      pending = false;
+      lsSet(K_LAST, String(Date.now()));
+      clearTimeout(retryTimer);
+      refreshRow();
+      return true;
+    } catch (e) {
+      pending = true;
+      clearTimeout(retryTimer);
+      retryTimer = setTimeout(pushNow, RETRY);   // PC 꺼짐 = 지연일 뿐 (설계)
+      refreshRow();
+      return false;
+    } finally {
+      sending = false;
+    }
+  }
+
+  /* 저장 훅(store.js mirrorSoon)에서 부른다 — 디바운스로 묶는다 */
+  function poke() {
+    if (!isOn()) return;
+    pending = true;
+    clearTimeout(timer);
+    timer = setTimeout(pushNow, DEBOUNCE);
+    refreshRow();
+  }
+
+  /* 서버의 최신 스냅숏으로 복원 — 앱 복원 형식 그대로 내려온다 */
+  async function restoreFromServer() {
+    const info = await call('GET', '/sync/restore');
+    if (!info || !Array.isArray(info.tasks) || !info.tasks.length) throw new Error('스냅숏 없음');
+    return Store.restoreBackup(info);
+  }
+
+  /* ---------------- 설정 화면 (홈 설정 카드의 「서버 백업」 줄) ---------------- */
+  function statusText() {
+    if (!isOn()) return '꺼짐';
+    if (pending) return '보류 중 — 서버 대기';
+    const t = lastOk();
+    if (!t) return '설정됨 · 아직 안 보냄';
+    const m = Math.round((Date.now() - t) / 60000);
+    if (m < 1) return '방금 백업됨';
+    if (m < 60) return m + '분 전 백업됨';
+    if (m < 1440) return Math.round(m / 60) + '시간 전 백업됨';
+    return Math.round(m / 1440) + '일 전 백업됨';
+  }
+
+  function refreshRow() {
+    const el = U.$('#opt-sync-val');
+    if (el) el.textContent = statusText();
+  }
+
+  function openSettings() {
+    const items = [];
+    items.push({
+      label: serverUrl() ? '서버 주소 바꾸기' : '서버 주소 넣기',
+      sub: serverUrl() || '예: http://100.64.0.10:8787 (Tailscale IP)',
+      onPick: () => {
+        const v = prompt('관리자 서버 주소', serverUrl() || 'http://');
+        if (v === null) return;
+        lsSet(K_URL, v.trim());
+        refreshRow();
+        if (isOn()) { poke(); U.toast('저장했습니다 — 곧 첫 백업을 보냅니다'); }
+      }
+    });
+    items.push({
+      label: token() ? '기기 토큰 바꾸기' : '기기 토큰 넣기',
+      sub: token() ? '넣어져 있음' : '서버 콘솔/config.json 의 tk-…',
+      onPick: () => {
+        const v = prompt('기기 토큰 (tk-…)', token());
+        if (v === null) return;
+        lsSet(K_TOKEN, v.trim());
+        refreshRow();
+        if (isOn()) { poke(); U.toast('저장했습니다 — 곧 첫 백업을 보냅니다'); }
+      }
+    });
+    if (isOn()) {
+      items.push({ sep: true });
+      items.push({
+        label: '지금 백업 보내기', cls: 'strong',
+        onPick: async () => {
+          U.toast('백업 보내는 중…', 15000);
+          const ok = await pushNow();
+          U.toast(ok ? '서버에 백업했습니다' : '서버에 닿지 못했습니다 — 보류로 두고 재시도합니다', 3000);
+        }
+      });
+      items.push({
+        label: '서버에서 복원',
+        sub: '서버가 보관한 최신 스냅숏을 이 폰에 되살립니다',
+        onPick: () => {
+          U.confirmSheet('서버의 최신 백업으로 복원할까요?\n같은 작업은 서버 내용으로 덮어씁니다', '복원', async () => {
+            U.toast('복원 중…', 30000);
+            try {
+              const n = await restoreFromServer();
+              U.toast('작업 ' + n + '건을 복원했습니다');
+              try { Home.refresh(); } catch (e) {}
+            } catch (e) {
+              console.warn('[sync restore]', e);
+              U.toast('복원하지 못했습니다 — 서버 연결을 확인하세요', 3000);
+            }
+          });
+        }
+      });
+      items.push({ sep: true });
+      items.push({
+        label: '서버 백업 끄기', cls: 'danger',
+        onPick: () => {
+          lsDel(K_URL); lsDel(K_TOKEN);
+          clearTimeout(timer); clearTimeout(retryTimer);
+          pending = false;
+          refreshRow();
+          U.toast('서버 백업을 껐습니다 (폰 안 백업은 그대로 돕니다)');
+        }
+      });
+    }
+    U.sheet('서버 백업 (beta)', items);
+  }
+
+  function init() {
+    const row = U.$('#opt-sync-row');
+    if (row) row.addEventListener('click', openSettings);
+    refreshRow();
+    // 부팅·복귀 때 한 번씩 — 마지막 백업이 오래됐거나 보류가 남았으면 밀어 둔다
+    if (isOn()) poke();
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && isOn() && pending) pushNow();
+    });
+  }
+
+  global.Sync = {
+    init: init, poke: poke, pushNow: pushNow,
+    restoreFromServer: restoreFromServer,
+    openSettings: openSettings, statusText: statusText, refreshRow: refreshRow,
+    isOn: isOn
+  };
 })(window);
 
 ;
@@ -7481,6 +7689,7 @@
     AIUI.init();
     AuditUI.init();
     OCRUI.init();
+    if (global.Sync) Sync.init();     // 관리자 서버 백업 (beta)
     Home.init();
     Nav.go('home');
     // 네이티브 스플래시 → 부팅 화면 → 앱. 색이 같아 이음매가 안 보인다.

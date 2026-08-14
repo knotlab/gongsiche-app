@@ -611,6 +611,13 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
   border-radius:var(--r-sm);padding:1px 7px;font-size:11px;font-weight:700;
   flex:0 0 auto;
 }
+/* 설정 카드의 누르는 줄(서버 백업) — label 줄과 같은 생김새의 버튼 */
+.opt-btn{
+  width:100%;text-align:left;background:none;border:0;font:inherit;color:inherit;
+  cursor:pointer;
+}
+.opt-btn .opt-value{margin-left:auto;font-size:13px;color:var(--text-2)}
+
 /* 편집기 사진 머리줄의 체크 — 히트영역은 세로 패딩으로 확보 */
 .photo-head{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
 .photomark-check{
