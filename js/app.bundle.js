@@ -7287,12 +7287,13 @@
     { id: 3,  name: '자갈',     color: [143, 138, 128], kind: 'powder', heavy: 1 },
     { id: 4,  name: '시멘트',   color: [154, 160, 168], kind: 'powder' },
     { id: 5,  name: '물',       color: [77, 159, 232],  kind: 'liquid' },
-    { id: 6,  name: '시멘트풀', color: [184, 188, 196], kind: 'slurry', cureTo: 16, cure: 120 },
-    { id: 7,  name: '모르타르', color: [169, 169, 163], kind: 'slurry', cureTo: 17, cure: 150 },
-    { id: 8,  name: '레미콘',   color: [125, 131, 140], kind: 'slurry', cureTo: 18, cure: 180 },
-    { id: 9,  name: '고강도',   color: [91, 100, 114],  kind: 'slurry', cureTo: 19, cure: 140 },
+    // 양생은 천천히(사용자 지시) — 급하면 배속(×4)이나 히터 보온양생을 쓰는 게 게임의 재미
+    { id: 6,  name: '시멘트풀', color: [184, 188, 196], kind: 'slurry', cureTo: 16, cure: 600 },
+    { id: 7,  name: '모르타르', color: [169, 169, 163], kind: 'slurry', cureTo: 17, cure: 750 },
+    { id: 8,  name: '레미콘',   color: [125, 131, 140], kind: 'slurry', cureTo: 18, cure: 900 },
+    { id: 9,  name: '고강도',   color: [91, 100, 114],  kind: 'slurry', cureTo: 19, cure: 700 },
     { id: 10, name: '기름',     color: [181, 141, 61],  kind: 'liquid', flam: 1, ign: 260 },
-    { id: 11, name: '우레탄폼', color: [240, 208, 96],  kind: 'slurry', cureTo: 20, cure: 55, grow: 1, flam: 1, ign: 320 },
+    { id: 11, name: '우레탄폼', color: [240, 208, 96],  kind: 'slurry', cureTo: 20, cure: 100, grow: 1, flam: 1, ign: 320 },
     { id: 12, name: '용접불꽃', color: [255, 122, 48],  kind: 'gas', fire: 1, life: 26 },
     { id: 13, name: '연기',     color: [107, 107, 107], kind: 'gas', life: 90 },
     { id: 14, name: '증기',     color: [207, 216, 224], kind: 'gas', life: 160 },
@@ -7311,7 +7312,7 @@
     { id: 27, name: '눈',       color: [242, 247, 251], kind: 'powder', light: 1 },
     { id: 28, name: '염화칼슘', color: [232, 226, 242], kind: 'powder' },
     { id: 29, name: '흙',       color: [122, 92, 62],   kind: 'powder' },
-    { id: 30, name: '진흙',     color: [93, 70, 48],    kind: 'slurry', cureTo: 29, cure: 240 },
+    { id: 30, name: '진흙',     color: [93, 70, 48],    kind: 'slurry', cureTo: 29, cure: 900 },
     { id: 31, name: '다이너마이트', color: [214, 60, 48], kind: 'solid', expl: 9, ign: 150, crush: 999 },
     { id: 32, name: '화약',     color: [58, 58, 62],    kind: 'powder', expl: 4, ign: 180 },
     { id: 33, name: '잔해',     color: [120, 116, 110], kind: 'powder', heavy: 1 },
@@ -7323,13 +7324,26 @@
     { id: 39, name: 'C4',       color: [222, 200, 120], kind: 'solid', expl: 13, ign: 450, stable: 1, crush: 999 },
     { id: 40, name: '도화선',   color: [180, 150, 120], kind: 'solid', flam: 1, ign: 140, crush: 999 },
     { id: 41, name: '석고',     color: [235, 231, 222], kind: 'powder' },
-    { id: 42, name: '석고반죽', color: [222, 218, 208], kind: 'slurry', cureTo: 43, cure: 90, hidden: 1 },
+    { id: 42, name: '석고반죽', color: [222, 218, 208], kind: 'slurry', cureTo: 43, cure: 400, hidden: 1 },
     { id: 43, name: '석고보드', color: [240, 236, 228], kind: 'solid', crush: 30, hidden: 1 },
     { id: 44, name: '유리물',   color: [255, 210, 140], kind: 'liquid', hot: 1000, hidden: 1 },
     { id: 45, name: '염산',     color: [190, 240, 120], kind: 'liquid' },
     { id: 46, name: '씨앗',     color: [120, 160, 70],  kind: 'powder' },
     { id: 47, name: '풀',       color: [70, 160, 60],   kind: 'solid', flam: 1, ign: 250, crush: 10, hidden: 1 },
-    { id: 48, name: 'LPG가스',  color: [200, 200, 230], kind: 'gas', life: 240, flam: 1, ign: 350 }
+    { id: 48, name: 'LPG가스',  color: [200, 200, 230], kind: 'gas', life: 240, flam: 1, ign: 350 },
+    // ---- 화학 (재미난 반응들) ----
+    { id: 49, name: '생석회',   color: [225, 220, 205], kind: 'powder' },                    // +물 = 발열!
+    { id: 50, name: '소석회',   color: [236, 233, 224], kind: 'powder', hidden: 1 },
+    { id: 51, name: '에폭시A',  color: [230, 190, 90],  kind: 'liquid' },                    // A+B = 경화
+    { id: 52, name: '에폭시B',  color: [90, 150, 230],  kind: 'liquid' },
+    { id: 53, name: '에폭시',   color: [205, 170, 95],  kind: 'solid', crush: 160, hidden: 1 },
+    { id: 54, name: '팽창제',   color: [210, 205, 190], kind: 'powder' },                    // +물 = 무소음 파쇄
+    { id: 55, name: '팽창반죽', color: [222, 216, 200], kind: 'slurry', cureTo: 33, cure: 90, grow: 2, hidden: 1 },
+    { id: 56, name: '수은',     color: [200, 205, 215], kind: 'liquid' },                    // 무거운 액체 — 다 뜬다
+    { id: 57, name: '액체질소', color: [170, 220, 255], kind: 'liquid', heat: -196 },
+    { id: 58, name: '테르밋',   color: [150, 90, 60],   kind: 'powder' },                    // 600°C 에서 점화 — 쇳물이 된다
+    { id: 59, name: '소화분말', color: [240, 170, 200], kind: 'powder' },                    // 불을 끈다
+    { id: 60, name: '드라이아이스', color: [220, 240, 250], kind: 'powder', heat: -78 }
   ];
   const KIND = M.map((m) => m.kind);
   const CRUSH = M.map((m) => m.crush || 0);
@@ -7430,16 +7444,19 @@
   }
 
   /* ---- 팔레트: 카테고리 탭 + 재료 칩 (게임 HUD) ---- */
+  /* 찾기 쉽게 일하는 순서대로 분류(사용자 지시): 배합 → 자재 → 공시체 → 화학 → 위험 → 자연 → 도구 */
   const CATS = [
-    { name: '건설', ids: [8, 9, 6, 7, 4, 2, 3, 5, 22, 21, 25, 34, 26, 41, 11, 1] },
+    { name: '배합', ids: [8, 9, 6, 7, 4, 2, 3, 5] },
+    { name: '자재', ids: [22, 21, 25, 26, 34, 41, 11, 1] },
     { name: '공시체', stamps: [
       { label: '콘크리트', mat: 18 }, { label: '고강도', mat: 19 },
       { label: '몰탈', mat: 17 }, { label: '시멘트', mat: 16 },
       { label: '석고', mat: 43 }, { label: '유리', mat: 26 },
       { label: '벽돌', mat: 25 }, { label: '얼음', mat: 15 }
     ] },
-    { name: '위험', ids: [12, 10, 48, 32, 31, 39, 38, 40, 45, 24] },
-    { name: '환경', ids: [27, 15, 28, 29, 46, 33] },
+    { name: '화학', ids: [49, 51, 52, 54, 45, 58, 59, 57, 60, 56] },
+    { name: '위험', ids: [12, 10, 48, 32, 40, 31, 39, 38, 24] },
+    { name: '자연', ids: [27, 15, 28, 29, 46, 33] },
     { name: '도구', ids: [36, 37, 0] }
   ];
   let curCat = 0;
@@ -7555,6 +7572,9 @@
     if ((a === 28 && b === 5) || (a === 5 && b === 28)) return [5, 5];
     if ((a === 29 && b === 5) || (a === 5 && b === 29)) return [30, 30];  // 흙+물 → 진흙
     if ((a === 41 && b === 5) || (a === 5 && b === 41)) return [42, 42];  // 석고+물 → 석고반죽
+    if ((a === 49 && b === 5) || (a === 5 && b === 49)) return [50, 50];  // 생석회+물 → 소석회 (발열!)
+    if ((a === 51 && b === 52) || (a === 52 && b === 51)) return [53, 53];// 에폭시 A+B → 경화
+    if ((a === 54 && b === 5) || (a === 5 && b === 54)) return [55, 55];  // 팽창제+물 → 무소음 파쇄
     return null;
   }
 
@@ -7566,8 +7586,10 @@
       const j = I(nx, ny);
       const r = react(a, mat[j]);
       if (r) {
+        const hot = (a === 49 || mat[j] === 49);       // 생석회 수화 발열 — 진짜 화학이다
         mat[i] = r[0]; mat[j] = r[1];
         life[i] = 0; life[j] = 0;
+        if (hot) { temp[i] = 220; temp[j] = 220; }
         return true;
       }
     }
@@ -7581,7 +7603,7 @@
     moved[i] = 1; moved[j] = 1;
   }
   const passable = (id) => id === 0 || KIND[id] === 'gas';
-  const sinkIn = (id) => KIND[id] === 'liquid';
+  const sinkIn = (id) => KIND[id] === 'liquid' && id !== 56;   // 수은엔 다 뜬다(무거운 액체)
 
   /* ---------------- 폭발 ---------------- */
   function boom(cx, cy, r) {
@@ -7691,7 +7713,7 @@
       if (stalk < 5) mat[I(x, y - 1)] = 47;
     }
     if (ANCHOR[id]) {
-      if (id === 22) rustCheck(i, x, y);
+      if (id === 22 || id === 23) rustCheck(i, x, y);
       return;
     }
     // 지지 검사 — 아래 3칸 중 하나라도 고체거나, 이웃에 앵커(철근·옹벽)가 있으면 버틴다
@@ -7725,14 +7747,24 @@
     }
   }
 
+  /* 철근 부식 — 천천히(사용자 지시), 대신 화학이 사실적이다:
+     물 접촉 = 서서히 · 염화칼슘/염산 접촉 = 염해로 몇 배 빨리.
+     콘크리트에 완전히 덮인 철근은 물이 안 닿으니 안 녹슨다(피복의 존재 이유).
+     녹슨철근도 계속 젖어 있으면 결국 삭아서 잔해가 된다. */
   function rustCheck(i, x, y) {
+    const id = mat[i];
+    let gain = 0;
     for (let k = 0; k < 4; k++) {
       const nx = x + N4[k][0], ny = y + N4[k][1];
-      if (inb(nx, ny) && mat[I(nx, ny)] === 5) {
-        if (++life[i] > 300) { mat[i] = 23; life[i] = 0; }
-        return;
-      }
+      if (!inb(nx, ny)) continue;
+      const t2 = mat[I(nx, ny)];
+      if (t2 === 5) gain = Math.max(gain, 1);
+      else if (t2 === 28 || t2 === 45) gain = 4;       // 염해
     }
+    if (!gain) return;
+    life[i] += gain;
+    if (id === 22 && life[i] > 900) { mat[i] = 23; life[i] = 0; }
+    else if (id === 23 && life[i] > 1500) { mat[i] = 33; life[i] = 0; }
   }
 
   /* ---------------- 한 틱 ---------------- */
@@ -7768,6 +7800,25 @@
           if (id === 46) {                             // 씨앗 — 흙(진흙) 위에서 싹튼다
             const b2 = y + 1 < H ? mat[I(x, y + 1)] : 0;
             if ((b2 === 29 || b2 === 30) && Math.random() < 0.08) { mat[i] = 47; continue; }
+          }
+          if (id === 58 && temp[i] >= 600) {           // 테르밋 점화 — 초고온으로 타며 쇳물이 된다
+            mat[i] = 24; temp[i] = 2200;
+            if (y > 0 && mat[I(x, y - 1)] === 0) { mat[I(x, y - 1)] = 12; life[I(x, y - 1)] = 0; }
+            continue;
+          }
+          if (id === 59) {                             // 소화분말 — 불을 끄고 식힌다
+            for (let k = 0; k < 4; k++) {
+              const nx = x + N4[k][0], ny = y + N4[k][1];
+              if (!inb(nx, ny)) continue;
+              const j = I(nx, ny);
+              if (mat[j] === 12) { mat[j] = 13; life[j] = 0; temp[j] = 30; if (Math.random() < 0.25) mat[i] = 0; }
+              else if (temp[j] > 60) temp[j] = 60;
+            }
+            if (!mat[i]) continue;
+          }
+          if (id === 60 && Math.random() < 0.005) {    // 드라이아이스 — 천천히 승화
+            mat[i] = 13; life[i] = 0;
+            continue;
           }
           if (p.light && Math.random() < 0.4) continue;
           const below = y + 1 < H ? I(x, y + 1) : -1;
@@ -7818,9 +7869,13 @@
             }
             if (ate && !mat[i]) continue;
           }
+          if (id === 57 && Math.random() < 0.03) { mat[i] = 14; life[i] = 0; continue; }   // 액체질소 — 증발
           const below = y + 1 < H ? I(x, y + 1) : -1;
           if (below >= 0 && passable(mat[below])) { swap(i, below); continue; }
           if (id === 5 && below >= 0 && mat[below] === 10) { swap(i, below); continue; }   // 물이 기름 밑으로
+          if (id === 56 && below >= 0 && KIND[mat[below]] === 'liquid' && mat[below] !== 56) {
+            swap(i, below); continue;                  // 수은 — 어떤 액체보다 무겁다
+          }
           const dir = Math.random() < 0.5 ? -1 : 1;
           let m1 = false;
           for (const d of [dir, -dir]) {
@@ -7849,10 +7904,16 @@
     if (!p.cureTo) return;
     const t = temp[i];
     if (t <= 0) return;                                // 동결 — 양생이 멈춘다
-    if (p.grow && life[i] < 20 && Math.random() < 0.25) {
+    if (p.grow && life[i] < 20 && Math.random() < (p.grow === 2 ? 0.5 : 0.25)) {
       const k = (Math.random() * 4) | 0;
       const nx = x + N4[k][0], ny = y + N4[k][1];
-      if (inb(nx, ny) && mat[I(nx, ny)] === 0) { mat[I(nx, ny)] = id; life[I(nx, ny)] = 10; }
+      if (inb(nx, ny)) {
+        const j = I(nx, ny), t2 = mat[j];
+        if (t2 === 0) { mat[j] = id; life[j] = 10; }
+        else if (p.grow === 2 && KIND[t2] === 'solid' && CRUSH[t2] && CRUSH[t2] < 999 && Math.random() < 0.35) {
+          mat[j] = 33; life[j] = 0;                    // 팽창제 — 발파 없이 콘크리트를 쪼갠다
+        }
+      }
     }
     const gain = t < 10 ? 1 : (t > 35 ? 3 : 2);
     if ((life[i] += gain) >= p.cure) { mat[i] = p.cureTo; life[i] = 0; }
