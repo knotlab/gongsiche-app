@@ -7319,7 +7319,17 @@
     { id: 35, name: '아스팔트(액)', color: [64, 60, 66], kind: 'liquid', hot: 130, hidden: 1 },
     { id: 36, name: '히터',     color: [255, 96, 64],   kind: 'solid', anchor: 1, heat: 600 },
     { id: 37, name: '쿨러',     color: [96, 180, 255],  kind: 'solid', anchor: 1, heat: -60 },
-    { id: 38, name: '니트로',   color: [98, 190, 98],   kind: 'liquid', expl: 6, ign: 60 }
+    { id: 38, name: '니트로',   color: [98, 190, 98],   kind: 'liquid', expl: 6, ign: 60 },
+    { id: 39, name: 'C4',       color: [222, 200, 120], kind: 'solid', expl: 13, ign: 450, stable: 1, crush: 999 },
+    { id: 40, name: '도화선',   color: [180, 150, 120], kind: 'solid', flam: 1, ign: 140, crush: 999 },
+    { id: 41, name: '석고',     color: [235, 231, 222], kind: 'powder' },
+    { id: 42, name: '석고반죽', color: [222, 218, 208], kind: 'slurry', cureTo: 43, cure: 90, hidden: 1 },
+    { id: 43, name: '석고보드', color: [240, 236, 228], kind: 'solid', crush: 30, hidden: 1 },
+    { id: 44, name: '유리물',   color: [255, 210, 140], kind: 'liquid', hot: 1000, hidden: 1 },
+    { id: 45, name: '염산',     color: [190, 240, 120], kind: 'liquid' },
+    { id: 46, name: '씨앗',     color: [120, 160, 70],  kind: 'powder' },
+    { id: 47, name: '풀',       color: [70, 160, 60],   kind: 'solid', flam: 1, ign: 250, crush: 10, hidden: 1 },
+    { id: 48, name: 'LPG가스',  color: [200, 200, 230], kind: 'gas', life: 240, flam: 1, ign: 350 }
   ];
   const KIND = M.map((m) => m.kind);
   const CRUSH = M.map((m) => m.crush || 0);
@@ -7338,8 +7348,8 @@
   /* ---------------- 상태·화면 ---------------- */
   let root = null, cv = null, ctx = null, imgData = null;
   let running = false, paused = false, raf = 0;
-  let curMat = 8, brush = 3;
-  let speed = 2;                                    // 프레임당 틱 수 (½ 은 0.5 → 프레임 걸러 1틱)
+  let curMat = 8, brush = 1;                        // 기본 붓 1 (사용자 지시)
+  let speed = 1;                                    // 기본 ×1 (사용자 지시). ½ 은 프레임 걸러 1틱
   let halfFlip = false;
   let boomQ = [];                                   // 연쇄 폭발 큐
   const noise = new Uint8Array(W * H);
@@ -7352,17 +7362,18 @@
     root.className = 'pd hidden';
     root.innerHTML =
       '<div class="pd-top">' +
-      '  <b>몰래 파우더 <span class="beta">건설현장판</span></b>' +
+      '  <b class="pd-title">몰래 파우더<i>건설현장판</i></b>' +
       '  <span class="pd-top-btns">' +
-      '    <button class="pd-btn" id="pd-speed">×2</button>' +
-      '    <button class="pd-btn" id="pd-brush">붓 3</button>' +
+      '    <button class="pd-btn" id="pd-speed">×1</button>' +
+      '    <button class="pd-btn" id="pd-brush">붓 1</button>' +
       '    <button class="pd-btn" id="pd-pause">멈춤</button>' +
       '    <button class="pd-btn" id="pd-clear">비우기</button>' +
-      '    <button class="pd-btn" id="pd-close">닫기</button>' +
+      '    <button class="pd-btn pd-x" id="pd-close">닫기</button>' +
       '  </span>' +
       '</div>' +
       '<div class="pd-stage"><canvas id="pd-cv"></canvas></div>' +
-      '<div class="pd-hint" id="pd-info">시멘트+물→시멘트풀 · +모래→몰탈 · +자갈→레미콘 · 영하면 양생이 안 된다</div>' +
+      '<div class="pd-hud"><i id="pd-swatch"></i><span id="pd-info">레미콘을 부어 보세요 — 영하면 양생이 안 됩니다</span></div>' +
+      '<div class="pd-cats" id="pd-cats"></div>' +
       '<div class="pd-pal" id="pd-pal"></div>';
     document.body.appendChild(root);
 
@@ -7371,11 +7382,9 @@
     ctx = cv.getContext('2d');
     imgData = ctx.createImageData(W, H);
 
-    const pal = root.querySelector('#pd-pal');
-    // 손에 잡히는 순서: 건설 → 위험물 → 환경 → 지우개
-    const order = [8, 9, 6, 7, 4, 2, 3, 5, 22, 21, 25, 34, 26, 11, 15, 1,
-                   12, 10, 32, 31, 38, 24, 36, 37, 27, 28, 29, 33, 0];
-    order.forEach((id) => pal.appendChild(palBtn(M[id])));
+    renderCats();
+    renderPal();
+    hud();
 
     root.querySelector('#pd-close').addEventListener('click', close);
     root.querySelector('#pd-clear').addEventListener('click', () => {
@@ -7403,7 +7412,9 @@
                y: ((e.clientY - r.top) / r.height * H) | 0 };
     };
     cv.addEventListener('pointerdown', (e) => {
-      drawing = true; last = pos(e); paint(last.x, last.y); info(last.x, last.y);
+      const p = pos(e);
+      if (curStamp) { stampAt(p.x, p.y, curStamp); hud(p.x, p.y); return; }   // 공시체는 한 번에 하나
+      drawing = true; last = p; paint(p.x, p.y); hud(p.x, p.y);
       try { cv.setPointerCapture(e.pointerId); } catch (err) {}
     });
     cv.addEventListener('pointermove', (e) => {
@@ -7418,24 +7429,95 @@
     cv.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
   }
 
-  function palBtn(m) {
-    const b = document.createElement('button');
-    b.className = 'pd-mat' + (m.id === curMat ? ' on' : '');
-    b.dataset.m = m.id;
-    b.innerHTML = '<i style="background:rgb(' + m.color.join(',') + ')"></i>' + m.name;
-    b.addEventListener('click', () => {
-      curMat = m.id;
-      root.querySelectorAll('.pd-mat').forEach((x) => x.classList.toggle('on', +x.dataset.m === curMat));
-      U.buzz(4);
+  /* ---- 팔레트: 카테고리 탭 + 재료 칩 (게임 HUD) ---- */
+  const CATS = [
+    { name: '건설', ids: [8, 9, 6, 7, 4, 2, 3, 5, 22, 21, 25, 34, 26, 41, 11, 1] },
+    { name: '공시체', stamps: [
+      { label: '콘크리트', mat: 18 }, { label: '고강도', mat: 19 },
+      { label: '몰탈', mat: 17 }, { label: '시멘트', mat: 16 },
+      { label: '석고', mat: 43 }, { label: '유리', mat: 26 },
+      { label: '벽돌', mat: 25 }, { label: '얼음', mat: 15 }
+    ] },
+    { name: '위험', ids: [12, 10, 48, 32, 31, 39, 38, 40, 45, 24] },
+    { name: '환경', ids: [27, 15, 28, 29, 46, 33] },
+    { name: '도구', ids: [36, 37, 0] }
+  ];
+  let curCat = 0;
+  let curStamp = 0;                    // 0 이면 붓 모드, 아니면 그 재료의 공시체 찍기
+
+  function renderCats() {
+    const el = root.querySelector('#pd-cats');
+    el.innerHTML = '';
+    CATS.forEach((c, i) => {
+      const b = document.createElement('button');
+      b.className = 'pd-cat' + (i === curCat ? ' on' : '');
+      b.textContent = c.name;
+      b.addEventListener('click', () => { curCat = i; renderCats(); renderPal(); U.buzz(4); });
+      el.appendChild(b);
     });
-    return b;
   }
 
-  function info(x, y) {
+  function renderPal() {
+    const pal = root.querySelector('#pd-pal');
+    pal.innerHTML = '';
+    const c = CATS[curCat];
+    if (c.stamps) {
+      c.stamps.forEach((s) => {
+        const m = M[s.mat];
+        const b = document.createElement('button');
+        b.className = 'pd-mat' + (curStamp === s.mat ? ' on' : '');
+        b.innerHTML = '<i class="pd-cyl" style="background:rgb(' + m.color.join(',') + ')"></i>' + s.label;
+        b.addEventListener('click', () => {
+          curStamp = s.mat;
+          renderPal(); hud();
+          U.buzz(4);
+        });
+        pal.appendChild(b);
+      });
+      return;
+    }
+    c.ids.forEach((id) => {
+      const m = M[id];
+      const b = document.createElement('button');
+      b.className = 'pd-mat' + (!curStamp && id === curMat ? ' on' : '');
+      b.innerHTML = '<i style="background:rgb(' + m.color.join(',') + ')"></i>' + m.name;
+      b.addEventListener('click', () => {
+        curMat = id; curStamp = 0;
+        renderPal(); hud();
+        U.buzz(4);
+      });
+      pal.appendChild(b);
+    });
+  }
+
+  function hud(x, y) {
     const el = root.querySelector('#pd-info');
-    if (!el || !inb(x, y)) return;
-    const i = I(x, y);
-    el.textContent = M[mat[i]].name + ' · ' + temp[i] + '°C · 붓: ' + M[curMat].name;
+    const sw = root.querySelector('#pd-swatch');
+    if (!el) return;
+    const m = curStamp ? M[curStamp] : M[curMat];
+    if (sw) sw.style.background = 'rgb(' + m.color.join(',') + ')';
+    let txt = curStamp ? ('공시체 찍기: ' + m.name + ' — 위에 자갈을 쌓아 눌러 보세요') : ('붓: ' + m.name);
+    if (x != null && inb(x, y)) {
+      const i = I(x, y);
+      txt = M[mat[i]].name + ' · ' + temp[i] + '°C  |  ' + txt;
+    }
+    el.textContent = txt;
+  }
+
+  /* 공시체 도장 — 9×19 (실물 100×200mm 원기둥 비율) */
+  function stampAt(cx0, cy0, m) {
+    const hw = 4, hh = 9;
+    for (let dy = -hh; dy <= hh; dy++) {
+      for (let dx = -hw; dx <= hw; dx++) {
+        if (Math.abs(dx) === hw && Math.abs(dy) === hh) continue;   // 모서리 — 몰드 티
+        const x = cx0 + dx, y = cy0 + dy;
+        if (!inb(x, y)) continue;
+        const i = I(x, y);
+        if (mat[i] !== 0 && KIND[mat[i]] === 'solid') continue;
+        mat[i] = m; life[i] = 0; temp[i] = AMBIENT;
+      }
+    }
+    U.buzz(10);
   }
 
   function paint(cx0, cy0) {
@@ -7472,6 +7554,7 @@
     if ((a === 15 || a === 27) && b === 28) return [5, 5];
     if ((a === 28 && b === 5) || (a === 5 && b === 28)) return [5, 5];
     if ((a === 29 && b === 5) || (a === 5 && b === 29)) return [30, 30];  // 흙+물 → 진흙
+    if ((a === 41 && b === 5) || (a === 5 && b === 41)) return [42, 42];  // 석고+물 → 석고반죽
     return null;
   }
 
@@ -7533,7 +7616,8 @@
   function fuse(i, x, y) {                            // 폭발물 기폭 조건
     const id = mat[i];
     if (!M[id].expl) return false;
-    if (temp[i] >= (M[id].ign || 150) || nearFire(x, y)) {
+    // C4(stable)는 불로는 안 터진다 — 고온(뇌관)이나 다른 폭발의 연쇄로만
+    if (temp[i] >= (M[id].ign || 150) || (!M[id].stable && nearFire(x, y))) {
       mat[i] = 0;
       boomQ.push([x, y, M[id].expl]);
       return true;
@@ -7589,6 +7673,8 @@
       case 24: if (t < 1000) { mat[i] = 22; return true; } break;      // 쇳물 → 철
       case 34: if (t >= 90) { mat[i] = 35; return true; } break;       // 아스팔트 녹음
       case 35: if (t < 60) { mat[i] = 34; return true; } break;
+      case 26: if (t >= 900) { mat[i] = 44; return true; } break;      // 유리 → 유리물
+      case 44: if (t < 500) { mat[i] = 26; return true; } break;
     }
     // 인화물 자연 발화
     if (M[id].flam && M[id].ign && t >= M[id].ign) { mat[i] = 12; life[i] = 0; return true; }
@@ -7598,6 +7684,12 @@
   /* ---------------- 하중·지지 ---------------- */
   function solidStep(i, x, y) {
     const id = mat[i];
+    if (id === 47 && Math.random() < 0.02 && y > 0 && mat[I(x, y - 1)] === 0) {
+      // 풀 — 조경. 5칸까지 위로 자란다
+      let stalk = 0;
+      for (let yy = y; yy < H && mat[I(x, yy)] === 47; yy++) stalk++;
+      if (stalk < 5) mat[I(x, y - 1)] = 47;
+    }
     if (ANCHOR[id]) {
       if (id === 22) rustCheck(i, x, y);
       return;
@@ -7673,6 +7765,10 @@
 
         if (kind === 'powder') {
           const p = M[id];
+          if (id === 46) {                             // 씨앗 — 흙(진흙) 위에서 싹튼다
+            const b2 = y + 1 < H ? mat[I(x, y + 1)] : 0;
+            if ((b2 === 29 || b2 === 30) && Math.random() < 0.08) { mat[i] = 47; continue; }
+          }
           if (p.light && Math.random() < 0.4) continue;
           const below = y + 1 < H ? I(x, y + 1) : -1;
           if (below >= 0 && (passable(mat[below]) || sinkIn(mat[below]))) { swap(i, below); continue; }
@@ -7706,6 +7802,22 @@
         }
 
         if (kind === 'liquid') {
+          if (id === 45) {                             // 염산 — 닿는 걸 녹인다(옹벽·유리는 견딤)
+            let ate = false;
+            for (let k = 0; k < 4; k++) {
+              const nx = x + N4[k][0], ny = y + N4[k][1];
+              if (!inb(nx, ny)) continue;
+              const j = I(nx, ny);
+              const t2 = mat[j];
+              if (t2 && t2 !== 1 && t2 !== 26 && t2 !== 44 && t2 !== 45 && KIND[t2] !== 'gas') {
+                mat[j] = Math.random() < 0.3 ? 13 : 0;
+                if (Math.random() < 0.4) mat[i] = 0;   // 산도 같이 소모된다
+                ate = true;
+                break;
+              }
+            }
+            if (ate && !mat[i]) continue;
+          }
           const below = y + 1 < H ? I(x, y + 1) : -1;
           if (below >= 0 && passable(mat[below])) { swap(i, below); continue; }
           if (id === 5 && below >= 0 && mat[below] === 10) { swap(i, below); continue; }   // 물이 기름 밑으로
