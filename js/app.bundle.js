@@ -8222,6 +8222,8 @@
 
   function init() {
     load();
+    const hb = $('#home-bang');
+    if (hb) hb.addEventListener('click', open);   // 홈에서 바로 진입(사용자 지시)
     $('#bang-back').addEventListener('click', close);
     $('#bang-copy').addEventListener('click', copyReport);
     ['#bang-w', '#bang-s1', '#bang-s2'].forEach((s) => {
