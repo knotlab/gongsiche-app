@@ -416,11 +416,13 @@
     </button>
   </div>
 
-  <div class="search-row">
+  <div class="search-row with-filter">
     <!-- type=search 는 삼성 키보드에서 한글 조합이 어긋나는 사례가 있어 text 로 둔다 -->
     <input type="text" id="tasks-search" inputmode="search" enterkeyhint="search"
            placeholder="메모 · 감리 · 분류 검색"
            autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+    <!-- 목록 필터 — 종류·공구·감리로 보이는 작업을 거른다(사용자 지시) -->
+    <button class="mini-btn" id="tasks-filter">필터</button>
   </div>
 
   <div class="bat-list" id="tasks-list">

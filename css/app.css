@@ -1133,6 +1133,12 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
 }
 .lightbox-close .ic{width:var(--ic-md);height:var(--ic-md);stroke-width:2.4}
 
+/* 작업 탭 목록 필터 — 검색창 옆 버튼. 걸려 있으면 강조색 */
+.search-row.with-filter{display:flex;gap:8px;align-items:center}
+.search-row.with-filter input{flex:1 1 auto;min-width:0}
+.search-row .mini-btn{flex:0 0 auto;min-height:var(--tap)}
+.search-row .mini-btn.on{background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
+
 /* ---------- 방통시험 (beta) ---------- */
 .bang-scroll{padding:14px 16px calc(20px + var(--safe-b));overflow-y:auto;overflow-x:hidden;height:100%}
 .bang-field{display:flex;flex-direction:column;gap:6px;margin-bottom:12px;flex:1 1 0}

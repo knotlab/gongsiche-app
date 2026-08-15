@@ -4668,9 +4668,11 @@
   }
 
   function visible() {
+    let rows = all;
+    if (listFilter) rows = rows.filter((t) => listFilter.test(t));
     const q = searchQ.trim().toLowerCase();
-    if (!q) return all;
-    return all.filter((t) => {
+    if (!q) return rows;
+    return rows.filter((t) => {
       const s = (t.dong || '') + ' ' + (t.part || '') + ' ' +
                 (t.supervisor || '') + ' ' + Task.label(t);
       return s.toLowerCase().indexOf(q) >= 0;
@@ -4708,7 +4710,9 @@
         // userMsg 는 store.js 가 만든 고정 문구다(사용자 입력 아님)
         ? ((loadFail.userMsg || '목록을 불러오지 못했습니다.') + '<br>위 날짜를 탭하면 다시 시도합니다.')
         : (all.length
-          ? '조건에 맞는 작업이 없습니다.'
+          ? (listFilter
+            ? '필터 「' + listFilter.label + '」에 맞는 작업이 없습니다.'
+            : '조건에 맞는 작업이 없습니다.')
           : '이 날짜에 작업이 없습니다.<br>오른쪽 위 <b>+</b> 로 등록하세요.');
       list.appendChild(emptyNode);
       updateBar();
@@ -4956,8 +4960,9 @@
     else U.toast('공유할 앱에서 카카오톡을 선택하세요');
   }
 
-  /* ---------------- 내보내기 필터 (사용자 지시: 공구별·종류별 등으로 추리기) ---------------- */
-  let sendFilter = null;      // { label, test(t, subKey) } — 세션 동안 유지, '전체'로 해제
+  /* ---------------- 목록 필터 (사용자 지시: 작업 탭에서 보이는 것 자체를 거른다) ----------------
+     전송 시트가 아니라 목록에 건다 — 걸어 두면 목록·전체선택·전송·검수가 전부 그 범위만 본다. */
+  let listFilter = null;      // { label, test(t) } — 세션 동안 유지, '전체'로 해제
 
   function teamOf(t) {
     const sup = (t.supervisor || '').trim();
@@ -4966,40 +4971,46 @@
     return (hit && hit.team) || '';
   }
 
-  function pickFilter(axis) {
-    const rows = selected();
+  function syncFilterBtn() {
+    const b = U.$('#tasks-filter');
+    if (!b) return;
+    b.textContent = listFilter ? ('필터: ' + listFilter.label) : '필터';
+    b.classList.toggle('on', !!listFilter);
+  }
+
+  function setFilter(f) {
+    listFilter = f;
+    syncFilterBtn();
+    render();
+  }
+
+  function pickFilter() {
     const items = [];
     items.push({
-      label: '전체 (필터 없음)', cls: sendFilter ? '' : 'strong',
-      onPick: () => { sendFilter = null; askSend(axis); }
+      label: '전체 (필터 없음)', cls: listFilter ? '' : 'strong',
+      onPick: () => setFilter(null)
     });
     items.push({ sep: true });
     // 종류별
     Spec.SPECS.forEach((s) => {
       items.push({
         label: '종류 · ' + s.name,
-        onPick: () => {
-          sendFilter = { label: s.name, test: (t) => t.specKey === s.key };
-          askSend(axis);
-        }
+        onPick: () => setFilter({ label: s.name, test: (t) => t.specKey === s.key })
       });
     });
-    // 공구별 — 선택된 작업의 감리 소속에서 뽑는다
+    // 공구별 — 이 날짜 작업들의 감리 소속에서 뽑는다
     const teams = [];
-    rows.forEach((t) => { const tm = teamOf(t); if (tm && teams.indexOf(tm) < 0) teams.push(tm); });
+    all.forEach((t) => { const tm = teamOf(t); if (tm && teams.indexOf(tm) < 0) teams.push(tm); });
     if (teams.length) items.push({ sep: true });
     teams.sort().forEach((tm) => {
       items.push({
         label: '공구 · ' + tm,
-        onPick: () => {
-          sendFilter = { label: tm, test: (t) => teamOf(t) === tm };
-          askSend(axis);
-        }
+        onPick: () => setFilter({ label: tm, test: (t) => teamOf(t) === tm })
       });
     });
     // 감리별
     const sups = [];
-    rows.forEach((t) => {
+    all.forEach((t) => {
       const s = (t.supervisor || '').trim();
       if (s && sups.indexOf(s) < 0) sups.push(s);
     });
@@ -5007,13 +5018,10 @@
     sups.sort((a, b) => a.localeCompare(b, 'ko')).forEach((s) => {
       items.push({
         label: '감리 · ' + s,
-        onPick: () => {
-          sendFilter = { label: s, test: (t) => (t.supervisor || '').trim() === s };
-          askSend(axis);
-        }
+        onPick: () => setFilter({ label: s, test: (t) => (t.supervisor || '').trim() === s })
       });
     });
-    U.sheet('무엇만 보낼까요?', items);
+    U.sheet('무엇만 볼까요?', items);
   }
 
   /* 내보내기 두 갈래 — 묶는 축만 다르고 보내는 방식은 같다.
@@ -5023,20 +5031,9 @@
     const rows = selected();
     if (!rows.length) { U.toast('작업을 선택하세요'); return; }
     const bySup = (axis === 'sup');
-    let groups = (bySup ? Task.groupForExport(rows) : Task.groupByDay(rows))
+    const groups = (bySup ? Task.groupForExport(rows) : Task.groupByDay(rows))
       .filter((g) => g.photos > 0);
-    if (sendFilter) {
-      groups = groups.filter((g) => g.items.some((t) => sendFilter.test(t, g.subKey)));
-    }
     if (!groups.length) {
-      if (sendFilter) {
-        // 필터 때문에 빈 것 — 사진 없음과 헷갈리지 않게 필터를 바로 고치게 한다
-        U.sheet('필터 「' + sendFilter.label + '」에 맞는 묶음이 없습니다', [
-          { label: '필터 바꾸기', cls: 'strong', onPick: () => pickFilter(axis) },
-          { label: '필터 지우고 전체 보기', onPick: () => { sendFilter = null; askSend(axis); } }
-        ]);
-        return;
-      }
       // 봉함은 감리축으로 안 보낸다 — 사진이 없는 것과 구별해 알린다
       if (bySup && rows.every(Task.supAxisOff)) {
         U.toast('봉함은 감리별로 보내지 않습니다\n날짜별로 보내세요', 3500);
@@ -5052,12 +5049,6 @@
       label: '사진 도장: ' + (U.wmPref() ? '켬' : '끔'),
       sub: '사진 귀퉁이에 동·분류·날짜를 찍어 보냅니다 — 탭해서 ' + (U.wmPref() ? '끄기' : '켜기'),
       onPick: () => { U.setWmPref(!U.wmPref()); askSend(axis); }
-    });
-    // 필터 — 종류·공구·감리로 추려 보낸다(사용자 지시)
-    items.push({
-      label: '필터: ' + (sendFilter ? sendFilter.label : '전체'),
-      sub: '종류별 · 공구별 · 감리별로 추려서 보냅니다 — 탭해서 고르기',
-      onPick: () => pickFilter(axis)
     });
     items.push({ sep: true });
     groups.forEach((g) => {
@@ -5094,6 +5085,9 @@
     U.$('#tasks-audit').addEventListener('click', () => {
       AuditUI.start(selected());
     });
+    // 목록 필터 — 종류·공구·감리 (사용자 지시: 전송 시트가 아니라 목록에서)
+    const fb = U.$('#tasks-filter');
+    if (fb) fb.addEventListener('click', pickFilter);
 
     // 홈뿐 아니라 여기서도 등록한다. 보고 있는 날짜에 그대로 만든다.
     U.$('#tasks-add').addEventListener('click', () => {
