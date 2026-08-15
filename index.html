@@ -563,6 +563,39 @@
   <div class="sup-list" id="sup-list"></div>
 </section>
 
+<!-- ═══════════ 방통시험 (beta) — 계산 탭 메뉴에서 진입 ═══════════ -->
+<section class="view hidden editor" id="view-bang" data-view="bang">
+  <header class="topbar">
+    <button class="icon-btn" id="bang-back" aria-label="뒤로">
+      <svg class="ic" aria-hidden="true"><use href="#ic-back"/></svg>
+    </button>
+    <h1>방통시험 <b class="beta">BETA</b></h1>
+    <button class="mini-btn" id="bang-clear">지우기</button>
+  </header>
+  <div class="bang-scroll">
+    <div class="bang-field">
+      <span class="field-label">몰탈 무게 (g)</span>
+      <input class="bang-input" id="bang-w" type="text" inputmode="decimal"
+             placeholder="예: 971.16" autocomplete="off">
+    </div>
+    <div class="bang-pair">
+      <div class="bang-field">
+        <span class="field-label">슬럼프 ① (mm)</span>
+        <input class="bang-input" id="bang-s1" type="text" inputmode="numeric"
+               placeholder="예: 235" autocomplete="off">
+      </div>
+      <div class="bang-field">
+        <span class="field-label">슬럼프 ② (mm)</span>
+        <input class="bang-input" id="bang-s2" type="text" inputmode="numeric"
+               placeholder="예: 245" autocomplete="off">
+      </div>
+    </div>
+    <div class="card bang-card" id="bang-result"></div>
+    <button class="btn primary bang-copy" id="bang-copy">카톡 보고 문구 복사</button>
+    <p class="bang-note">고정값: 실린더 400ml · 밀도 2400kg/㎥ 이상 · 슬럼프 220±20mm</p>
+  </div>
+</section>
+
 <!-- ═══════════ AI 검수 결과 (beta) ═══════════ -->
 <section class="view hidden editor" id="view-audit" data-view="audit">
   <header class="topbar">

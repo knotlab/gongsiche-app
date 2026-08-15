@@ -4520,6 +4520,9 @@
       U.sheet('계산 옵션', [
         { label: '결과 복사', sub: '카카오톡에 붙여넣기용 텍스트', onPick: copySummary },
         { label: '작업에 넣기', sub: '새 작업 또는 오늘 등록한 작업', onPick: attachToRecord },
+        { label: '방통시험 계산', sub: '몰탈 밀도·슬럼프 → 카톡 보고 문구', onPick: () => {
+            if (global.Bangtong) Bangtong.open();
+          } },
         { sep: true },
         { label: '전체 지우기', cls: 'danger', onPick: clearAll }
       ]);
@@ -4953,6 +4956,66 @@
     else U.toast('공유할 앱에서 카카오톡을 선택하세요');
   }
 
+  /* ---------------- 내보내기 필터 (사용자 지시: 공구별·종류별 등으로 추리기) ---------------- */
+  let sendFilter = null;      // { label, test(t, subKey) } — 세션 동안 유지, '전체'로 해제
+
+  function teamOf(t) {
+    const sup = (t.supervisor || '').trim();
+    if (!sup || !global.Contacts) return '';
+    const hit = Contacts.LIST.find((c) => Contacts.label(c) === sup);
+    return (hit && hit.team) || '';
+  }
+
+  function pickFilter(axis) {
+    const rows = selected();
+    const items = [];
+    items.push({
+      label: '전체 (필터 없음)', cls: sendFilter ? '' : 'strong',
+      onPick: () => { sendFilter = null; askSend(axis); }
+    });
+    items.push({ sep: true });
+    // 종류별
+    Spec.SPECS.forEach((s) => {
+      items.push({
+        label: '종류 · ' + s.name,
+        onPick: () => {
+          sendFilter = { label: s.name, test: (t) => t.specKey === s.key };
+          askSend(axis);
+        }
+      });
+    });
+    // 공구별 — 선택된 작업의 감리 소속에서 뽑는다
+    const teams = [];
+    rows.forEach((t) => { const tm = teamOf(t); if (tm && teams.indexOf(tm) < 0) teams.push(tm); });
+    if (teams.length) items.push({ sep: true });
+    teams.sort().forEach((tm) => {
+      items.push({
+        label: '공구 · ' + tm,
+        onPick: () => {
+          sendFilter = { label: tm, test: (t) => teamOf(t) === tm };
+          askSend(axis);
+        }
+      });
+    });
+    // 감리별
+    const sups = [];
+    rows.forEach((t) => {
+      const s = (t.supervisor || '').trim();
+      if (s && sups.indexOf(s) < 0) sups.push(s);
+    });
+    if (sups.length) items.push({ sep: true });
+    sups.sort((a, b) => a.localeCompare(b, 'ko')).forEach((s) => {
+      items.push({
+        label: '감리 · ' + s,
+        onPick: () => {
+          sendFilter = { label: s, test: (t) => (t.supervisor || '').trim() === s };
+          askSend(axis);
+        }
+      });
+    });
+    U.sheet('무엇만 보낼까요?', items);
+  }
+
   /* 내보내기 두 갈래 — 묶는 축만 다르고 보내는 방식은 같다.
        byDay : 같은 날 같은 분류끼리   → "7/22 필러"
        bySup : 감리·동·분류가 같은 것 → "201동 수직입니다" */
@@ -4960,9 +5023,20 @@
     const rows = selected();
     if (!rows.length) { U.toast('작업을 선택하세요'); return; }
     const bySup = (axis === 'sup');
-    const groups = (bySup ? Task.groupForExport(rows) : Task.groupByDay(rows))
+    let groups = (bySup ? Task.groupForExport(rows) : Task.groupByDay(rows))
       .filter((g) => g.photos > 0);
+    if (sendFilter) {
+      groups = groups.filter((g) => g.items.some((t) => sendFilter.test(t, g.subKey)));
+    }
     if (!groups.length) {
+      if (sendFilter) {
+        // 필터 때문에 빈 것 — 사진 없음과 헷갈리지 않게 필터를 바로 고치게 한다
+        U.sheet('필터 「' + sendFilter.label + '」에 맞는 묶음이 없습니다', [
+          { label: '필터 바꾸기', cls: 'strong', onPick: () => pickFilter(axis) },
+          { label: '필터 지우고 전체 보기', onPick: () => { sendFilter = null; askSend(axis); } }
+        ]);
+        return;
+      }
       // 봉함은 감리축으로 안 보낸다 — 사진이 없는 것과 구별해 알린다
       if (bySup && rows.every(Task.supAxisOff)) {
         U.toast('봉함은 감리별로 보내지 않습니다\n날짜별로 보내세요', 3500);
@@ -4978,6 +5052,12 @@
       label: '사진 도장: ' + (U.wmPref() ? '켬' : '끔'),
       sub: '사진 귀퉁이에 동·분류·날짜를 찍어 보냅니다 — 탭해서 ' + (U.wmPref() ? '끄기' : '켜기'),
       onPick: () => { U.setWmPref(!U.wmPref()); askSend(axis); }
+    });
+    // 필터 — 종류·공구·감리로 추려 보낸다(사용자 지시)
+    items.push({
+      label: '필터: ' + (sendFilter ? sendFilter.label : '전체'),
+      sub: '종류별 · 공구별 · 감리별로 추려서 보냅니다 — 탭해서 고르기',
+      onPick: () => pickFilter(axis)
     });
     items.push({ sep: true });
     groups.forEach((g) => {
@@ -8022,6 +8102,142 @@
 })(window);
 
 ;
+/* ===== js/bangtong.js ===== */
+/* ============ bangtong.js — 방통시험 계산 (beta) ============
+   바닥 몰탈(방통) 품질시험 계산기(사용자 요청).
+   입력: 몰탈 무게(g) · 슬럼프 2회(mm — 평균 낸다)
+   고정값(현장 기준): 시료실린더 400ml · 밀도기준 2400kg/㎥ 이상 · 슬럼프기준 220±20mm
+   카톡 문구는 사용자 예시 양식 그대로 만든다:
+     몰탈 무게 971.16g, 시료실린더 부피 400ml
+     밀도 : 971.16/400=2.4279g/ml=2427.9kg/㎥
+     밀도기준 : 2400kg/㎥ 이상
+     슬럼프 240mm
+     슬럼프기준 220±20mm
+============================================================ */
+(function (global) {
+  'use strict';
+
+  const VOL = 400;            // 시료실린더 부피 (ml)
+  const DEN_MIN = 2400;       // 밀도 기준 (kg/㎥ 이상)
+  const SL_BASE = 220, SL_TOL = 20;   // 슬럼프 기준 (mm)
+  const K_SAVE = 'gsc.bang.v1';
+
+  const $ = U.$;
+
+  function num(s) {
+    const v = parseFloat(String(s == null ? '' : s).trim().replace(/,/g, ''));
+    return (isFinite(v) && v > 0) ? v : null;
+  }
+
+  function calc() {
+    const w = num($('#bang-w').value);
+    const ss = [num($('#bang-s1').value), num($('#bang-s2').value)].filter((v) => v != null);
+    const r = { w: w };
+    if (w != null) {
+      r.gml = Math.round(w / VOL * 10000) / 10000;         // 소수 4자리 (예: 2.4279)
+      r.kgm3 = Math.round(w / VOL * 1000 * 10) / 10;       // 소수 1자리 (예: 2427.9)
+      r.denOk = r.kgm3 >= DEN_MIN;
+    }
+    if (ss.length) {
+      r.slump = Math.round(ss.reduce((a, b) => a + b, 0) / ss.length);
+      r.slOk = Math.abs(r.slump - SL_BASE) <= SL_TOL;
+    }
+    return r;
+  }
+
+  /* 카톡 보고 문구 — 예시 양식 그대로 */
+  function report(r) {
+    const wTxt = String($('#bang-w').value).trim().replace(/,/g, '');
+    const lines = [];
+    lines.push('몰탈 무게 ' + wTxt + 'g, 시료실린더 부피 ' + VOL + 'ml');
+    lines.push('밀도 : ' + wTxt + '/' + VOL + '=' + r.gml + 'g/ml=' + r.kgm3 + 'kg/㎥');
+    lines.push('밀도기준 : ' + DEN_MIN + 'kg/㎥ 이상');
+    if (r.slump != null) {
+      lines.push('슬럼프 ' + r.slump + 'mm');
+      lines.push('슬럼프기준 ' + SL_BASE + '±' + SL_TOL + 'mm');
+    }
+    return lines.join('\n');
+  }
+
+  function badge(ok) {
+    return '<b class="bang-badge ' + (ok ? 'ok' : 'bad') + '">' + (ok ? '합격' : '기준 미달') + '</b>';
+  }
+
+  function render() {
+    const r = calc();
+    const el = $('#bang-result');
+    if (!el) return;
+    if (r.gml == null && r.slump == null) {
+      el.innerHTML = '<p class="bang-empty">몰탈 무게와 슬럼프를 입력하세요</p>';
+      $('#bang-copy').disabled = true;
+      return;
+    }
+    let h = '';
+    if (r.gml != null) {
+      h += '<div class="bang-row"><span>밀도</span><b>' + r.gml + ' g/ml = ' + r.kgm3 + ' kg/㎥</b>' +
+           badge(r.denOk) + '</div>' +
+           '<div class="bang-std">기준 ' + DEN_MIN + 'kg/㎥ 이상 · 실린더 ' + VOL + 'ml</div>';
+    }
+    if (r.slump != null) {
+      h += '<div class="bang-row"><span>슬럼프 평균</span><b>' + r.slump + ' mm</b>' + badge(r.slOk) + '</div>' +
+           '<div class="bang-std">기준 ' + SL_BASE + '±' + SL_TOL + 'mm</div>';
+    }
+    el.innerHTML = h;
+    $('#bang-copy').disabled = (r.gml == null);
+    save();
+  }
+
+  function save() {
+    try {
+      localStorage.setItem(K_SAVE, JSON.stringify({
+        w: $('#bang-w').value, s1: $('#bang-s1').value, s2: $('#bang-s2').value
+      }));
+    } catch (e) {}
+  }
+
+  function load() {
+    try {
+      const j = JSON.parse(localStorage.getItem(K_SAVE) || 'null');
+      if (!j) return;
+      $('#bang-w').value = j.w || '';
+      $('#bang-s1').value = j.s1 || '';
+      $('#bang-s2').value = j.s2 || '';
+    } catch (e) {}
+  }
+
+  function copyReport() {
+    const r = calc();
+    if (r.gml == null) { U.toast('몰탈 무게를 먼저 입력하세요'); return; }
+    U.copyText(report(r)).then((ok) => {
+      U.toast(ok ? '보고 문구를 복사했습니다 — 카톡에 붙여넣으세요' : '복사에 실패했습니다', 3000);
+    });
+  }
+
+  function open() {
+    $('#view-bang').classList.remove('hidden');
+    render();
+  }
+  function close() { $('#view-bang').classList.add('hidden'); }
+  function isOpen() { return !$('#view-bang').classList.contains('hidden'); }
+
+  function init() {
+    load();
+    $('#bang-back').addEventListener('click', close);
+    $('#bang-copy').addEventListener('click', copyReport);
+    ['#bang-w', '#bang-s1', '#bang-s2'].forEach((s) => {
+      $(s).addEventListener('input', render);
+    });
+    $('#bang-clear').addEventListener('click', () => {
+      ['#bang-w', '#bang-s1', '#bang-s2'].forEach((s) => { $(s).value = ''; });
+      render();
+    });
+  }
+
+  global.Bangtong = { init: init, open: open, close: close, isOpen: isOpen,
+                      _calc: calc, _report: report };
+})(window);
+
+;
 /* ===== js/home.js ===== */
 /* ============ home.js — 메인(홈) 화면 ============
    하루의 출발점.
@@ -8446,6 +8662,7 @@
   /* 뒤로가기 한 단계 처리. 더 이상 물러설 곳이 없으면 false */
   function goBack() {
     if (global.Powder && Powder.isOpen()) { Powder.close(); return true; }
+    if (global.Bangtong && Bangtong.isOpen()) { Bangtong.close(); return true; }
     if (!U.$('#sheet-back').classList.contains('hidden')) {
       if (U.sheet.close) U.sheet.close();
       return true;
@@ -8515,6 +8732,7 @@
     AuditUI.init();
     OCRUI.init();
     if (global.Sync) Sync.init();     // 관리자 서버 백업 (beta)
+    if (global.Bangtong) Bangtong.init();
     Home.init();
     Nav.go('home');
     // 네이티브 스플래시 → 부팅 화면 → 앱. 색이 같아 이음매가 안 보인다.

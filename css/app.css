@@ -1133,6 +1133,34 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
 }
 .lightbox-close .ic{width:var(--ic-md);height:var(--ic-md);stroke-width:2.4}
 
+/* ---------- 방통시험 (beta) ---------- */
+.bang-scroll{padding:14px 16px calc(20px + var(--safe-b));overflow-y:auto;overflow-x:hidden;height:100%}
+.bang-field{display:flex;flex-direction:column;gap:6px;margin-bottom:12px;flex:1 1 0}
+.bang-pair{display:flex;gap:10px}
+.bang-input{
+  width:100%;min-height:var(--tap);padding:10px 12px;
+  border:1px solid var(--line);border-radius:var(--r-md);
+  background:var(--surface);color:var(--text);
+  font-size:19px;font-weight:700;font-variant-numeric:tabular-nums;
+}
+.bang-input:focus{outline:none;border-color:var(--accent)}
+.bang-card{padding:13px 14px;margin:4px 0 14px}
+.bang-empty{color:var(--text-2);font-size:14px;text-align:center;padding:6px 0}
+.bang-row{display:flex;align-items:center;gap:8px;font-size:14px;padding:3px 0}
+.bang-row span{color:var(--text-2);flex:0 0 auto}
+.bang-row b{font-size:15px;flex:1 1 auto;min-width:0}
+.bang-badge{flex:0 0 auto;font-size:11px;font-weight:800;border-radius:var(--r-sm);padding:2px 8px}
+.bang-badge.ok{background:var(--accent-soft);color:var(--accent)}
+.bang-badge.bad{background:#fee2e2;color:#b91c1c}
+:root[data-theme="dark"] .bang-badge.bad{background:#3b1212;color:#fca5a5}
+.bang-std{font-size:11px;color:var(--text-2);padding:0 0 8px}
+.bang-copy{
+  width:100%;min-height:48px;border-radius:var(--r-md);
+  background:var(--accent);color:var(--on-accent);font-size:15px;font-weight:800;
+}
+.bang-copy:disabled{opacity:.45}
+.bang-note{font-size:11px;color:var(--text-2);text-align:center;margin-top:10px}
+
 /* ---------- 몰래 파우더 (숨김 장난감 — 게임 화면이라 앱 테마와 무관하게 다크 고정) ---------- */
 .pd{
   position:fixed;inset:0;z-index:80;color:#e5e7eb;
