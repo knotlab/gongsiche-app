@@ -5186,11 +5186,15 @@
      전송 시트가 아니라 목록에 건다 — 걸어 두면 목록·전체선택·전송·검수가 전부 그 범위만 본다. */
   let listFilter = null;      // { label, test(t) } — 세션 동안 유지, '전체'로 해제
 
+  // "3공구장"(공구장)도 그 공구다 — 별도 필터로 두지 않고 "3공구"로 합친다(사용자 지시)
+  function normTeam(tm) {
+    return String(tm || '').trim().replace(/^(\d+\s*공구)장$/, '$1');
+  }
   function teamOf(t) {
     const sup = (t.supervisor || '').trim();
     if (!sup || !global.Contacts) return '';
     const hit = Contacts.LIST.find((c) => Contacts.label(c) === sup);
-    return (hit && hit.team) || '';
+    return normTeam(hit && hit.team);
   }
 
   function syncFilterBtn() {
