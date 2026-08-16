@@ -1212,7 +1212,7 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
   font-variant-numeric:tabular-nums;
 }
 .bang-keypad .key:active{background:var(--surface-2)}
-.bang-keypad .key-back{color:var(--text-2)}
+.bang-keypad .key-back,.bang-keypad .key-clr{color:var(--text-2)}
 
 /* ---------- 몰래 파우더 (숨김 장난감 — 게임 화면이라 앱 테마와 무관하게 다크 고정) ---------- */
 .pd{

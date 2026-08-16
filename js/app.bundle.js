@@ -8806,7 +8806,8 @@
 /* ===== js/bangtong.js ===== */
 /* ============ bangtong.js — 방통시험 계산·저장 (beta) ============
    바닥 몰탈(방통) 품질시험. 입력은 **계산기와 같은 숫자 키패드**로 넣는다(OS 키보드 안 씀).
-   입력: 몰탈 무게(g) · 슬럼프 2회(mm — 평균)
+   몰탈 무게는 공시체 계산기처럼 **끝 두 자리가 소수**다 — "97116" → 971.16 (소수점 키 없음).
+   슬럼프는 정수(mm). 입력: 몰탈 무게(g) · 슬럼프 2회(mm — 평균)
    고정값(현장 기준): 시료실린더 400ml · 밀도기준 2400kg/㎥ 이상 · 슬럼프기준 220±20mm
    저장: **날짜별 · 담당 감리 · 사진**(동은 없다 — 사용자 지시). 저장한 건 목록에서 카톡으로 내보낸다.
    카톡 문구는 사용자 예시 양식 그대로:
@@ -8826,15 +8827,24 @@
 
   const $ = U.$;
 
-  /* 입력 중인 초안 — 값은 문자열(키패드가 그대로 채운다) */
+  /* 입력 중인 초안 — 값은 **숫자만 담은 문자열**(키패드가 그대로 채운다).
+     무게는 끝 두 자리가 소수(÷100), 슬럼프는 정수. 화면·계산은 그때그때 환산한다. */
   let draft = { w: '', s1: '', s2: '', supervisor: '', supPhone: '', photos: [] };
   let active = 'w';                    // 지금 키패드가 채우는 칸
-  const pendingIds = [];               // 저장 전 사진(gc 보호는 저장 시 putBang 후 목록 참조로 해결)
 
   function num(s) {
     const v = parseFloat(String(s == null ? '' : s).trim().replace(/,/g, ''));
     return (isFinite(v) && v > 0) ? v : null;
   }
+
+  /* 숫자 문자열 → 값 */
+  const digitsOf = (s) => String(s == null ? '' : s).replace(/\D/g, '');
+  function weightVal(s) { const d = digitsOf(s); return d ? (parseInt(d, 10) / 100) : null; }
+  function intVal(s) { const d = digitsOf(s); return d ? parseInt(d, 10) : null; }
+  function fmtWeight(s) { const d = digitsOf(s); return d ? (parseInt(d, 10) / 100).toFixed(2) : '0.00'; }
+  function fmtInt(s) { const d = digitsOf(s); return d ? String(parseInt(d, 10)) : '0'; }
+  /* 초안의 세 칸을 계산·저장용 숫자로 */
+  function draftVals() { return { w: weightVal(draft.w), s1: intVal(draft.s1), s2: intVal(draft.s2) }; }
 
   /* ---------------- 계산 ---------------- */
   function calc(d) {
@@ -8877,15 +8887,14 @@
 
   function renderFields() {
     const els = fieldEls();
-    ['w', 's1', 's2'].forEach((f) => {
-      const v = draft[f] || '';
-      $('#bv-' + f).textContent = v === '' ? '0' : v;
-      els[f].classList.toggle('on', active === f);
-    });
+    $('#bv-w').textContent = fmtWeight(draft.w);       // 무게: 소수 2자리
+    $('#bv-s1').textContent = fmtInt(draft.s1);        // 슬럼프: 정수
+    $('#bv-s2').textContent = fmtInt(draft.s2);
+    ['w', 's1', 's2'].forEach((f) => els[f].classList.toggle('on', active === f));
   }
 
   function renderResult() {
-    const r = calc();
+    const r = calc(draftVals());
     const el = $('#bang-result');
     if (!el) return;
     if (r.gml == null && r.slump == null) {
@@ -8944,13 +8953,16 @@
 
   function renderAll() { renderFields(); renderResult(); renderSup(); renderPhotos(); saveDraft(); }
 
-  /* ---------------- 키패드 ---------------- */
+  /* ---------------- 키패드 (숫자만 — 소수점 키 없음) ---------------- */
   function press(k) {
-    let s = draft[active] || '';
+    let s = digitsOf(draft[active]);
     if (k === 'del') s = s.slice(0, -1);
-    else if (k === '.') { if (s.indexOf('.') < 0) s = (s === '' ? '0.' : s + '.'); }
-    else { s = (s === '0') ? k : (s + k); }
-    if (s.replace('.', '').length > 7) return;   // 과한 길이 방지
+    else if (k === 'clr') s = '';
+    else if (/^[0-9]$/.test(k)) {
+      s = s + k;
+      const max = (active === 'w') ? 6 : 4;          // 무게 9999.99 / 슬럼프 9999 까지
+      if (s.length > max) return;
+    }
     draft[active] = s;
     renderFields(); renderResult(); saveDraft();
     U.buzz(4);
@@ -9017,14 +9029,15 @@
 
   /* ---------------- 저장 / 목록 ---------------- */
   async function saveBang() {
-    const r = calc();
+    const vals = draftVals();
+    const r = calc(vals);
     if (r.gml == null) { U.toast('몰탈 무게를 먼저 입력하세요'); return; }
     const rec = {
       day: U.dayKey(Date.now()),
       supervisor: draft.supervisor, supPhone: draft.supPhone,
       jugu: U.jugu(),
       photos: draft.photos.slice(),
-      w: num(draft.w), s1: num(draft.s1), s2: num(draft.s2)
+      w: vals.w, s1: vals.s1, s2: vals.s2
     };
     try {
       await Store.putBang(rec);
@@ -9123,7 +9136,7 @@
 
   /* 저장 없이 문구만 복사 */
   function copyReport() {
-    const r = calc();
+    const r = calc(draftVals());
     if (r.gml == null) { U.toast('몰탈 무게를 먼저 입력하세요'); return; }
     U.copyText(report(r)).then((ok) => {
       U.toast(ok ? '보고 문구를 복사했습니다 — 카톡에 붙여넣으세요' : '복사에 실패했습니다', 3000);
