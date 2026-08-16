@@ -708,7 +708,13 @@
       // 파일(앱 데이터·OPFS)로 옮겨진 원본도 같이 지운다 (없으면 조용히 넘어간다)
       if (global.Native && Native.photoRemove) Native.photoRemove(ids);
       opfsRemove(ids);
+      dropUrls(ids);
     });
+  }
+
+  /* 지운 사진의 썸네일 objectURL 캐시도 반납한다 — 안 하면 세션 내내 Blob 참조가 쌓인다(감사 지적) */
+  function dropUrls(ids) {
+    if (global.U && U.dropUrl) (ids || []).forEach((id) => { try { U.dropUrl(id); } catch (e) {} });
   }
 
   /* ---------------- records ---------------- */
@@ -796,6 +802,7 @@
       if (orphan.length) {
         if (global.Native && Native.photoRemove) Native.photoRemove(orphan);
         opfsRemove(orphan);
+        dropUrls(orphan);
       }
     });
   }
@@ -805,6 +812,9 @@
      - 읽기·계산·삭제를 **한 트랜잭션**으로 (스냅숏 일관성 — TOCTOU 차단)
      - 24시간 미만 사진은 안 지운다 (커밋됐지만 아직 어느 작업에도 안 붙은 진행 중 사진 보호) */
   function gc(protectIds) {
+    // 복원 중에는 절대 안 돈다 — 되살린 사진이 작업에 연결되기 전 창에서 gc 가 끼어들면
+    // 유일하게 살아남은 원본을 미참조로 오인해 지운다(반대심문 확인).
+    if (restoring) return Promise.resolve(0);
     const keep = {};
     (protectIds || []).forEach((id) => { keep[id] = 1; });
     const now = Date.now();
@@ -833,6 +843,7 @@
       if (dead.length) {
         if (global.Native && Native.photoRemove) Native.photoRemove(dead);
         opfsRemove(dead);
+        dropUrls(dead);
       }
       return dead.length;
     }).catch(() => 0);
@@ -940,12 +951,46 @@
   const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
   function goodDay(v, alt) { return DAY_RE.test(v || '') ? v : alt; }
 
+  function subIsEmpty(sub) {
+    return Spec.SUBS.every((s) => {
+      const b = sub[s.key] || {};
+      return !(b.photos && b.photos.length) && !(b.sets && b.sets.length);
+    });
+  }
+
+  /* 28일이 아닌 저장의 세트 — 없으면 sub 칸(수중·봉함)에서 끌어온다.
+     28일↔단일재령으로 분류를 바꿔 저장할 때 반대편 저장구조에 든 값이 조용히 버려지던 구멍을
+     막는다(반대심문 확인 — 사진은 t.photos 합집합 덕에 이미 살아남지만 세트는 여기서 살린다). */
+  function nonSubSets(t) {
+    const s = normalizeSets(t);
+    if (s.length) return s;
+    if (t.sub) {
+      let out = [];
+      Spec.SUBS.forEach((k) => {
+        const b = t.sub[k.key] || {};
+        out = out.concat(normalizeSets({ sets: b.sets, values: b.values, factor: b.factor }));
+      });
+      return out;
+    }
+    return s;
+  }
+
   /* 작업 → 저장할 레코드(정규화). putTask 와 persist28 이 같이 쓴다 */
   function taskRec(t) {
     liftDong(t);
     const now = Date.now();
     const isSub = Spec.hasSubs(t.specKey);
     const sub = isSub ? normalizeSub(t) : null;
+    // 단일재령→28일 전환: sub 가 비었는데 t.photos/t.sets 에 데이터가 있으면 수중 칸으로 이관
+    // (안 하면 저장 즉시 사진·강도값이 통째로 증발 — 반대심문 확인)
+    if (isSub && subIsEmpty(sub)) {
+      const legacyPhotos = (t.photos || []).slice();
+      const legacySets = normalizeSets(t);
+      if (legacyPhotos.length || legacySets.length) {
+        sub[Spec.SUBS[0].key].photos = legacyPhotos;
+        sub[Spec.SUBS[0].key].sets = legacySets;
+      }
+    }
     const day = goodDay(t.day, goodDay(t.testDay, U.dayKey(now)));
     return {
       id: t.id || U.uid(),
@@ -962,7 +1007,7 @@
       photoMark: !!t.photoMark,            // 목록의 「사진」 배지 — 표시 전용(완료 판정과 무관)
       // 28일은 두 칸의 사진이 곧 이 작업의 사진이다(gc 가 여기만 본다)
       photos: isSub ? mergedPhotos(t, sub) : (t.photos || []).slice(),
-      sets: isSub ? [] : normalizeSets(t),
+      sets: isSub ? [] : nonSubSets(t),
       sub: sub,                            // 28일이 아니면 null
       order: (typeof t.order === 'number') ? t.order : now,
       createdAt: t.createdAt || now,
@@ -979,8 +1024,12 @@
      쓰기마다 800ms 디바운스로 전체를 미러링하고, 복원 때 1순위로 쓴다. */
   const K_MIRROR = 'gsc.tasks.mirror.v1';
   let mirrorTimer = null;
+  let restoring = false;      // 복원 중 — gc·mirror·서버 push 를 잠근다(부분 상태 유출·원본 삭제 방지)
 
   function mirrorSoon() {
+    // 복원 중에는 미러·서버 push 를 걸지 않는다 — 중간에 끊기면 '일부만 복원된' 불완전 상태가
+    // 서버로 나가 다른 기기가 그걸 내려받는다(반대심문 확인). 복원이 끝나면 한 번만 민다.
+    if (restoring) return;
     // 관리자 서버 실시간 백업도 같은 훅을 탄다(있을 때만) — 저장 경로가 늘면 여기 하나로 충분
     try { if (global.Sync) Sync.poke(); } catch (e) {}
     clearTimeout(mirrorTimer);
@@ -1140,6 +1189,7 @@
       if (orphan.length) {
         if (global.Native && Native.photoRemove) Native.photoRemove(orphan);
         opfsRemove(orphan);
+        dropUrls(orphan);
       }
       mirrorSoon();
     });
@@ -1163,7 +1213,14 @@
 
   function allTasks() {
     return run((db) => reqp(db.transaction('tasks').objectStore('tasks').getAll()))
-      .then((arr) => (arr || []).map(liftDong));
+      .then((arr) => {
+        // tasksOf 처럼 구버전 수중·봉함을 28일로 합쳐 돌려준다 — OCR 중복판정·서버 백업이
+        // 이 함수를 쓰는데, 안 합치면 legacy 'water'/'seal' 이 'd28' 과 안 맞아 같은 시험이
+        // 중복 등록된다(반대심문 확인).
+        const m = merge28((arr || []).map(liftDong));
+        persist28(m);
+        return m.rows;
+      });
   }
 
   function bakInfo(key) {
@@ -1283,6 +1340,7 @@
   function restoreBackup(given) {
     const info = given || backupInfo() || bakInfo(K_BAK2);
     if (!info) return Promise.resolve(0);
+    restoring = true;      // 이 동안 gc·mirror·서버 push 를 잠근다 (원본 삭제·부분상태 유출 차단)
     return run((db) => reqp(db.transaction('photos').objectStore('photos').getAllKeys()))
       .catch(() => [])
       .then(async (keys) => {
@@ -1340,7 +1398,9 @@
           try { await putTask(c); n++; } catch (e) {}
         }
         return n;
-      });
+      })
+      .then((n) => { restoring = false; mirrorSoon(); return n; },   // 다 끝난 뒤 완전한 상태를 한 번만 민다
+            (e) => { restoring = false; throw e; });
   }
 
   global.Store = {
@@ -2055,25 +2115,28 @@
     return 'capacitor';
   }
 
-  function downloadBlobs(blobs, baseName, text) {
-    blobs.forEach((b, i) => {
-      const url = URL.createObjectURL(b);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = baseName + '_' + (i + 1) + '.jpg';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 4000);
-    });
-    if (text) {   // 사진과 함께 내려받을 때도 메모를 버리지 않는다
-      const url = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
-      const a = document.createElement('a');
-      a.href = url; a.download = baseName + '.txt';
-      document.body.appendChild(a); a.click(); document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 4000);
+  function clickDownload(blob, name) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+  }
+
+  // 크로미움은 한 탭에서 사용자 허가 없이 연속 다운로드를 자동 차단한다 — 클릭을 벌려(250ms)
+  // 차단 확률을 낮추고, 여러 장이면 'download-multi' 를 돌려 호출부가 '성공'이 아니라
+  // '차단될 수 있으니 확인하라'고 알리게 한다(반대심문 확인 — 조용한 성공 오보고 방지).
+  async function downloadBlobs(blobs, baseName, text) {
+    const multi = blobs.length + (text ? 1 : 0) > 1;
+    for (let i = 0; i < blobs.length; i++) {
+      clickDownload(blobs[i], baseName + '_' + (i + 1) + '.jpg');
+      if (i < blobs.length - 1) await new Promise((r) => setTimeout(r, 250));
     }
-    return 'download';
+    if (text) {   // 사진과 함께 내려받을 때도 메모를 버리지 않는다
+      if (blobs.length) await new Promise((r) => setTimeout(r, 250));
+      clickDownload(new Blob([text], { type: 'text/plain;charset=utf-8' }), baseName + '.txt');
+    }
+    return multi ? 'download-multi' : 'download';
   }
 
   /* 메인 진입점.
@@ -2276,8 +2339,13 @@
     }
 
     const loc = await locate();
+    // 타임아웃이 없으면 TCP 는 붙었는데 응답이 안 오는 구간(캡티브 포털·신호 미약)에서 fetch 가
+    // 무기한 pending 되어 오프라인 캐시 폴백조차 안 뜬다(반대심문 확인). 8초로 끊는다.
+    const ctrl = (typeof AbortController === 'function') ? new AbortController() : null;
+    const killer = ctrl ? setTimeout(() => ctrl.abort(), 8000) : null;
     try {
-      const res = await fetch(buildUrl(loc.lat, loc.lon), { cache: 'no-store' });
+      const res = await fetch(buildUrl(loc.lat, loc.lon),
+        { cache: 'no-store', signal: ctrl ? ctrl.signal : undefined });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const j = await res.json();
       const data = shape(j);
@@ -2288,11 +2356,13 @@
       return { data: data, at: next.at, source: loc.source, name: loc.name, stale: false };
     } catch (e) {
       console.warn('[weather]', e);
-      if (cache) {
+      if (cache) {   // 실패해도 캐시로 「n시간 전 기준(오프라인)」을 보여준다 — 이 불변식은 지킨다
         return { data: cache.data, at: cache.at, source: cache.source,
                  name: cache.name, stale: true };
       }
       return null;
+    } finally {
+      if (killer) clearTimeout(killer);
     }
   }
 
@@ -2613,7 +2683,7 @@
       const rest = text.replace(/(20\d{2})\s*[-./년]\s*\d{1,2}\s*[-./월]\s*\d{1,2}\s*일?/g, ' ');
       // 동은 여러 개일 수 있다 — "218동,208동,219동" (동 칸 하나에 나열).
       // 연이은 「N동」 무리를 통째로 잡는다. 위치 칸이 같은 동을 되풀이해도 중복 제거로 접힌다.
-      let dong = '', dongMain = '';
+      let dong = '', dongMain = '', hasSpecial = false;
       const dm = rest.match(/(\d{2,3})\s*동(?:\s*[,，·]?\s*\d{2,3}\s*동)*/);
       if (dm) {
         const uniq = [];
@@ -2626,6 +2696,10 @@
         // "215동 특화동"은 본동과 다른 구역이다 — 같은 날 215동 본동과 한 작업으로 접히면 안 된다
         if (uniq.length === 1 && new RegExp(uniq[0] + '\\s*동\\s*특화동').test(rest)) {
           dong = dongMain + ' 특화동';
+        } else if (uniq.length > 1 && /특화동/.test(rest)) {
+          // 다중동 행에 특화동이 섞였다 — 어느 동인지 확정할 수 없다. 자동 감리 배정을 막고
+          // 미리보기에서 사람이 잡게 표식만 남긴다(본동 감리로 잘못 배정되던 구멍, 반대심문 확인).
+          hasSpecial = true;
         }
       } else {
         // 「A9」 같은 블록명(영문+숫자) — 동 칸이 숫자동이 아닌 단지가 있다(실측 양식)
@@ -2674,7 +2748,7 @@
       seen[key] = 1;
       items.push({ dong: dong, dongMain: dongMain, specKey: specKey, age: age,
                    castDay: castDay, testDay: testDay,
-                   derived: derived, offAge: offAge });
+                   derived: derived, offAge: offAge, hasSpecial: hasSpecial });
     });
 
     return { items: items, rows: rows.length };
@@ -2706,16 +2780,25 @@
       cands.push({ v: v, x: l.x, y: l.y, h: l.h || 10, w: l.w || 0 });
     };
 
+    // 날짜(타설일/시험일)가 강도값으로 새는 걸 막는다 — "2026.08.16"→"26.08",
+    // "0709"→"07.09" 로 오인식되던 실측 누출(반대심문 확인).
+    const DATE_SUB = /(20\d{2})\s*[.\-/년]\s*\d{1,2}\s*[.\-/월]?\s*\d{1,2}\s*일?/g;
+    const DATE_HINT = /20\d{2}\s*[.\-/년]|타\s*설|시\s*험|일\s*자|월\s*일/;
     lines.forEach((l) => {
-      const txt = l.text.replace(/[|l]/g, '1');   // 손글씨 1 의 흔한 오독
+      const dateLine = DATE_HINT.test(l.text);
+      // 손글씨 1 의 흔한 오독(|·l→1) + 연도 붙은 날짜 구간 제거
+      const txt = l.text.replace(DATE_SUB, ' ').replace(/[|l]/g, '1');
       const re = /(\d{1,2})\s*[.,]\s*(\d{2})(?!\d)/g;
       let m, hit = false;
       while ((m = re.exec(txt))) { hit = true; push(parseFloat(m[1] + '.' + m[2]), l); }
       if (hit) return;
+      if (dateLine) return;                              // 날짜 줄에선 통짜 복원을 하지 않는다
       // 소수점이 사라진 줄 — 통째로 숫자일 때만 되살린다
       const whole = txt.trim();
       let w4 = whole.match(/^(\d{2})(\d{2})$/);          // "4403"
       if (!w4) w4 = whole.match(/^(\d{1,2})\s+(\d{2})$/); // "42 69"
+      // 앞자리가 0 으로 시작하는 4자리("0709")는 강도값이 아니라 MMDD 날짜다 — 뺀다
+      if (w4 && w4[1].length === 2 && w4[1][0] === '0') { excluded++; return; }
       if (w4) push(parseFloat(w4[1] + '.' + w4[2]), l);
     });
 
@@ -4310,11 +4393,33 @@
   let linkedSet = null;      // 어느 계산 세트에 넣을 것인가
   let linkedSub = null;      // 28일 작업이면 수중/봉함 중 어느 칸인가
 
+  function sameVals(a, b) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) { if (a[i].v !== b[i].v) return false; }
+    return true;
+  }
+
   function linkTo(taskId, setId, label, values, f, subKey) {
+    const incoming = (values || []).slice();
+    // 어디에도 저장되지 않은 입력 버퍼를 말없이 덮지 않는다 — 공시체는 이미 깨서 재측정이 안 된다.
+    // 되돌리기 토스트를 준다(clearAll 과 같은 안전장치, 반대심문 확인).
+    if (!linkedId && entries.length && !sameVals(entries, incoming)) {
+      const bk = entries.slice(), bf = factor;
+      U.toast('입력값 ' + entries.length + '개를 치우고 세트를 열었습니다', 6000, {
+        label: '되돌리기',
+        onClick: () => {
+          unlink();
+          entries = bk.slice(); factor = bf; digits = '';
+          const fin = U.$('#factor'); if (fin) fin.value = factorText(factor);
+          save(); render(); fit();
+          U.toast('되돌렸습니다');
+        }
+      });
+    }
     linkedId = taskId || null;
     linkedSet = setId || null;
     linkedSub = subKey || null;
-    entries = (values || []).slice();
+    entries = incoming;
     factor = (typeof f === 'number' && isFinite(f) && f > 0) ? f : DEFAULT_FACTOR;
     digits = '';
     save(); render();
@@ -4955,6 +5060,7 @@
     if (how === 'cancel') U.toast('내보내기를 취소했습니다');
     else if (how === 'fail') U.toast(copied ? '공유에 실패했습니다\n「' + g.label + '」는 복사했습니다' : '공유에 실패했습니다');
     else if (how === 'download') U.toast('공유 기능이 없어 파일로 저장했습니다');
+    else if (how === 'download-multi') U.toast('파일로 저장합니다 — 브라우저가 여러 장을 막으면 허용을 눌러 주세요', 4000);
     else if (how === 'copied') U.toast('「' + g.label + '」를 복사했습니다');
     else if (copied) U.toast('사진을 보낸 뒤 붙여넣기\n「' + g.label + '」', 4000);
     else U.toast('공유할 앱에서 카카오톡을 선택하세요');
@@ -5096,7 +5202,9 @@
 
     U.$('#tasks-all').addEventListener('click', () => {
       const rows = visible();
-      if (rows.length && selected().length === rows.length) sel = Object.create(null);
+      // 필터 범위만 다룬다 — 「전체 해제」가 전역 sel 을 지우면 안 보이는(다른 필터) 선택까지
+      // 조용히 사라진다(반대심문 확인). 「전체 선택」과 대칭으로 보이는 행만 켜고 끈다.
+      if (rows.length && selected().length === rows.length) rows.forEach((t) => { delete sel[t.id]; });
       else rows.forEach((t) => { sel[t.id] = true; });
       syncSelection();
     });
@@ -5189,6 +5297,10 @@
       b.appendChild(U.el('span', 'sp-age', s.age + '일'));
       b.appendChild(U.el('span', 'sp-cast', Spec.shortDate(Spec.defaultCastDay(s.key, day))));
       b.addEventListener('click', () => {
+        if (tk.specKey === s.key) return;
+        // 28일↔단일재령으로 저장구조가 바뀌면 반대편에 든 사진·강도값이 저장 때 버려진다 —
+        // 미리 옮겨 둔다(증발 방지, 반대심문 확인). store.taskRec 에도 같은 안전판이 있다.
+        migrateAcrossSub(tk.specKey, s.key);
         tk.specKey = s.key;
         // 분류를 바꾸면 타설일 기본값도 따라간다 (직접 고친 값은 덮어쓴다)
         tk.castDay = Task.defaultCast(s.key, Task.testDayOf(tk));
@@ -5263,6 +5375,43 @@
      수중과 봉함은 한 세트로 같이 뽑으니 작업은 하나다. 사진과 계산만 칸별로 나뉜다.
      화면을 둘로 늘리는 대신 탭으로 갈아 끼운다 — 편집기가 길어지면 손이 안 닿는다. */
   let curSub = 'water';
+
+  /* 지금 보고 있는 칸의 키('' = 28일 아님) — 사진 렌더/삭제 레이스 가드에 쓴다 */
+  function curKey() { return (tk && Task.hasSubs(tk)) ? curSub : ''; }
+
+  /* 분류가 28일↔단일재령을 넘나들 때 저장구조 사이로 데이터를 옮긴다(무손실).
+     이렇게 안 하면 taskRec 이 반대편 구조를 빈 값으로 덮어써 사진·강도값이 증발한다. */
+  function migrateAcrossSub(prevKey, newKey) {
+    const wasSub = Spec.hasSubs(prevKey);
+    const nowSub = Spec.hasSubs(newKey);
+    if (wasSub === nowSub) return;
+    if (!wasSub && nowSub) {
+      // 단일재령 → 28일: t.photos / t.sets 를 수중 칸으로 모은다
+      const photos = (tk.photos || []).slice();
+      const sets = Store.normalizeSets(tk);
+      const first = Spec.SUBS[0].key;
+      tk.sub = {};
+      Spec.SUBS.forEach((s) => { tk.sub[s.key] = { photos: [], sets: [] }; });
+      tk.sub[first] = { photos: photos.slice(), sets: sets };
+      tk.photos = photos.slice();                 // 합집합 유지(gc 가 여기만 본다)
+      delete tk.sets; delete tk.values; delete tk.factor;
+      if (photos.length || sets.length) U.toast('사진·값을 ' + (Spec.subByKey(first) || {}).name + ' 칸으로 옮겼습니다');
+    } else if (wasSub && !nowSub) {
+      // 28일 → 단일재령: 두 칸을 하나로 평탄화
+      const photos = [], seen = {};
+      let sets = [];
+      Spec.SUBS.forEach((s) => {
+        const b = (tk.sub && tk.sub[s.key]) || {};
+        (b.photos || []).forEach((id) => { if (id != null && !seen[id]) { seen[id] = 1; photos.push(id); } });
+        sets = sets.concat(Store.normalizeSets({ sets: b.sets, values: b.values, factor: b.factor }));
+      });
+      tk.photos = photos;
+      tk.sets = sets;
+      delete tk.sub;
+      if (photos.length || sets.length) U.toast('두 칸의 사진·값을 합쳤습니다');
+    }
+    curSub = 'water';
+  }
 
   /* 지금 편집 중인 그릇. 28일이 아니면 작업 자체가 그릇이다. */
   function bag() {
@@ -5616,6 +5765,9 @@
   async function renderPhotos() {
     if (!tk) return;
     const owner = tk;
+    // 수중/봉함 탭도 스냅샷 — await 사이에 탭이 바뀌면 낡은 렌더가 반대편 칸을 덮어 그려
+    // 엉뚱한 사진이 지워질 수 있다(openCalc·addFiles 와 같은 계열 레이스, 반대심문 확인).
+    const subAt = curKey();
     const grid = $('#tk-photos');
     grid.innerHTML = '';
     const box = bag();
@@ -5631,7 +5783,7 @@
 
     let photos = [];
     try { photos = await Store.getPhotos(box.photos); } catch (e) { console.error(e); }
-    if (tk !== owner) return;
+    if (tk !== owner || curKey() !== subAt) return;   // 다른 작업/칸으로 갈아탔다 — 덮어 그리지 않는다
     const byId = {};
     photos.forEach((p) => { byId[p.id] = p; });
     grid.innerHTML = '';
@@ -5652,8 +5804,10 @@
       del.setAttribute('aria-label', (i + 1) + '번 사진 삭제');
       del.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (!tk) return;
-        bag().photos.splice(i, 1); dirty = true; renderPhotos(); renderSubTabs();
+        // 렌더된 그 칸이 아직 현재 칸일 때만 지운다 — 렌더한 box 를 그대로 쓴다(인덱스 어긋남 방지)
+        if (!tk || curKey() !== subAt) return;
+        U.dropUrl(box.photos[i]);
+        box.photos.splice(i, 1); dirty = true; renderPhotos(); renderSubTabs();
       });
       cell.appendChild(del);
       cell.appendChild(U.el('span', 'n', (i + 1) + ''));
@@ -5873,6 +6027,7 @@
     if (how === 'cancel') U.toast('내보내기를 취소했습니다');
     else if (how === 'fail') U.toast(copied ? '공유에 실패했습니다\n제목은 복사했습니다' : '공유에 실패했습니다');
     else if (how === 'download') U.toast('공유 기능이 없어 파일로 저장했습니다');
+    else if (how === 'download-multi') U.toast('파일로 저장합니다 — 브라우저가 여러 장을 막으면 허용을 눌러 주세요', 4000);
     else if (copied) U.toast('사진을 보낸 뒤 대화창에 붙여넣기', 3500);
     else U.toast('공유할 앱에서 카카오톡을 선택하세요');
   }
@@ -5992,7 +6147,7 @@
   const G_MODEL = 'gemini-3.1-flash-lite';     // 이미지 받는 것 중 가장 싼 쪽(무료 티어 있음)
   const G_API = 'https://generativelanguage.googleapis.com/v1beta/interactions';
   const TIMEOUT = 45000;
-  const MAX_PHOTOS = 2;
+  const MAX_PHOTOS = 3;   // 마지막 N장을 본다 — 또렷하게 다시 찍은 판이 대개 뒤에 붙는다(반대심문 확인)
 
   /* ---------- 비전 키 ---------- */
   function gkey() {
@@ -6054,7 +6209,9 @@
   }
 
   async function readPhotos(t) {
-    const ids = (t.photos || []).slice(0, MAX_PHOTOS);
+    // 앞이 아니라 **뒤에서** N장 — 흐릿하게 먼저 찍고 또렷하게 다시 찍은 판은 배열 끝에 붙는다.
+    // 앞 2장만 보내면 나중에 찍은 좋은 사진을 영영 못 본다(반대심문 확인).
+    const ids = (t.photos || []).slice(-MAX_PHOTOS);
     if (!ids.length) return [];
     let rows = [];
     try { rows = await Store.getPhotos(ids); } catch (e) { return []; }
@@ -6321,7 +6478,12 @@
     if (!useVision || !hasVision() || !(t.photos || []).length) return item;
     try {
       const imgs = await readPhotos(t);
-      if (!imgs.length) return item;
+      if (!imgs.length) {
+        // 사진 id 는 있는데 못 읽었다(죽은 참조·읽기 예외) — 조용히 넘기면 '이상 없음'으로 위장한다.
+        // 반드시 경고로 남긴다(반대심문 확인 — CLAUDE_MAP 이 금지한 '미판독=이상없음' 재발 방지).
+        item.visionError = '사진을 불러오지 못해 글씨를 읽지 못했습니다';
+        return item;
+      }
       const j = parseJson(await callVision(visionPrompt(), imgs));
       if (!j) { item.visionError = '사진 판독 결과를 해석하지 못했습니다'; return item; }
       item.readObj = j;
@@ -6350,6 +6512,8 @@
     const lv = item.issues.map((x) => x.level);
     if (lv.indexOf('bad') >= 0) return 'bad';
     if (lv.indexOf('warn') >= 0) return 'warn';
+    // 사진 판독 실패 = 값 검증을 못 한 것. '이상 없음'(초록)으로 위장하지 않는다(반대심문 확인).
+    if (item.visionError) return 'warn';
     if (lv.indexOf('info') >= 0) return 'info';
     return 'ok';
   }
@@ -6390,7 +6554,7 @@
   const $ = U.$;
   let running = false;
 
-  const LV = { bad: '확인', warn: '확인', info: '참고' };
+  const LV = { bad: '주의', warn: '확인', info: '참고' };
 
   /* ---------------- 실행 ---------------- */
   async function start(tasks) {
@@ -6478,15 +6642,20 @@
       c.appendChild(rd);
     }
 
-    if (!r.issues.length) {
+    r.issues.forEach((x) => {
+      const line = U.el('div', 'audit-line ' + x.level);
+      line.appendChild(U.el('b', '', LV[x.level] || '확인'));
+      line.appendChild(U.el('span', '', x.text + (x.fromPhoto ? ' (사진)' : '')));
+      c.appendChild(line);
+    });
+    // 사진 판독 실패는 이 카드에도 표시한다 — 상단 요약 한 줄만으론 어느 카드인지 모른다(반대심문 확인)
+    if (r.visionError) {
+      const line = U.el('div', 'audit-line warn');
+      line.appendChild(U.el('b', '', '확인'));
+      line.appendChild(U.el('span', '', '사진 글씨를 읽지 못했습니다 — 값 검증 안 됨'));
+      c.appendChild(line);
+    } else if (!r.issues.length) {
       c.appendChild(U.el('div', 'audit-line ok', '이상 없음'));
-    } else {
-      r.issues.forEach((x) => {
-        const line = U.el('div', 'audit-line ' + x.level);
-        line.appendChild(U.el('b', '', LV[x.level] || '확인'));
-        line.appendChild(U.el('span', '', x.text + (x.fromPhoto ? ' (사진)' : '')));
-        c.appendChild(line);
-      });
     }
     return c;
   }
@@ -7242,6 +7411,7 @@
       // 동이 여러 개면 첫 동 감리(사용자 지시). 특화동은 명부에 「N동(특화동)」 담당이 따로 있다 —
       // 본동 감리로 붙이면 카톡이 엉뚱한 사람에게 간다(감사 확인). 확실치 않으면 비워 둔다.
       fresh.forEach((it) => {
+        if (it.hasSpecial) { it.sup = null; return; }   // 다중동+특화동 — 자동 배정 안 함(사람이 잡는다)
         const special = /특화동$/.test(it.dong || '');
         const key = special
           ? String(it.dongMain || '').replace(/동$/, '동(특화동)')
@@ -7255,6 +7425,7 @@
         return it.dong + ' ' + (s ? s.name : it.age + '일') +
                ' · 타설 ' + Spec.md(it.castDay) + ' → 시험 ' + Spec.md(it.testDay) +
                ' · ' + (it.sup ? Contacts.label(it.sup) : '감리 미지정') +
+               (it.hasSpecial ? ' (특화동 포함 — 감리 확인!)' : '') +
                (it.offAge ? ' (재령 확인!)' : '');
       }).join('\n');
       const title = '읽은 작업 ' + fresh.length + '건' +
@@ -7344,6 +7515,8 @@
    - 하중: 받침 없는 구조체는 무너지고(철근·옹벽이 앵커), 약한 재료는 위 하중에 압괴돼 잔해가 된다
    - 폭발물: 다이너마이트·화약·니트로(열·불로 기폭, 연쇄)
    - 시간: 배속(½·1·2·4)과 멈춤
+   - 공시체 = 강체(bodies[]): 낱알이 아니라 한 덩어리로 떨어지고·가라앉고·부서질 때만 통째로.
+     몰드에 부어 굳히면 저절로 탈형돼 덩어리가 되고, 압축기 화면(UTM)에서 가압해 강도를 잰다.
 ========================================================================= */
 (function (global) {
   'use strict';
@@ -7417,8 +7590,12 @@
     { id: 57, name: '액체질소', color: [170, 220, 255], kind: 'liquid', heat: -196 },
     { id: 58, name: '테르밋',   color: [150, 90, 60],   kind: 'powder' },                    // 600°C 에서 점화 — 쇳물이 된다
     { id: 59, name: '소화분말', color: [240, 170, 200], kind: 'powder' },                    // 불을 끈다
-    { id: 60, name: '드라이아이스', color: [220, 240, 250], kind: 'powder', heat: -78 }
+    { id: 60, name: '드라이아이스', color: [220, 240, 250], kind: 'powder', heat: -78 },
+    // ---- 강체(덩어리) — bodies[] 가 관리한다. 낱알처럼 움직이지 않는다 ----
+    { id: 61, name: '공시체',   color: [130, 136, 146], kind: 'solid', hidden: 1 },
+    { id: 62, name: '몰드',     color: [96, 116, 150],  kind: 'solid', anchor: 1, crush: 999, hidden: 1 }
   ];
+  const BODY = 61, MOLD = 62;
   const KIND = M.map((m) => m.kind);
   const CRUSH = M.map((m) => m.crush || 0);
   const ANCHOR = M.map((m) => m.anchor ? 1 : 0);
@@ -7440,6 +7617,8 @@
   let speed = 1;                                    // 기본 ×1 (사용자 지시). ½ 은 프레임 걸러 1틱
   let halfFlip = false;
   let boomQ = [];                                   // 연쇄 폭발 큐
+  let bodies = [], nextBid = 1;                     // 강체 공시체 목록 (life[i] = bid)
+  let molds = [];                                   // 놓인 몰드 { x, y(내부 좌상단), t }
   const noise = new Uint8Array(W * H);
   for (let i = 0; i < noise.length; i++) noise[i] = (Math.random() * 3) | 0;
 
@@ -7448,21 +7627,46 @@
     root = document.createElement('div');
     root.id = 'powder';
     root.className = 'pd hidden';
+    // 모바일 최적화: 자주 누르는 조작(속도·붓·멈춤·비우기)은 엄지가 닿는 아래줄로
     root.innerHTML =
       '<div class="pd-top">' +
       '  <b class="pd-title">몰래 파우더<i>건설현장판</i></b>' +
       '  <span class="pd-top-btns">' +
-      '    <button class="pd-btn" id="pd-speed">×1</button>' +
-      '    <button class="pd-btn" id="pd-brush">붓 1</button>' +
-      '    <button class="pd-btn" id="pd-pause">멈춤</button>' +
-      '    <button class="pd-btn" id="pd-clear">비우기</button>' +
+      '    <button class="pd-btn pd-go-press" id="pd-pressbtn">압축기</button>' +
       '    <button class="pd-btn pd-x" id="pd-close">닫기</button>' +
       '  </span>' +
       '</div>' +
       '<div class="pd-stage"><canvas id="pd-cv"></canvas></div>' +
       '<div class="pd-hud"><i id="pd-swatch"></i><span id="pd-info">레미콘을 부어 보세요 — 영하면 양생이 안 됩니다</span></div>' +
+      '<div class="pd-ctl">' +
+      '  <button class="pd-btn" id="pd-speed">×1</button>' +
+      '  <button class="pd-btn" id="pd-brush">붓 1</button>' +
+      '  <button class="pd-btn" id="pd-pause">멈춤</button>' +
+      '  <button class="pd-btn" id="pd-clear">비우기</button>' +
+      '</div>' +
       '<div class="pd-cats" id="pd-cats"></div>' +
-      '<div class="pd-pal" id="pd-pal"></div>';
+      '<div class="pd-pal" id="pd-pal"></div>' +
+      '<div class="pd-press hidden" id="pd-press">' +
+      '  <div class="pd-top">' +
+      '    <b class="pd-title">압축강도 시험기<i>UTM</i></b>' +
+      '    <span class="pd-top-btns"><button class="pd-btn pd-x" id="pd-press-close">현장으로</button></span>' +
+      '  </div>' +
+      '  <div class="pd-shelf-cap">공시체 고르기 — 현장에서 만든 것부터</div>' +
+      '  <div class="pd-shelf" id="pd-shelf"></div>' +
+      '  <div class="pd-utm">' +
+      '    <div class="pd-utm-col">' +
+      '      <div class="pd-utm-head" id="pd-utm-head"></div>' +
+      '      <div class="pd-spec-slot"><div class="pd-spec empty" id="pd-spec"></div></div>' +
+      '      <div class="pd-utm-base"></div>' +
+      '    </div>' +
+      '    <div class="pd-gauge">' +
+      '      <b id="pd-kn">0.0</b><span class="pd-kn-unit">kN</span>' +
+      '      <span id="pd-mpa">0.00 N/mm²</span>' +
+      '      <div class="pd-press-res hidden" id="pd-press-res"></div>' +
+      '    </div>' +
+      '  </div>' +
+      '  <button class="pd-go" id="pd-go" disabled>공시체를 고르세요</button>' +
+      '</div>';
     document.body.appendChild(root);
 
     cv = root.querySelector('#pd-cv');
@@ -7477,8 +7681,12 @@
     root.querySelector('#pd-close').addEventListener('click', close);
     root.querySelector('#pd-clear').addEventListener('click', () => {
       mat.fill(0); life.fill(0); temp.fill(AMBIENT); boomQ.length = 0;
+      bodies.length = 0; molds.length = 0;
       U.buzz(10);
     });
+    root.querySelector('#pd-pressbtn').addEventListener('click', openPress);
+    root.querySelector('#pd-press-close').addEventListener('click', closePress);
+    root.querySelector('#pd-go').addEventListener('click', startPress);
     root.querySelector('#pd-pause').addEventListener('click', (e) => {
       paused = !paused;
       e.target.textContent = paused ? '재생' : '멈춤';
@@ -7501,7 +7709,8 @@
     };
     cv.addEventListener('pointerdown', (e) => {
       const p = pos(e);
-      if (curStamp) { stampAt(p.x, p.y, curStamp); hud(p.x, p.y); return; }   // 공시체는 한 번에 하나
+      if (curMold) { stampMold(p.x, p.y); return; }                           // 몰드도 한 번에 하나
+      if (curStamp) { stampAt(p.x, p.y, curStamp); return; }                  // 공시체는 한 번에 하나
       drawing = true; last = p; paint(p.x, p.y); hud(p.x, p.y);
       try { cv.setPointerCapture(e.pointerId); } catch (err) {}
     });
@@ -7523,6 +7732,7 @@
     { name: '배합', ids: [8, 9, 6, 7, 4, 2, 3, 5] },
     { name: '자재', ids: [22, 21, 25, 26, 34, 41, 11, 1] },
     { name: '공시체', stamps: [
+      { label: '몰드', mold: 1 },
       { label: '콘크리트', mat: 18 }, { label: '고강도', mat: 19 },
       { label: '몰탈', mat: 17 }, { label: '시멘트', mat: 16 },
       { label: '석고', mat: 43 }, { label: '유리', mat: 26 },
@@ -7535,6 +7745,7 @@
   ];
   let curCat = 0;
   let curStamp = 0;                    // 0 이면 붓 모드, 아니면 그 재료의 공시체 찍기
+  let curMold = 0;                     // 1 이면 몰드 놓기 모드
 
   function renderCats() {
     const el = root.querySelector('#pd-cats');
@@ -7554,15 +7765,25 @@
     const c = CATS[curCat];
     if (c.stamps) {
       c.stamps.forEach((s) => {
-        const m = M[s.mat];
         const b = document.createElement('button');
-        b.className = 'pd-mat' + (curStamp === s.mat ? ' on' : '');
-        b.innerHTML = '<i class="pd-cyl" style="background:rgb(' + m.color.join(',') + ')"></i>' + s.label;
-        b.addEventListener('click', () => {
-          curStamp = s.mat;
-          renderPal(); hud();
-          U.buzz(4);
-        });
+        if (s.mold) {
+          b.className = 'pd-mat' + (curMold ? ' on' : '');
+          b.innerHTML = '<i class="pd-cyl pd-moldic"></i>' + s.label;
+          b.addEventListener('click', () => {
+            curMold = 1; curStamp = 0;
+            renderPal(); hud();
+            U.buzz(4);
+          });
+        } else {
+          const m = M[s.mat];
+          b.className = 'pd-mat' + (!curMold && curStamp === s.mat ? ' on' : '');
+          b.innerHTML = '<i class="pd-cyl" style="background:rgb(' + m.color.join(',') + ')"></i>' + s.label;
+          b.addEventListener('click', () => {
+            curStamp = s.mat; curMold = 0;
+            renderPal(); hud();
+            U.buzz(4);
+          });
+        }
         pal.appendChild(b);
       });
       return;
@@ -7570,10 +7791,10 @@
     c.ids.forEach((id) => {
       const m = M[id];
       const b = document.createElement('button');
-      b.className = 'pd-mat' + (!curStamp && id === curMat ? ' on' : '');
+      b.className = 'pd-mat' + (!curStamp && !curMold && id === curMat ? ' on' : '');
       b.innerHTML = '<i style="background:rgb(' + m.color.join(',') + ')"></i>' + m.name;
       b.addEventListener('click', () => {
-        curMat = id; curStamp = 0;
+        curMat = id; curStamp = 0; curMold = 0;
         renderPal(); hud();
         U.buzz(4);
       });
@@ -7585,9 +7806,11 @@
     const el = root.querySelector('#pd-info');
     const sw = root.querySelector('#pd-swatch');
     if (!el) return;
-    const m = curStamp ? M[curStamp] : M[curMat];
+    const m = curMold ? M[MOLD] : (curStamp ? M[curStamp] : M[curMat]);
     if (sw) sw.style.background = 'rgb(' + m.color.join(',') + ')';
-    let txt = curStamp ? ('공시체 찍기: ' + m.name + ' — 위에 자갈을 쌓아 눌러 보세요') : ('붓: ' + m.name);
+    let txt = curMold ? '몰드 놓기 — 안을 채워 굳히면 저절로 탈형됩니다'
+            : curStamp ? ('공시체 찍기: ' + m.name + ' — 한 덩어리다. 압축기에 넣어 보세요')
+            : ('붓: ' + m.name);
     if (x != null && inb(x, y)) {
       const i = I(x, y);
       txt = M[mat[i]].name + ' · ' + temp[i] + '°C  |  ' + txt;
@@ -7595,20 +7818,174 @@
     el.textContent = txt;
   }
 
-  /* 공시체 도장 — 9×19 (실물 100×200mm 원기둥 비율) */
-  function stampAt(cx0, cy0, m) {
-    const hw = 4, hh = 9;
-    for (let dy = -hh; dy <= hh; dy++) {
-      for (let dx = -hw; dx <= hw; dx++) {
-        if (Math.abs(dx) === hw && Math.abs(dy) === hh) continue;   // 모서리 — 몰드 티
-        const x = cx0 + dx, y = cy0 + dy;
-        if (!inb(x, y)) continue;
-        const i = I(x, y);
-        if (mat[i] !== 0 && KIND[mat[i]] === 'solid') continue;
-        mat[i] = m; life[i] = 0; temp[i] = AMBIENT;
+  function hudMsg(t) { const el = root && root.querySelector('#pd-info'); if (el) el.textContent = t; }
+
+  /* ---------------- 강체 공시체 (하나의 덩어리 — 사용자 지시) ----------------
+     공시체는 낱알이 아니라 bodies[] 의 직사각형 강체다. 셀은 mat=BODY, life=bid 로 표시만 하고
+     이동·파괴는 몸체 단위로 한다. 부서질 때(폭발·압괴·산)만 통째로 잔해가 된다. */
+  const SPEC_W = 9, SPEC_H = 19;       // 실물 100×200mm 원기둥 비율
+
+  function makeBody(x0, y0, m) {
+    const b = { bid: nextBid++, x: x0, y: y0, w: SPEC_W, h: SPEC_H, mat: m };
+    if (nextBid > 65000) nextBid = 1;                 // life 는 Uint16 — 안전 순환
+    for (let yy = y0; yy < y0 + SPEC_H; yy++) {
+      for (let xx = x0; xx < x0 + SPEC_W; xx++) {
+        const i = I(xx, yy);
+        mat[i] = BODY; life[i] = b.bid; temp[i] = AMBIENT;
       }
     }
+    bodies.push(b);
+    return b;
+  }
+
+  function bodyById(bid) {
+    for (const b of bodies) if (b.bid === bid) return b;
+    return null;
+  }
+
+  function shatterBody(b) {                            // 통째로 바스러진다
+    for (let yy = b.y; yy < b.y + b.h; yy++) {
+      for (let xx = b.x; xx < b.x + b.w; xx++) {
+        const i = I(xx, yy);
+        if (mat[i] === BODY && life[i] === b.bid) { mat[i] = 33; life[i] = 0; }
+      }
+    }
+    const k = bodies.indexOf(b);
+    if (k >= 0) bodies.splice(k, 1);
+    U.buzz(15);
+  }
+
+  function removeBody(b) {                             // 시험기 반출 — 흔적 없이
+    for (let yy = b.y; yy < b.y + b.h; yy++) {
+      for (let xx = b.x; xx < b.x + b.w; xx++) {
+        const i = I(xx, yy);
+        if (mat[i] === BODY && life[i] === b.bid) { mat[i] = 0; life[i] = 0; }
+      }
+    }
+    const k = bodies.indexOf(b);
+    if (k >= 0) bodies.splice(k, 1);
+  }
+
+  /* 공시체 도장 — 완성품을 바로 찍는다(기성품) */
+  function stampAt(cx0, cy0, m) {
+    const x0 = Math.max(0, Math.min(W - SPEC_W, cx0 - (SPEC_W >> 1)));
+    const y0 = Math.max(0, Math.min(H - SPEC_H, cy0 - (SPEC_H >> 1)));
+    for (let yy = y0; yy < y0 + SPEC_H; yy++) {
+      for (let xx = x0; xx < x0 + SPEC_W; xx++) {
+        const id = mat[I(xx, yy)];
+        if (id && KIND[id] === 'solid') { hudMsg('자리가 좁습니다 — 빈 곳에 찍으세요'); return; }
+      }
+    }
+    makeBody(x0, y0, m);
     U.buzz(10);
+  }
+
+  /* 몰드 — 내부 9×19 + 좌우·바닥 벽. 안에 부어 굳으면 저절로 탈형된다 */
+  function stampMold(cx0, cy0) {
+    const x0 = Math.max(1, Math.min(W - SPEC_W - 1, cx0 - (SPEC_W >> 1)));
+    const y0 = Math.max(0, Math.min(H - SPEC_H - 1, cy0 - (SPEC_H >> 1)));
+    for (let yy = y0; yy <= y0 + SPEC_H; yy++) {
+      for (let xx = x0 - 1; xx <= x0 + SPEC_W; xx++) {
+        const id = mat[I(xx, yy)];
+        if (id && KIND[id] === 'solid') { hudMsg('자리가 좁습니다 — 빈 곳에 놓으세요'); return; }
+      }
+    }
+    for (let yy = y0; yy <= y0 + SPEC_H; yy++) {
+      setWall(x0 - 1, yy); setWall(x0 + SPEC_W, yy);
+      for (let xx = x0; xx < x0 + SPEC_W; xx++) {
+        const i = I(xx, yy);
+        if (yy === y0 + SPEC_H) { setWall(xx, yy); }
+        else { mat[i] = 0; life[i] = 0; }
+      }
+    }
+    molds.push({ x: x0, y: y0, t: 0 });
+    hudMsg('몰드를 놓았습니다 — 레미콘을 부어 채우세요');
+    U.buzz(10);
+  }
+  function setWall(x, y) { const i = I(x, y); mat[i] = MOLD; life[i] = 0; temp[i] = AMBIENT; }
+
+  /* 몸체 물리 — 셀 순회가 끝난 뒤 몸체 단위로 낙하·침강·압괴 */
+  function bodiesStep() {
+    if (!bodies.length) return;
+    bodies.sort((a, b) => b.y - a.y);                  // 아래 것부터 — 쌓인 채 같이 떨어진다
+    for (let k = 0; k < bodies.length; k++) {
+      const b = bodies[k];
+      const yb = b.y + b.h;
+      let can = yb < H, hasLiq = false;
+      if (can) {
+        for (let xx = b.x; xx < b.x + b.w; xx++) {
+          const m2 = mat[I(xx, yb)];
+          if (passable(m2)) continue;
+          if (KIND[m2] === 'liquid') { hasLiq = true; continue; }
+          can = false; break;
+        }
+      }
+      if (can && (!hasLiq || Math.random() < 0.35)) {  // 액체 속에선 천천히 가라앉는다
+        for (let xx = b.x; xx < b.x + b.w; xx++) {
+          const iT = I(xx, b.y), iB = I(xx, yb);
+          const mv = mat[iB];                          // 밀려난 액체·가스는 위로
+          mat[iT] = (KIND[mv] === 'liquid' || KIND[mv] === 'gas') ? mv : 0;
+          life[iT] = 0; temp[iT] = temp[iB];
+          mat[iB] = BODY; life[iB] = b.bid;
+        }
+        b.y++;
+        continue;
+      }
+      // 압괴 — 위 하중이 한계를 넘으면 통째로 (현장식 압축시험 놀이는 그대로 살린다)
+      if (Math.random() < 0.05) {
+        const lim = CRUSH[b.mat] || 60;
+        let load = 0;
+        for (let xx = b.x; xx < b.x + b.w; xx++) {
+          for (let yy = b.y - 1; yy >= 0; yy--) {
+            const m2 = mat[I(xx, yy)];
+            if (!m2 || KIND[m2] === 'gas') break;
+            load += (KIND[m2] === 'solid') ? 2 : 1;
+          }
+        }
+        if (load > lim * b.w) { shatterBody(b); k--; }
+      }
+    }
+  }
+
+  /* 몰드 감시 — 벽이 헐리면 폐기, 내부가 다 굳으면 탈형해 덩어리로 */
+  function moldsStep() {
+    for (let k = molds.length - 1; k >= 0; k--) {
+      const md = molds[k];
+      let broken = false;
+      for (let yy = md.y; yy <= md.y + SPEC_H && !broken; yy++) {
+        if (mat[I(md.x - 1, yy)] !== MOLD || mat[I(md.x + SPEC_W, yy)] !== MOLD) broken = true;
+      }
+      if (!broken) {
+        for (let xx = md.x; xx < md.x + SPEC_W; xx++) {
+          if (mat[I(xx, md.y + SPEC_H)] !== MOLD) { broken = true; break; }
+        }
+      }
+      if (broken) { molds.splice(k, 1); continue; }
+      let full = true;
+      const cnt = {};
+      for (let yy = md.y; yy < md.y + SPEC_H && full; yy++) {
+        for (let xx = md.x; xx < md.x + SPEC_W; xx++) {
+          const id = mat[I(xx, yy)];
+          if (!id || id === BODY || id === MOLD || KIND[id] !== 'solid') { full = false; break; }
+          cnt[id] = (cnt[id] || 0) + 1;
+        }
+      }
+      if (!full) { md.t = 0; continue; }
+      if (++md.t < 40) continue;                       // 다 굳은 걸 확인하고 잠깐 뜸
+      let best = 18, n = 0;
+      for (const id in cnt) if (cnt[id] > n) { n = cnt[id]; best = +id; }
+      for (let yy = md.y; yy <= md.y + SPEC_H; yy++) {
+        if (mat[I(md.x - 1, yy)] === MOLD) mat[I(md.x - 1, yy)] = 0;
+        if (mat[I(md.x + SPEC_W, yy)] === MOLD) mat[I(md.x + SPEC_W, yy)] = 0;
+      }
+      for (let xx = md.x; xx < md.x + SPEC_W; xx++) {
+        if (mat[I(xx, md.y + SPEC_H)] === MOLD) mat[I(xx, md.y + SPEC_H)] = 0;
+      }
+      makeBody(md.x, md.y, best);
+      molds.splice(k, 1);
+      hudMsg('탈형! ' + M[best].name + ' 공시체 완성 — 압축기로 가져가 보세요');
+      U.buzz(20);
+    }
   }
 
   function paint(cx0, cy0) {
@@ -7621,6 +7998,10 @@
         const k = KIND[curMat];
         if ((k === 'powder' || k === 'liquid' || k === 'slurry' || k === 'gas') && Math.random() < 0.4) continue;
         const i = I(x, y);
+        if (mat[i] === BODY) {                         // 지우개가 덩어리에 닿으면 통째로 지운다
+          if (curMat === 0) { const bb = bodyById(life[i]); if (bb) removeBody(bb); }
+          continue;                                    // 다른 재료로는 못 덮는다 (강체 불변식)
+        }
         if (curMat !== 0 && mat[i] !== 0 && KIND[mat[i]] === 'solid') continue;
         mat[i] = curMat;
         life[i] = 0;
@@ -7690,6 +8071,11 @@
         const i = I(x, y);
         const id = mat[i];
         if (id === 1) continue;                       // 옹벽은 발파로도 안 깨진다
+        if (id === BODY) {                            // 덩어리는 통째로 바스러진다
+          const bb = bodyById(life[i]);
+          if (bb) shatterBody(bb);
+          continue;
+        }
         if (M[id].expl && !(dx === 0 && dy === 0)) {  // 연쇄 기폭
           boomQ.push([x, y, M[id].expl]);
           mat[i] = 0;
@@ -7853,6 +8239,7 @@
         const i = I(x, y);
         const id = mat[i];
         if (!id || moved[i]) continue;
+        if (id === BODY) continue;                     // 덩어리는 bodiesStep 이 몸체 단위로 움직인다
 
         if (phase(i, x, y)) continue;
         if (M[id].expl && fuse(i, x, y)) continue;
@@ -7934,6 +8321,13 @@
               if (!inb(nx, ny)) continue;
               const j = I(nx, ny);
               const t2 = mat[j];
+              if (t2 === BODY) {                       // 산이 덩어리를 만나면 통째로 삭는다
+                const bb = bodyById(life[j]);
+                if (bb) shatterBody(bb);
+                if (Math.random() < 0.4) mat[i] = 0;
+                ate = true;
+                break;
+              }
               if (t2 && t2 !== 1 && t2 !== 26 && t2 !== 44 && t2 !== 45 && KIND[t2] !== 'gas') {
                 mat[j] = Math.random() < 0.3 ? 13 : 0;
                 if (Math.random() < 0.4) mat[i] = 0;   // 산도 같이 소모된다
@@ -7963,6 +8357,9 @@
         }
       }
     }
+
+    bodiesStep();
+    moldsStep();
 
     // 폭발은 순회가 끝난 뒤 한꺼번에 — 순회 중 터뜨리면 반쪽짜리 프레임이 된다
     if (boomQ.length) {
@@ -8028,16 +8425,199 @@
     if (inb(x + dx, y) && mat[I(x + dx, y)] === 0 && Math.random() < 0.5) swap(i, I(x + dx, y));
   }
 
+  /* ---------------- 압축강도 시험기 (별도 화면) ----------------
+     현장 공시체(몰드 탈형·도장)를 가져오거나 기성품을 골라 가압한다.
+     최대하중(kN) → 압축강도(N/mm²) 환산은 실물 Ø100 공시체와 같다. */
+  const AREA_KN = 7.854;               // Ø100mm: 1 N/mm² ≒ 7.854 kN
+  const STR = { 16: 12, 17: 16, 18: 27, 19: 46, 43: 5, 26: 8, 25: 14, 15: 3, 20: 1, 53: 32 };
+  const NOM = { 16: 10, 17: 15, 18: 24, 19: 40, 43: 4, 26: 6, 25: 12, 15: 2 };
+  let prSpec = null;                   // { mat, bid? } — bid 있으면 현장 공시체
+  let prLoad = 0, prCap = 0, prRate = 1;
+  let prState = 'idle';                // idle | run | broken
+
+  function strengthOf(m) {
+    if (STR[m] != null) return STR[m];
+    // crush:999 는 "압괴 안 됨" 표식이지 강도가 아니다 — 폴백은 60 에서 자른다
+    // (다이너마이트 공시체가 249 N/mm² 로 나오던 구멍 — 반대심문 확인)
+    return Math.max(2, Math.min(60, ((CRUSH[m] || 40) / 4) | 0));
+  }
+  function shade(c, dlt) { return 'rgb(' + c.map((v) => Math.max(0, Math.min(255, v + dlt))).join(',') + ')'; }
+  function specGrad(m) {
+    const c = M[m].color;
+    return 'linear-gradient(90deg,' + shade(c, -18) + ',' + shade(c, 14) + ' 35%,' + shade(c, -26) + ')';
+  }
+
+  function pressOpen() { return !!(root && !root.querySelector('#pd-press').classList.contains('hidden')); }
+  function openPress() {
+    root.querySelector('#pd-press').classList.remove('hidden');
+    renderShelf();
+    U.buzz(6);
+  }
+  function closePress() { root.querySelector('#pd-press').classList.add('hidden'); }
+
+  /* 진열대 실시간 동기화 — 화면을 보는 사이 현장 공시체가 부서지면 목록도 따라간다
+     (죽은 칩을 골라 침묵 실패하던 구멍 — 반대심문 확인) */
+  let shelfSig = '';
+  function shelfSync() {
+    const sig = bodies.map((b) => b.bid).join(',');
+    if (sig === shelfSig) return;
+    if (prSpec && prSpec.bid && !bodyById(prSpec.bid) && prState !== 'run') {
+      prSpec = null;
+      const spec = root.querySelector('#pd-spec');
+      spec.className = 'pd-spec empty';
+      spec.style.background = '';
+      const go = root.querySelector('#pd-go');
+      go.disabled = true;
+      go.textContent = '공시체를 고르세요';
+      U.toast('고른 공시체가 현장에서 부서졌습니다');
+    }
+    renderShelf();
+  }
+
+  function renderShelf() {
+    shelfSig = bodies.map((b) => b.bid).join(',');
+    const el = root.querySelector('#pd-shelf');
+    el.innerHTML = '';
+    bodies.forEach((b) => {                            // 현장에서 만든 게 먼저 — 시험하면 사라진다
+      const m = M[b.mat];
+      const c = document.createElement('button');
+      c.className = 'pd-mat' + (prSpec && prSpec.bid === b.bid ? ' on' : '');
+      c.innerHTML = '<i class="pd-cyl" style="background:rgb(' + m.color.join(',') + ')"></i>현장 ' + m.name;
+      c.addEventListener('click', () => pickSpec({ mat: b.mat, bid: b.bid }));
+      el.appendChild(c);
+    });
+    CATS[2].stamps.forEach((s) => {
+      if (s.mold) return;
+      const m = M[s.mat];
+      const c = document.createElement('button');
+      c.className = 'pd-mat' + (prSpec && !prSpec.bid && prSpec.mat === s.mat ? ' on' : '');
+      c.innerHTML = '<i class="pd-cyl" style="background:rgb(' + m.color.join(',') + ')"></i>' + s.label;
+      c.addEventListener('click', () => pickSpec({ mat: s.mat }));
+      el.appendChild(c);
+    });
+  }
+
+  function pickSpec(sp) {
+    if (prState === 'run') return;                     // 가압 중엔 교체 금지
+    prSpec = sp; prState = 'idle'; prLoad = 0;
+    const spec = root.querySelector('#pd-spec');
+    spec.className = 'pd-spec';
+    spec.style.background = specGrad(sp.mat);
+    root.querySelector('#pd-press-res').classList.add('hidden');
+    const go = root.querySelector('#pd-go');
+    go.disabled = false;
+    go.textContent = '가압 시작';
+    setGauge(0);
+    renderShelf();
+    U.buzz(4);
+  }
+
+  function startPress() {
+    if (!prSpec || prState === 'run') return;
+    if (prSpec.bid) {                                  // 현장 공시체 — 현장에서 사라진다
+      const b = bodyById(prSpec.bid);
+      if (!b) {                                        // hudMsg 는 오버레이 뒤라 안 보인다 — 토스트로
+        U.toast('그 공시체는 이미 부서졌습니다');
+        prSpec = null;
+        const go = root.querySelector('#pd-go');
+        go.disabled = true;
+        go.textContent = '공시체를 고르세요';
+        renderShelf();
+        return;
+      }
+      removeBody(b);
+      prSpec = { mat: prSpec.mat };
+      renderShelf();
+    }
+    if (M[prSpec.mat].expl) {                          // 폭발물 공시체 — 강도가 아니라 사고다
+      prCap = 30 + Math.random() * 40;                 // 낮은 하중에서 기폭
+    } else {
+      const fc = strengthOf(prSpec.mat) * (0.9 + Math.random() * 0.2); // ±10% — 시험은 원래 흔들린다
+      prCap = fc * AREA_KN;
+    }
+    prRate = Math.max(0.2, prCap / 260);               // 4초쯤에 파괴
+    prLoad = 0; prState = 'run';
+    const spec = root.querySelector('#pd-spec');
+    spec.className = 'pd-spec';
+    spec.style.background = specGrad(prSpec.mat);
+    root.querySelector('#pd-press-res').classList.add('hidden');
+    const go = root.querySelector('#pd-go');
+    go.disabled = true;
+    go.textContent = '가압 중…';
+  }
+
+  function setGauge(kn) {
+    root.querySelector('#pd-kn').textContent = kn.toFixed(1);
+    root.querySelector('#pd-mpa').textContent = (kn / AREA_KN).toFixed(2) + ' N/mm²';
+    const head = root.querySelector('#pd-utm-head');
+    if (head) head.style.transform = 'translateY(' + (prCap ? Math.min(8, kn / prCap * 8) : 0) + 'px)';
+  }
+
+  function prTick() {
+    prLoad = Math.min(prCap, prLoad + prRate);
+    setGauge(prLoad);
+    const spec = root.querySelector('#pd-spec');
+    const r = prLoad / prCap;
+    spec.classList.toggle('crack1', r >= 0.75 && r < 0.92);
+    spec.classList.toggle('crack2', r >= 0.92);
+    if (prLoad >= prCap) breakSpec();
+  }
+
+  function breakSpec() {
+    prState = 'broken';
+    root.querySelector('#pd-spec').className = 'pd-spec boom';
+    U.buzz(40);
+    const res = root.querySelector('#pd-press-res');
+    if (M[prSpec.mat].expl) {                          // 폭발물을 눌렀다 — 자업자득
+      res.innerHTML =
+        '<b>폭발!!</b>' +
+        '<span>' + prCap.toFixed(1) + ' kN 에서 기폭했습니다</span>' +
+        '<em class="bad">폭발물은 공시체가 아닙니다</em>';
+    } else {
+      const fc = prCap / AREA_KN;
+      const nom = NOM[prSpec.mat];
+      res.innerHTML =
+        '<b>' + fc.toFixed(2) + ' N/mm²</b>' +
+        '<span>최대하중 ' + prCap.toFixed(1) + ' kN</span>' +
+        (nom != null
+          ? '<em class="' + (fc >= nom ? 'ok' : 'bad') + '">기준 ' + nom + ' — ' + (fc >= nom ? '합격' : '미달') + '</em>'
+          : '');
+    }
+    res.classList.remove('hidden');
+    const go = root.querySelector('#pd-go');
+    go.disabled = false;
+    go.textContent = '다시 시험';
+  }
+
   /* ---------------- 렌더 ---------------- */
   function render() {
     const d = imgData.data;
+    const bmap = {};
+    for (const bb of bodies) bmap[bb.bid] = bb;
     for (let i = 0, p = 0; i < mat.length; i++, p += 4) {
       const id = mat[i];
-      const c = M[id].color;
-      let r = c[0], g = c[1], b = c[2];
+      let c = M[id].color;
+      let r, g, b;
+      if (id === BODY) {
+        // 덩어리 — 원기둥 음영(가운데 밝게)으로 낱알이 아니라 한 물체로 보이게
+        const bb = bmap[life[i]];
+        if (bb) c = M[bb.mat].color;
+        r = c[0]; g = c[1]; b = c[2];
+        if (bb) {
+          const x = i % W, y = (i / W) | 0;
+          const mid = (bb.w - 1) / 2;
+          const sh = 12 - Math.abs((x - bb.x) - mid) * 4;
+          r += sh; g += sh; b += sh;
+          if (y === bb.y || y === bb.y + bb.h - 1) { r -= 14; g -= 14; b -= 14; }
+        }
+      } else {
+        r = c[0]; g = c[1]; b = c[2];
+        if (id) {
+          const n = noise[i] * 6 - 6;
+          r += n; g += n; b += n;
+        }
+      }
       if (id) {
-        const n = noise[i] * 6 - 6;
-        r += n; g += n; b += n;
         // 뜨거우면 붉게 달아오른다 (철근·콘크리트 가열 표현)
         const t = temp[i];
         if (t > 300 && KIND[id] === 'solid') {
@@ -8056,6 +8636,8 @@
       if (speed === 0.5) { halfFlip = !halfFlip; if (halfFlip) step(); }
       else for (let k = 0; k < speed; k++) step();
     }
+    if (prState === 'run') prTick();                   // 시험기는 멈춤과 무관하게 돈다
+    if (pressOpen()) shelfSync();
     render();
     raf = requestAnimationFrame(loop);
   }
@@ -8070,6 +8652,7 @@
   }
 
   function close() {
+    if (root && pressOpen()) { closePress(); return; } // 뒤로가기 — 시험기 화면만 먼저 닫힌다
     running = false;
     cancelAnimationFrame(raf);
     if (root) root.classList.add('hidden');
@@ -8091,7 +8674,15 @@
     _temp: function (x, y) { return temp[I(x, y)]; },
     _setTemp: function (x, y, t) { temp[I(x, y)] = t; },
     _count: function (m) { let c = 0; for (let i = 0; i < mat.length; i++) if (mat[i] === m) c++; return c; },
-    _clear: function () { mat.fill(0); life.fill(0); temp.fill(AMBIENT); boomQ.length = 0; }
+    _clear: function () {
+      mat.fill(0); life.fill(0); temp.fill(AMBIENT); boomQ.length = 0;
+      bodies.length = 0; molds.length = 0;
+    },
+    _stamp: function (x, y, m) { stampAt(x, y, m); },
+    _mold: function (x, y) { stampMold(x, y); },
+    _prTick: function (n) { for (let k = 0; k < (n || 1) && prState === 'run'; k++) prTick(); },
+    _bodies: function () { return bodies.map((b) => ({ bid: b.bid, x: b.x, y: b.y, w: b.w, h: b.h, mat: b.mat })); },
+    _molds: function () { return molds.length; }
   };
 })(window);
 
@@ -8139,9 +8730,11 @@
     return r;
   }
 
-  /* 카톡 보고 문구 — 예시 양식 그대로 */
+  /* 카톡 보고 문구 — 예시 양식 그대로.
+     분자는 원문 입력이 아니라 **실제 계산에 쓰인 값(r.w)** 을 쓴다 — "971.16.5" 같은 잘못된
+     입력이 들어오면 분자 표기와 나눗셈 값이 어긋나 자기모순 문구가 나가던 걸 막는다(반대심문 확인). */
   function report(r) {
-    const wTxt = String($('#bang-w').value).trim().replace(/,/g, '');
+    const wTxt = (r.w != null) ? String(r.w) : '';
     const lines = [];
     lines.push('몰탈 무게 ' + wTxt + 'g, 시료실린더 부피 ' + VOL + 'ml');
     lines.push('밀도 : ' + wTxt + '/' + VOL + '=' + r.gml + 'g/ml=' + r.kgm3 + 'kg/㎥');
@@ -8762,9 +9355,14 @@
           if (!bak) bak = Store.backupInfo();
           if (!bak) { try { bak = await Store.fileBackupInfo(); } catch (e) { bak = null; } }
           if (!bak) return;
-          // 사용자가 이미 다른 시트를 보고 있으면 치환하지 않는다(잘못 누름 방지).
+          // 사용자가 이미 다른 시트·오버레이를 보고 있으면 치환하지 않는다(잘못 누름 방지).
+          // 시트뿐 아니라 작업 편집기·AI·검수·감리선택 오버레이 위로도 뜨면 안 된다(반대심문 확인).
           // DB 가 빈 상태면 다음 부팅에 다시 제안된다.
           if (!U.$('#sheet-back').classList.contains('hidden')) return;
+          if (Nav.isTaskOpen() || Nav.isAIOpen() || Nav.isAuditOpen() || Nav.isSupOpen()) return;
+          if (global.Powder && Powder.isOpen()) return;
+          if (global.Bangtong && Bangtong.isOpen()) return;
+          if (!U.$('#lightbox').classList.contains('hidden')) return;
           U.confirmSheet(
             '저장된 작업이 하나도 없는데\n' + U.dayLabel(bak.at) + ' 백업(' + bak.n + '건)이 있습니다\n' +
             '복원할까요? (파일로 남은 사진은 함께 살립니다)', '복원',
