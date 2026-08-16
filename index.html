@@ -579,27 +579,60 @@
     <button class="mini-btn" id="bang-clear">지우기</button>
   </header>
   <div class="bang-scroll">
-    <div class="bang-field">
-      <span class="field-label">몰탈 무게 (g)</span>
-      <input class="bang-input" id="bang-w" type="text" inputmode="decimal"
-             placeholder="예: 971.16" autocomplete="off">
-    </div>
-    <div class="bang-pair">
-      <div class="bang-field">
-        <span class="field-label">슬럼프 ① (mm)</span>
-        <input class="bang-input" id="bang-s1" type="text" inputmode="numeric"
-               placeholder="예: 235" autocomplete="off">
-      </div>
-      <div class="bang-field">
-        <span class="field-label">슬럼프 ② (mm)</span>
-        <input class="bang-input" id="bang-s2" type="text" inputmode="numeric"
-               placeholder="예: 245" autocomplete="off">
+    <div class="bang-fields">
+      <button class="bang-field" data-bf="w" id="bf-w">
+        <span class="field-label">몰탈 무게 (g)</span>
+        <span class="bang-val" id="bv-w">0</span>
+      </button>
+      <div class="bang-pair">
+        <button class="bang-field" data-bf="s1" id="bf-s1">
+          <span class="field-label">슬럼프 ① (mm)</span>
+          <span class="bang-val" id="bv-s1">0</span>
+        </button>
+        <button class="bang-field" data-bf="s2" id="bf-s2">
+          <span class="field-label">슬럼프 ② (mm)</span>
+          <span class="bang-val" id="bv-s2">0</span>
+        </button>
       </div>
     </div>
     <div class="card bang-card" id="bang-result"></div>
-    <button class="btn primary bang-copy" id="bang-copy">카톡 보고 문구 복사</button>
+
+    <!-- 저장(날짜별·감리·사진) -->
+    <div class="bang-save-box">
+      <button class="bang-sup" id="bang-sup"><span id="bang-sup-txt">담당 감리 선택</span></button>
+      <div class="photo-grid bang-photo-grid" id="bang-photos"></div>
+      <div class="bang-photo-btns">
+        <button class="btn ghost" id="bang-shoot">촬영</button>
+        <button class="btn ghost" id="bang-pick">앨범</button>
+      </div>
+      <button class="btn primary" id="bang-save">이 방통시험 저장</button>
+      <button class="btn ghost bang-copy" id="bang-copy">저장 없이 카톡 문구만 복사</button>
+    </div>
+
     <p class="bang-note">고정값: 실린더 400ml · 밀도 2400kg/㎥ 이상 · 슬럼프 220±20mm</p>
+
+    <div class="bang-saved" id="bang-saved"></div>
   </div>
+
+  <!-- 숫자 키패드 (계산기와 같은 배열) -->
+  <div class="bang-keypad" id="bang-keypad">
+    <button class="key" data-bk="7">7</button>
+    <button class="key" data-bk="8">8</button>
+    <button class="key" data-bk="9">9</button>
+    <button class="key" data-bk="4">4</button>
+    <button class="key" data-bk="5">5</button>
+    <button class="key" data-bk="6">6</button>
+    <button class="key" data-bk="1">1</button>
+    <button class="key" data-bk="2">2</button>
+    <button class="key" data-bk="3">3</button>
+    <button class="key key-dot" data-bk=".">.</button>
+    <button class="key" data-bk="0">0</button>
+    <button class="key key-back" data-bk="del" aria-label="지우기">⌫</button>
+  </div>
+
+  <!-- 웹 폴백용 파일 입력(네이티브 카메라가 없을 때만) -->
+  <input type="file" id="bang-file-shoot" accept="image/*" capture="environment" hidden>
+  <input type="file" id="bang-file-pick" accept="image/*" multiple hidden>
 </section>
 
 <!-- ═══════════ AI 검수 결과 (beta) ═══════════ -->

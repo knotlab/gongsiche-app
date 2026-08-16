@@ -472,7 +472,7 @@
   'use strict';
 
   const DB_NAME = 'gongsiche-db';
-  const DB_VER = 3;          // v2: todos / v3: tasks (기존 스토어는 그대로 보존)
+  const DB_VER = 4;          // v2: todos / v3: tasks / v4: bangs(방통시험) — 기존 스토어는 그대로 보존
   let dbp = null;
 
   function open() {
@@ -496,6 +496,10 @@
         if (!db.objectStoreNames.contains('tasks')) {
           const k = db.createObjectStore('tasks', { keyPath: 'id' });
           k.createIndex('byDay', 'day');
+        }
+        if (!db.objectStoreNames.contains('bangs')) {   // 방통시험 기록(날짜별·감리·사진)
+          const b = db.createObjectStore('bangs', { keyPath: 'id' });
+          b.createIndex('byDay', 'day');
         }
       };
       req.onsuccess = () => {
@@ -766,6 +770,11 @@
       (((t.sub[s.key] || {}).photos) || []).forEach((p) => { mark[p] = 1; });
     });
   }
+  // 방통 기록도 사진을 참조한다 — gc·삭제가 이걸 안 세면 방통 사진을 고아로 보고 지운다
+  // (CLAUDE_MAP: 사진 참조 스토어가 늘면 gc·deleteTask·deleteRecord 셋 다 추가할 것).
+  function refBangPhotos(rows, mark) {
+    (rows || []).forEach((b) => (b.photos || []).forEach((p) => { mark[p] = 1; }));
+  }
 
   /* uid 앞부분이 생성 시각(36진수)이다 — 스키마 변경 없이 사진 나이를 알 수 있다 */
   function uidTime(id) {
@@ -779,18 +788,20 @@
      남의 사진을 고아로 오판한다(버그리포트 TOCTOU 지적). */
   function deleteRecord(id) {
     let orphan = [];
-    return tx(['records', 'tasks', 'photos'], 'readwrite', (t) => {
+    return tx(['records', 'tasks', 'bangs', 'photos'], 'readwrite', (t) => {
       const rs = t.objectStore('records').getAll();
       const ts = t.objectStore('tasks').getAll();
+      const bs = t.objectStore('bangs').getAll();
       let got = 0;
       const ready = () => {
-        if (++got < 2) return;
+        if (++got < 3) return;
         const all = rs.result || [], tasks = ts.result || [];
         const target = all.filter((r) => r.id === id)[0];
         const mine = (target && target.photos) || [];
         const used = {};
         all.forEach((r) => { if (r.id !== id) (r.photos || []).forEach((p) => { used[p] = 1; }); });
         tasks.forEach((k) => refPhotos(k, used));
+        refBangPhotos(bs.result || [], used);
         orphan = mine.filter((p) => !used[p]);
         t.objectStore('records').delete(id);
         const ps = t.objectStore('photos');
@@ -798,6 +809,7 @@
       };
       rs.onsuccess = ready;
       ts.onsuccess = ready;
+      bs.onsuccess = ready;
     }).then(() => {
       if (orphan.length) {
         if (global.Native && Native.photoRemove) Native.photoRemove(orphan);
@@ -819,16 +831,18 @@
     (protectIds || []).forEach((id) => { keep[id] = 1; });
     const now = Date.now();
     let dead = [];
-    return tx(['records', 'tasks', 'photos'], 'readwrite', (t) => {
+    return tx(['records', 'tasks', 'bangs', 'photos'], 'readwrite', (t) => {
       const rs = t.objectStore('records').getAll();
       const ts = t.objectStore('tasks').getAll();
+      const bs = t.objectStore('bangs').getAll();
       const ph = t.objectStore('photos');
       const ks = ph.getAllKeys();
       let got = 0;
       const ready = () => {
-        if (++got < 3) return;
+        if (++got < 4) return;
         (rs.result || []).forEach((r) => (r.photos || []).forEach((p) => { keep[p] = 1; }));
         (ts.result || []).forEach((k) => refPhotos(k, keep));
+        refBangPhotos(bs.result || [], keep);
         (ks.result || []).forEach((key) => {
           if (keep[key]) return;
           if (now - uidTime(key) < GC_GRACE) return;   // 오늘 찍은 건 건드리지 않는다
@@ -838,6 +852,7 @@
       };
       rs.onsuccess = ready;
       ts.onsuccess = ready;
+      bs.onsuccess = ready;
       ks.onsuccess = ready;
     }).then(() => {
       if (dead.length) {
@@ -1034,12 +1049,18 @@
     try { if (global.Sync) Sync.poke(); } catch (e) {}
     clearTimeout(mirrorTimer);
     mirrorTimer = setTimeout(() => {
-      run((db) => reqp(db.transaction('tasks').objectStore('tasks').getAll()))
-        .then((rows) => {
-          rows = rows || [];
-          if (!rows.length) return;              // 빈 DB 로 미러를 덮지 않는다
+      run((db) => {
+        const t = db.transaction(['tasks', 'bangs']);
+        return Promise.all([
+          reqp(t.objectStore('tasks').getAll()),
+          reqp(t.objectStore('bangs').getAll())
+        ]);
+      })
+        .then((pair) => {
+          const rows = pair[0] || [], bangs = pair[1] || [];
+          if (!rows.length && !bangs.length) return;   // 빈 DB 로 미러를 덮지 않는다
           const body = JSON.stringify({
-            at: Date.now(), day: U.dayKey(Date.now()), n: rows.length, tasks: rows
+            at: Date.now(), day: U.dayKey(Date.now()), n: rows.length, tasks: rows, bangs: bangs
           });
           if (global.Native && Native.prefOk && Native.prefOk()) {
             return Native.prefSet(K_MIRROR, body);
@@ -1054,7 +1075,9 @@
     const parse = (s) => {
       try {
         const j = JSON.parse(s);
-        return (j && Array.isArray(j.tasks) && j.tasks.length) ? j : null;
+        const hasT = Array.isArray(j.tasks) && j.tasks.length;
+        const hasB = Array.isArray(j.bangs) && j.bangs.length;
+        return (j && (hasT || hasB)) ? j : null;
       } catch (e) { return null; }
     };
     if (global.Native && Native.prefOk && Native.prefOk()) {
@@ -1165,12 +1188,13 @@
      읽기와 삭제가 한 트랜잭션이다 (deleteRecord 와 같은 이유). */
   function deleteTask(id) {
     let orphan = [];
-    return tx(['tasks', 'records', 'photos'], 'readwrite', (t) => {
+    return tx(['tasks', 'records', 'bangs', 'photos'], 'readwrite', (t) => {
       const ts = t.objectStore('tasks').getAll();
       const rs = t.objectStore('records').getAll();
+      const bs = t.objectStore('bangs').getAll();
       let got = 0;
       const ready = () => {
-        if (++got < 2) return;
+        if (++got < 3) return;
         const tasks = ts.result || [], recs = rs.result || [];
         const target = tasks.filter((k) => k.id === id)[0];
         const mineMark = {};
@@ -1178,6 +1202,7 @@
         const used = {};
         tasks.forEach((k) => { if (k.id !== id) refPhotos(k, used); });
         recs.forEach((r) => (r.photos || []).forEach((p) => { used[p] = 1; }));
+        refBangPhotos(bs.result || [], used);
         orphan = Object.keys(mineMark).filter((p) => !used[p]);
         t.objectStore('tasks').delete(id);
         const ps = t.objectStore('photos');
@@ -1185,6 +1210,7 @@
       };
       ts.onsuccess = ready;
       rs.onsuccess = ready;
+      bs.onsuccess = ready;
     }).then(() => {
       if (orphan.length) {
         if (global.Native && Native.photoRemove) Native.photoRemove(orphan);
@@ -1223,28 +1249,104 @@
       });
   }
 
+  /* ---------- 방통시험 기록 (날짜별·감리·사진 — 동은 없다) ----------
+     w=몰탈무게(g) · s1/s2=슬럼프(mm, 평균 낸다) 는 원본값으로 저장하고 화면이 다시 계산한다. */
+  const K_BANG_DAY = 'gsc.filebak.bang.day.v1';
+  function bangRec(b) {
+    const now = Date.now();
+    const num = (v) => { const n = parseFloat(v); return (isFinite(n) && n >= 0) ? n : null; };
+    return {
+      id: b.id || U.uid(),
+      day: goodDay(b.day, U.dayKey(now)),
+      supervisor: (b.supervisor || '').trim(),
+      supPhone: (b.supPhone || '').trim(),
+      jugu: (b.jugu === '1' || b.jugu === '24') ? b.jugu : '',
+      photos: (b.photos || []).filter((id) => id !== null && id !== undefined && id !== ''),
+      w: num(b.w), s1: num(b.s1), s2: num(b.s2),
+      order: (typeof b.order === 'number') ? b.order : now,
+      createdAt: b.createdAt || now,
+      updatedAt: now
+    };
+  }
+  function putBang(b) {
+    const rec = bangRec(b);
+    return tx(['bangs'], 'readwrite', (s) => { s.objectStore('bangs').put(rec); })
+      .then(() => { mirrorSoon(); return rec; });
+  }
+  function bangsOf(day) {
+    return run((db) => reqp(
+      db.transaction('bangs').objectStore('bangs').index('byDay').getAll(IDBKeyRange.only(day))
+    )).then((arr) => (arr || []).sort((a, b) => (a.order - b.order) || (a.createdAt - b.createdAt)));
+  }
+  function allBangs() {
+    return run((db) => reqp(db.transaction('bangs').objectStore('bangs').getAll())).then((a) => a || []);
+  }
+  function getBang(id) {
+    return run((db) => reqp(db.transaction('bangs').objectStore('bangs').get(id)));
+  }
+  /* 삭제 — 다른 데(작업·기록·다른 방통)서 안 쓰는 사진만 지운다. 읽기·삭제 한 트랜잭션(TOCTOU 차단). */
+  function deleteBang(id) {
+    let orphan = [];
+    return tx(['bangs', 'tasks', 'records', 'photos'], 'readwrite', (t) => {
+      const bs = t.objectStore('bangs').getAll();
+      const ts = t.objectStore('tasks').getAll();
+      const rs = t.objectStore('records').getAll();
+      let got = 0;
+      const ready = () => {
+        if (++got < 3) return;
+        const bangs = bs.result || [], tasks = ts.result || [], recs = rs.result || [];
+        const target = bangs.filter((b) => b.id === id)[0];
+        const mine = (target && target.photos) || [];
+        const used = {};
+        bangs.forEach((b) => { if (b.id !== id) (b.photos || []).forEach((p) => { used[p] = 1; }); });
+        tasks.forEach((k) => refPhotos(k, used));
+        recs.forEach((r) => (r.photos || []).forEach((p) => { used[p] = 1; }));
+        orphan = mine.filter((p) => !used[p]);
+        t.objectStore('bangs').delete(id);
+        const ps = t.objectStore('photos');
+        orphan.forEach((pid) => ps.delete(pid));
+      };
+      bs.onsuccess = ready;
+      ts.onsuccess = ready;
+      rs.onsuccess = ready;
+    }).then(() => {
+      if (orphan.length) {
+        if (global.Native && Native.photoRemove) Native.photoRemove(orphan);
+        opfsRemove(orphan);
+        dropUrls(orphan);
+      }
+      mirrorSoon();
+    });
+  }
+
   function bakInfo(key) {
     try {
       const j = JSON.parse(localStorage.getItem(key));
-      return (j && Array.isArray(j.tasks) && j.tasks.length) ? j : null;
+      return (j && ((Array.isArray(j.tasks) && j.tasks.length) || (Array.isArray(j.bangs) && j.bangs.length))) ? j : null;
     } catch (e) { return null; }
   }
   function backupInfo() { return bakInfo(K_BAK); }
 
   function backupNow() {
-    return run((db) => reqp(db.transaction('tasks').objectStore('tasks').getAll()))
-      .then((rows) => {
-        rows = rows || [];
-        if (!rows.length) return 0;          // 빈 DB 로 멀쩡한 백업을 덮지 않는다
+    return run((db) => {
+      const t = db.transaction(['tasks', 'bangs']);
+      return Promise.all([
+        reqp(t.objectStore('tasks').getAll()),
+        reqp(t.objectStore('bangs').getAll())
+      ]);
+    })
+      .then((pair) => {
+        const rows = pair[0] || [], bangs = pair[1] || [];
+        if (!rows.length && !bangs.length) return 0;   // 빈 DB 로 멀쩡한 백업을 덮지 않는다
         try {
           const prev = backupInfo();
           // 건수가 백업보다 줄었다 = 부분 유실일 수 있다 — 좋은 백업을 그냥 덮지 말고
           // 한 세대 옆에 보관한다(감사 지적: 완전 증발만 막고 부분 유실은 못 막던 구멍)
-          if (prev && rows.length < prev.n) {
+          if (prev && rows.length < (prev.n || 0)) {
             localStorage.setItem(K_BAK2, localStorage.getItem(K_BAK));
           }
           localStorage.setItem(K_BAK, JSON.stringify({
-            at: Date.now(), day: U.dayKey(Date.now()), n: rows.length, tasks: rows
+            at: Date.now(), day: U.dayKey(Date.now()), n: rows.length, tasks: rows, bangs: bangs
           }));
         } catch (e) { return 0; }            // 용량 초과 등 — 백업은 보조라 조용히 넘어간다
         return rows.length;
@@ -1267,12 +1369,18 @@
     if (!(global.Native && Native.backupOk && Native.backupOk())) return Promise.resolve(false);
     const today = U.dayKey(Date.now());
     try { if (localStorage.getItem(K_FBAK_DAY) === today) return Promise.resolve(false); } catch (e) {}
-    return run((db) => reqp(db.transaction('tasks').objectStore('tasks').getAll()))
-      .then((rows) => {
-        rows = rows || [];
-        if (!rows.length) return false;
+    return run((db) => {
+      const t = db.transaction(['tasks', 'bangs']);
+      return Promise.all([
+        reqp(t.objectStore('tasks').getAll()),
+        reqp(t.objectStore('bangs').getAll())
+      ]);
+    })
+      .then((pair) => {
+        const rows = pair[0] || [], bangs = pair[1] || [];
+        if (!rows.length && !bangs.length) return false;
         const name = 'gsc-' + today.replace(/-/g, '') + '.json';
-        const body = JSON.stringify({ at: Date.now(), day: today, n: rows.length, tasks: rows });
+        const body = JSON.stringify({ at: Date.now(), day: today, n: rows.length, tasks: rows, bangs: bangs });
         return Native.backupWrite(name, body).then((ok) => {
           if (ok) {
             try { localStorage.setItem(K_FBAK_DAY, today); } catch (e) {}
@@ -1386,7 +1494,7 @@
         };
 
         let n = 0;
-        for (const t of info.tasks) {
+        for (const t of (info.tasks || [])) {
           let c;
           try { c = JSON.parse(JSON.stringify(t)); } catch (e) { continue; }
           c.photos = await washAll(c.photos);
@@ -1396,6 +1504,13 @@
             }
           }
           try { await putTask(c); n++; } catch (e) {}
+        }
+        // 방통 기록도 같이 되살린다 — 사진은 파일로 살아남았으면 썸네일만 재생성
+        for (const b of (info.bangs || [])) {
+          let c;
+          try { c = JSON.parse(JSON.stringify(b)); } catch (e) { continue; }
+          c.photos = await washAll(c.photos);
+          try { await putBang(c); } catch (e) {}
         }
         return n;
       })
@@ -1411,6 +1526,7 @@
     putTodo: putTodo, todosOf: todosOf, deleteTodo: deleteTodo,
     putTask: putTask, tasksOf: tasksOf, getTask: getTask, deleteTask: deleteTask,
     allTasks: allTasks,
+    putBang: putBang, bangsOf: bangsOf, allBangs: allBangs, getBang: getBang, deleteBang: deleteBang,
     normalizeSets: normalizeSets,
     taskCount: taskCount, backupInfo: backupInfo, backupNow: backupNow,
     backupDaily: backupDaily, restoreBackup: restoreBackup,
@@ -8688,35 +8804,43 @@
 
 ;
 /* ===== js/bangtong.js ===== */
-/* ============ bangtong.js — 방통시험 계산 (beta) ============
-   바닥 몰탈(방통) 품질시험 계산기(사용자 요청).
-   입력: 몰탈 무게(g) · 슬럼프 2회(mm — 평균 낸다)
+/* ============ bangtong.js — 방통시험 계산·저장 (beta) ============
+   바닥 몰탈(방통) 품질시험. 입력은 **계산기와 같은 숫자 키패드**로 넣는다(OS 키보드 안 씀).
+   입력: 몰탈 무게(g) · 슬럼프 2회(mm — 평균)
    고정값(현장 기준): 시료실린더 400ml · 밀도기준 2400kg/㎥ 이상 · 슬럼프기준 220±20mm
-   카톡 문구는 사용자 예시 양식 그대로 만든다:
+   저장: **날짜별 · 담당 감리 · 사진**(동은 없다 — 사용자 지시). 저장한 건 목록에서 카톡으로 내보낸다.
+   카톡 문구는 사용자 예시 양식 그대로:
      몰탈 무게 971.16g, 시료실린더 부피 400ml
      밀도 : 971.16/400=2.4279g/ml=2427.9kg/㎥
      밀도기준 : 2400kg/㎥ 이상
      슬럼프 240mm
      슬럼프기준 220±20mm
-============================================================ */
+================================================================ */
 (function (global) {
   'use strict';
 
-  const VOL = 400;            // 시료실린더 부피 (ml)
-  const DEN_MIN = 2400;       // 밀도 기준 (kg/㎥ 이상)
-  const SL_BASE = 220, SL_TOL = 20;   // 슬럼프 기준 (mm)
-  const K_SAVE = 'gsc.bang.v1';
+  const VOL = 400;                     // 시료실린더 부피 (ml)
+  const DEN_MIN = 2400;                // 밀도 기준 (kg/㎥ 이상)
+  const SL_BASE = 220, SL_TOL = 20;    // 슬럼프 기준 (mm)
+  const K_SAVE = 'gsc.bang.draft.v1';
 
   const $ = U.$;
+
+  /* 입력 중인 초안 — 값은 문자열(키패드가 그대로 채운다) */
+  let draft = { w: '', s1: '', s2: '', supervisor: '', supPhone: '', photos: [] };
+  let active = 'w';                    // 지금 키패드가 채우는 칸
+  const pendingIds = [];               // 저장 전 사진(gc 보호는 저장 시 putBang 후 목록 참조로 해결)
 
   function num(s) {
     const v = parseFloat(String(s == null ? '' : s).trim().replace(/,/g, ''));
     return (isFinite(v) && v > 0) ? v : null;
   }
 
-  function calc() {
-    const w = num($('#bang-w').value);
-    const ss = [num($('#bang-s1').value), num($('#bang-s2').value)].filter((v) => v != null);
+  /* ---------------- 계산 ---------------- */
+  function calc(d) {
+    d = d || draft;
+    const w = num(d.w);
+    const ss = [num(d.s1), num(d.s2)].filter((v) => v != null);
     const r = { w: w };
     if (w != null) {
       r.gml = Math.round(w / VOL * 10000) / 10000;         // 소수 4자리 (예: 2.4279)
@@ -8730,9 +8854,7 @@
     return r;
   }
 
-  /* 카톡 보고 문구 — 예시 양식 그대로.
-     분자는 원문 입력이 아니라 **실제 계산에 쓰인 값(r.w)** 을 쓴다 — "971.16.5" 같은 잘못된
-     입력이 들어오면 분자 표기와 나눗셈 값이 어긋나 자기모순 문구가 나가던 걸 막는다(반대심문 확인). */
+  /* 카톡 보고 문구 — 예시 양식 그대로. 분자는 **실제 계산에 쓰인 값(r.w)** */
   function report(r) {
     const wTxt = (r.w != null) ? String(r.w) : '';
     const lines = [];
@@ -8750,48 +8872,256 @@
     return '<b class="bang-badge ' + (ok ? 'ok' : 'bad') + '">' + (ok ? '합격' : '기준 미달') + '</b>';
   }
 
-  function render() {
+  /* ---------------- 화면 ---------------- */
+  function fieldEls() { return { w: $('#bf-w'), s1: $('#bf-s1'), s2: $('#bf-s2') }; }
+
+  function renderFields() {
+    const els = fieldEls();
+    ['w', 's1', 's2'].forEach((f) => {
+      const v = draft[f] || '';
+      $('#bv-' + f).textContent = v === '' ? '0' : v;
+      els[f].classList.toggle('on', active === f);
+    });
+  }
+
+  function renderResult() {
     const r = calc();
     const el = $('#bang-result');
     if (!el) return;
     if (r.gml == null && r.slump == null) {
       el.innerHTML = '<p class="bang-empty">몰탈 무게와 슬럼프를 입력하세요</p>';
-      $('#bang-copy').disabled = true;
-      return;
+    } else {
+      let h = '';
+      if (r.gml != null) {
+        h += '<div class="bang-row"><span>밀도</span><b>' + r.gml + ' g/ml = ' + r.kgm3 + ' kg/㎥</b>' +
+             badge(r.denOk) + '</div>' +
+             '<div class="bang-std">기준 ' + DEN_MIN + 'kg/㎥ 이상 · 실린더 ' + VOL + 'ml</div>';
+      }
+      if (r.slump != null) {
+        h += '<div class="bang-row"><span>슬럼프 평균</span><b>' + r.slump + ' mm</b>' + badge(r.slOk) + '</div>' +
+             '<div class="bang-std">기준 ' + SL_BASE + '±' + SL_TOL + 'mm</div>';
+      }
+      el.innerHTML = h;
     }
-    let h = '';
-    if (r.gml != null) {
-      h += '<div class="bang-row"><span>밀도</span><b>' + r.gml + ' g/ml = ' + r.kgm3 + ' kg/㎥</b>' +
-           badge(r.denOk) + '</div>' +
-           '<div class="bang-std">기준 ' + DEN_MIN + 'kg/㎥ 이상 · 실린더 ' + VOL + 'ml</div>';
-    }
-    if (r.slump != null) {
-      h += '<div class="bang-row"><span>슬럼프 평균</span><b>' + r.slump + ' mm</b>' + badge(r.slOk) + '</div>' +
-           '<div class="bang-std">기준 ' + SL_BASE + '±' + SL_TOL + 'mm</div>';
-    }
-    el.innerHTML = h;
     $('#bang-copy').disabled = (r.gml == null);
-    save();
+    $('#bang-save').disabled = (r.gml == null);
   }
 
-  function save() {
-    try {
-      localStorage.setItem(K_SAVE, JSON.stringify({
-        w: $('#bang-w').value, s1: $('#bang-s1').value, s2: $('#bang-s2').value
-      }));
-    } catch (e) {}
+  function renderSup() {
+    const t = draft.supervisor ? draft.supervisor : '담당 감리 선택';
+    $('#bang-sup-txt').textContent = t;
+    $('#bang-sup').classList.toggle('set', !!draft.supervisor);
   }
 
-  function load() {
+  async function renderPhotos() {
+    const grid = $('#bang-photos');
+    grid.innerHTML = '';
+    const ids = draft.photos.slice();
+    if (!ids.length) return;
+    let rows = [];
+    try { rows = await Store.getPhotos(ids); } catch (e) {}
+    const byId = {}; rows.forEach((p) => { byId[p.id] = p; });
+    ids.forEach((pid, i) => {
+      const cell = U.el('div', 'photo-cell');
+      const p = byId[pid];
+      if (p) {
+        const img = new Image();
+        img.src = U.thumbUrl(p.id, p.thumb || p.full);
+        cell.appendChild(img);
+      } else { cell.classList.add('loading'); cell.textContent = '…'; }
+      const del = U.el('button', 'del');
+      del.textContent = '×';
+      del.addEventListener('click', (e) => {
+        e.stopPropagation();
+        U.dropUrl(draft.photos[i]);
+        draft.photos.splice(i, 1);
+        renderPhotos();
+      });
+      cell.appendChild(del);
+      grid.appendChild(cell);
+    });
+  }
+
+  function renderAll() { renderFields(); renderResult(); renderSup(); renderPhotos(); saveDraft(); }
+
+  /* ---------------- 키패드 ---------------- */
+  function press(k) {
+    let s = draft[active] || '';
+    if (k === 'del') s = s.slice(0, -1);
+    else if (k === '.') { if (s.indexOf('.') < 0) s = (s === '' ? '0.' : s + '.'); }
+    else { s = (s === '0') ? k : (s + k); }
+    if (s.replace('.', '').length > 7) return;   // 과한 길이 방지
+    draft[active] = s;
+    renderFields(); renderResult(); saveDraft();
+    U.buzz(4);
+  }
+
+  /* ---------------- 초안 저장(재시작 대비) ---------------- */
+  function saveDraft() {
+    try { localStorage.setItem(K_SAVE, JSON.stringify(draft)); } catch (e) {}
+  }
+  function loadDraft() {
     try {
       const j = JSON.parse(localStorage.getItem(K_SAVE) || 'null');
-      if (!j) return;
-      $('#bang-w').value = j.w || '';
-      $('#bang-s1').value = j.s1 || '';
-      $('#bang-s2').value = j.s2 || '';
+      if (j && typeof j === 'object') {
+        draft = {
+          w: j.w || '', s1: j.s1 || '', s2: j.s2 || '',
+          supervisor: j.supervisor || '', supPhone: j.supPhone || '',
+          photos: Array.isArray(j.photos) ? j.photos.slice() : []
+        };
+      }
     } catch (e) {}
   }
+  function resetDraft() {
+    draft = { w: '', s1: '', s2: '', supervisor: '', supPhone: '', photos: [] };
+    active = 'w';
+    saveDraft();
+  }
 
+  /* ---------------- 담당 감리 ---------------- */
+  function pickSup() {
+    const rows = Contacts.search('');
+    const items = [{ label: '지정 안 함', onPick: () => { draft.supervisor = ''; draft.supPhone = ''; renderSup(); saveDraft(); } }];
+    rows.forEach((c) => {
+      items.push({
+        label: Contacts.label(c),
+        sub: Contacts.where(c) + ' · ' + c.phone,
+        onPick: () => { draft.supervisor = Contacts.label(c); draft.supPhone = c.phone || ''; renderSup(); saveDraft(); }
+      });
+    });
+    U.sheet('담당 감리 (' + (U.jugu() === '1' ? '1주구' : '2·4주구') + ')', items);
+  }
+
+  /* ---------------- 사진 ---------------- */
+  async function addFiles(fileList) {
+    const files = Array.prototype.slice.call(fileList || []).filter((f) => f && f.size);
+    if (!files.length) return;
+    U.toast('사진 처리 중…', 60000);
+    let ok = 0, fail = 0;
+    try {
+      for (const f of files) {
+        const id = U.uid();
+        try {
+          const img = await U.processImage(f, { maxSide: 1600, thumbSide: 320, quality: 0.82 });
+          await Store.putPhoto(Object.assign({ id: id }, img));
+          draft.photos.push(id); ok++;
+        } catch (e) { console.error('[bang photo]', e); fail++; }
+      }
+      saveDraft();
+      await renderPhotos();
+    } finally {
+      U.toast(ok ? (ok + '장 추가했습니다' + (fail ? ' · ' + fail + '장 실패' : ''))
+                 : '사진을 불러오지 못했습니다');
+    }
+  }
+
+  /* ---------------- 저장 / 목록 ---------------- */
+  async function saveBang() {
+    const r = calc();
+    if (r.gml == null) { U.toast('몰탈 무게를 먼저 입력하세요'); return; }
+    const rec = {
+      day: U.dayKey(Date.now()),
+      supervisor: draft.supervisor, supPhone: draft.supPhone,
+      jugu: U.jugu(),
+      photos: draft.photos.slice(),
+      w: num(draft.w), s1: num(draft.s1), s2: num(draft.s2)
+    };
+    try {
+      await Store.putBang(rec);
+    } catch (e) { console.error(e); U.toast('저장하지 못했습니다'); return; }
+    U.toast('방통시험을 저장했습니다' + (draft.supervisor ? ' · ' + draft.supervisor : ''));
+    resetDraft();
+    renderAll();
+    renderSaved();
+  }
+
+  function bangStats(b) {
+    const r = calc({ w: b.w, s1: b.s1, s2: b.s2 });
+    return r;
+  }
+
+  async function renderSaved() {
+    const box = $('#bang-saved');
+    if (!box) return;
+    box.innerHTML = '';
+    let rows = [];
+    try { rows = await Store.allBangs(); } catch (e) {}
+    // 현재 주구만 (주구 표식 없는 옛 기록은 어디서나 보인다)
+    rows = rows.filter((b) => !b.jugu || b.jugu === U.jugu());
+    if (!rows.length) return;
+    rows.sort((a, b) => (b.day < a.day ? -1 : b.day > a.day ? 1 : (b.createdAt || 0) - (a.createdAt || 0)));
+
+    box.appendChild(U.el('div', 'bang-saved-cap', '저장된 방통시험'));
+
+    let curDay = '';
+    rows.forEach((b) => {
+      if (b.day !== curDay) {
+        curDay = b.day;
+        box.appendChild(U.el('div', 'bang-day-head', U.dayLabel(new Date(b.day + 'T00:00:00').getTime())));
+      }
+      const r = bangStats(b);
+      const card = U.el('div', 'bang-saved-item');
+      const main = U.el('div', 'bang-si-main');
+      const title = (b.supervisor || '감리 미지정');
+      main.appendChild(U.el('span', 'bang-si-sup', title));
+      const sub = (r.kgm3 != null ? (r.kgm3 + 'kg/㎥') : '') +
+                  (r.slump != null ? ' · 슬럼프 ' + r.slump + 'mm' : '') +
+                  ((b.photos || []).length ? ' · 사진 ' + b.photos.length + '장' : '');
+      main.appendChild(U.el('span', 'bang-si-sub', sub));
+      card.appendChild(main);
+
+      const send = U.el('button', 'bang-si-btn');
+      send.textContent = '보내기';
+      send.addEventListener('click', () => exportBang(b));
+      card.appendChild(send);
+
+      const del = U.el('button', 'bang-si-del');
+      del.textContent = '×';
+      del.setAttribute('aria-label', '삭제');
+      del.addEventListener('click', () => {
+        U.confirmSheet('이 방통시험 기록을 지울까요?\n사진도 함께 지워집니다', '삭제', async () => {
+          try { await Store.deleteBang(b.id); } catch (e) {}
+          renderSaved();
+          U.toast('삭제했습니다');
+        }, true);
+      });
+      card.appendChild(del);
+      box.appendChild(card);
+    });
+  }
+
+  /* 저장된 한 건을 카톡으로 — 문구 + 사진 묶어서 */
+  async function exportBang(b) {
+    const r = bangStats(b);
+    const text = (b.supervisor ? (b.supervisor + '\n') : '') + report(r);
+    let blobs = [];
+    if ((b.photos || []).length) {
+      U.toast('사진 준비 중…', 60000);
+      try {
+        const rows = await Store.getPhotos(b.photos);
+        const byId = {}; rows.forEach((p) => { byId[p.id] = p; });
+        for (const id of b.photos) {
+          const blob = byId[id] ? await Store.fullBlob(byId[id]) : null;
+          if (blob) blobs.push(blob);
+        }
+      } catch (e) { console.error(e); }
+    }
+    let copied = false;
+    try { copied = await U.copyText(text); } catch (e) {}
+    const base = U.safeName((b.supervisor || '방통'), '방통') + '_' + (b.day || '').replace(/-/g, '');
+    let how = 'download';
+    try {
+      how = await Share.exportItems({ blobs: blobs, text: text, title: '방통시험', baseName: base });
+    } catch (e) { U.toast('내보내기에 실패했습니다'); return; }
+    if (how === 'cancel') U.toast('내보내기를 취소했습니다');
+    else if (how === 'fail') U.toast(copied ? '공유 실패 — 문구는 복사했습니다' : '공유에 실패했습니다');
+    else if (how === 'download') U.toast('공유 기능이 없어 파일로 저장했습니다');
+    else if (how === 'download-multi') U.toast('파일로 저장합니다 — 브라우저가 여러 장을 막으면 허용을 눌러 주세요', 4000);
+    else if (blobs.length) U.toast('사진을 보낸 뒤 문구를 붙여넣으세요', 3500);
+    else U.toast('공유할 앱에서 카카오톡을 선택하세요');
+  }
+
+  /* 저장 없이 문구만 복사 */
   function copyReport() {
     const r = calc();
     if (r.gml == null) { U.toast('몰탈 무게를 먼저 입력하세요'); return; }
@@ -8800,25 +9130,57 @@
     });
   }
 
+  /* ---------------- 열기/닫기 ---------------- */
   function open() {
     $('#view-bang').classList.remove('hidden');
-    render();
+    active = 'w';
+    renderAll();
+    renderSaved();
   }
   function close() { $('#view-bang').classList.add('hidden'); }
   function isOpen() { return !$('#view-bang').classList.contains('hidden'); }
 
   function init() {
-    load();
+    loadDraft();
     const hb = $('#home-bang');
-    if (hb) hb.addEventListener('click', open);   // 홈에서 바로 진입(사용자 지시)
+    if (hb) hb.addEventListener('click', open);
     $('#bang-back').addEventListener('click', close);
-    $('#bang-copy').addEventListener('click', copyReport);
-    ['#bang-w', '#bang-s1', '#bang-s2'].forEach((s) => {
-      $(s).addEventListener('input', render);
+
+    // 칸 고르기
+    ['w', 's1', 's2'].forEach((f) => {
+      $('#bf-' + f).addEventListener('click', () => { active = f; renderFields(); U.buzz(4); });
     });
+    // 키패드
+    $('#bang-keypad').addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-bk]');
+      if (!btn) return;
+      press(btn.getAttribute('data-bk'));
+    });
+    // 지우기(전체)
     $('#bang-clear').addEventListener('click', () => {
-      ['#bang-w', '#bang-s1', '#bang-s2'].forEach((s) => { $(s).value = ''; });
-      render();
+      // 사진은 유지, 값만 지운다 — 실수로 전부 날리지 않게
+      draft.w = ''; draft.s1 = ''; draft.s2 = '';
+      active = 'w';
+      renderFields(); renderResult(); saveDraft();
+    });
+
+    $('#bang-sup').addEventListener('click', pickSup);
+    $('#bang-save').addEventListener('click', saveBang);
+    $('#bang-copy').addEventListener('click', copyReport);
+
+    // 사진 — 네이티브 카메라 우선, 없으면 파일 입력 폴백
+    const shootInput = $('#bang-file-shoot'), pickInput = $('#bang-file-pick');
+    shootInput.addEventListener('change', (e) => { addFiles(e.target.files); e.target.value = ''; });
+    pickInput.addEventListener('change', (e) => { addFiles(e.target.files); e.target.value = ''; });
+    $('#bang-shoot').addEventListener('click', async () => {
+      const files = await Native.shoot();
+      if (files === null) { shootInput.click(); return; }
+      if (files.length) addFiles(files);
+    });
+    $('#bang-pick').addEventListener('click', async () => {
+      const files = await Native.pick();
+      if (files === null) { pickInput.click(); return; }
+      if (files.length) addFiles(files);
     });
   }
 

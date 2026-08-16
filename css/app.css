@@ -1143,16 +1143,22 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
 .search-row .mini-btn.on{background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
 
 /* ---------- 방통시험 (beta) ---------- */
-.bang-scroll{padding:14px 16px calc(20px + var(--safe-b));overflow-y:auto;overflow-x:hidden;height:100%}
-.bang-field{display:flex;flex-direction:column;gap:6px;margin-bottom:12px;flex:1 1 0}
-.bang-pair{display:flex;gap:10px}
-.bang-input{
-  width:100%;min-height:var(--tap);padding:10px 12px;
-  border:1px solid var(--line);border-radius:var(--r-md);
-  background:var(--surface);color:var(--text);
-  font-size:19px;font-weight:700;font-variant-numeric:tabular-nums;
+/* 화면 = 위(스크롤 입력·결과·저장·목록) + 아래 고정 키패드 */
+#view-bang{display:flex;flex-direction:column}
+.bang-scroll{flex:1 1 0;min-height:0;padding:14px 16px 16px;overflow-y:auto;overflow-x:hidden}
+
+/* 입력 칸 — 탭하면 활성, OS 키보드 대신 아래 키패드로 채운다 */
+.bang-fields{margin-bottom:12px}
+.bang-pair{display:flex;gap:10px;margin-top:10px}
+.bang-field{
+  display:flex;flex-direction:column;gap:3px;flex:1 1 0;width:100%;text-align:left;
+  min-height:var(--tap);padding:9px 12px;
+  border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface);color:var(--text);
 }
-.bang-input:focus{outline:none;border-color:var(--accent)}
+.bang-field.on{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
+.bang-field .field-label{font-size:12px;color:var(--text-2)}
+.bang-val{font-size:23px;font-weight:800;font-variant-numeric:tabular-nums;line-height:1.1}
+
 .bang-card{padding:13px 14px;margin:4px 0 14px}
 .bang-empty{color:var(--text-2);font-size:14px;text-align:center;padding:6px 0}
 .bang-row{display:flex;align-items:center;gap:8px;font-size:14px;padding:3px 0}
@@ -1163,12 +1169,50 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
 .bang-badge.bad{background:#fee2e2;color:#b91c1c}
 :root[data-theme="dark"] .bang-badge.bad{background:#3b1212;color:#fca5a5}
 .bang-std{font-size:11px;color:var(--text-2);padding:0 0 8px}
-.bang-copy{
-  width:100%;min-height:48px;border-radius:var(--r-md);
-  background:var(--accent);color:var(--on-accent);font-size:15px;font-weight:800;
+
+/* 저장 박스 (감리·사진·저장) */
+.bang-save-box{display:flex;flex-direction:column;gap:10px;margin:2px 0 6px}
+.bang-sup{
+  width:100%;min-height:var(--tap);padding:10px 14px;text-align:left;
+  border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface);
+  color:var(--text-2);font-size:15px;font-weight:700;
 }
-.bang-copy:disabled{opacity:.45}
-.bang-note{font-size:11px;color:var(--text-2);text-align:center;margin-top:10px}
+.bang-sup.set{color:var(--text);border-color:var(--accent)}
+.bang-photo-grid:empty{display:none}
+.bang-photo-btns{display:flex;gap:10px}
+.bang-photo-btns .btn{flex:1 1 0}
+.bang-save-box .btn.primary{min-height:var(--tap)}
+.bang-copy{width:100%;min-height:var(--tap)}
+.bang-copy:disabled,.bang-save-box .btn.primary:disabled{opacity:.45}
+.bang-note{font-size:11px;color:var(--text-2);text-align:center;margin:8px 0 12px}
+
+/* 저장된 방통 목록 */
+.bang-saved-cap{font-size:12px;font-weight:800;color:var(--text-2);margin:4px 0 6px}
+.bang-day-head{font-size:12px;font-weight:800;color:var(--text-2);margin:10px 0 6px}
+.bang-saved-item{
+  display:flex;align-items:center;gap:10px;padding:10px 12px;margin-bottom:8px;
+  border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface);
+}
+.bang-si-main{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px}
+.bang-si-sup{font-size:15px;font-weight:800;letter-spacing:-.02em}
+.bang-si-sub{font-size:12px;color:var(--text-2);font-variant-numeric:tabular-nums}
+.bang-si-btn{flex:0 0 auto;min-height:38px;padding:0 12px;border-radius:var(--r-sm);
+  background:var(--accent);color:var(--on-accent);font-size:13px;font-weight:800}
+.bang-si-del{flex:0 0 auto;width:32px;height:38px;color:var(--danger);font-size:20px;font-weight:700}
+
+/* 키패드 — 계산기와 같은 3열 배열, 화면 아래 고정 */
+.bang-keypad{
+  flex:0 0 auto;display:grid;grid-template-columns:repeat(3,1fr);gap:8px;
+  padding:8px 12px calc(10px + var(--safe-b));background:var(--bg);
+  border-top:1px solid var(--line);
+}
+.bang-keypad .key{
+  min-height:52px;border-radius:var(--r-md);border:1px solid var(--line);
+  background:var(--surface);color:var(--text);font-size:23px;font-weight:800;
+  font-variant-numeric:tabular-nums;
+}
+.bang-keypad .key:active{background:var(--surface-2)}
+.bang-keypad .key-back{color:var(--text-2)}
 
 /* ---------- 몰래 파우더 (숨김 장난감 — 게임 화면이라 앱 테마와 무관하게 다크 고정) ---------- */
 .pd{
