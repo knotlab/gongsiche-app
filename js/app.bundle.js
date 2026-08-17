@@ -5004,10 +5004,12 @@
       const r = Bangtong.statsOf(b);
       const card = U.el('div', 'bang-saved-item');
       const main = U.el('div', 'bang-si-main');
-      main.appendChild(U.el('span', 'bang-si-sup', Bangtong.titleOf(b)));
-      const sub = (r.kgm3 != null ? (r.kgm3 + 'kg/㎥') : '') +
-                  (r.slump != null ? ' · 슬럼프 ' + r.slump + 'mm' : '') +
-                  ((b.photos || []).length ? ' · 사진 ' + b.photos.length + '장' : '');
+      main.appendChild(U.el('span', 'bang-si-sup', Bangtong.placeOf(b)));   // 윗줄 = 동(사용자 지시)
+      const sub = [Bangtong.supOf(b),
+                   (r.kgm3 != null ? (r.kgm3 + 'kg/㎥') : ''),
+                   (r.slump != null ? '슬럼프 ' + r.slump + 'mm' : ''),
+                   ((b.photos || []).length ? '사진 ' + b.photos.length + '장' : '')]
+        .filter(Boolean).join(' · ');
       main.appendChild(U.el('span', 'bang-si-sub', sub));
       main.addEventListener('click', () => Bangtong.openEdit(b));
       card.appendChild(main);
@@ -6186,8 +6188,29 @@
   }
 
   /* ---------------- 바인딩 ---------------- */
+  /* 분류 칩 아래 「방통시험」 — 작업 편집기에서 바로 방통 등록으로 간다(사용자 지시).
+     저장 안 한 변경이 있으면 tryClose 와 같은 규칙으로 묻는다. */
+  function gotoBang() {
+    if (!global.Bangtong) return;
+    const proceed = () => { tk = null; Nav.showTask(false); Bangtong.open(); };
+    if (!tk) { proceed(); return; }
+    collect();
+    if (!dirty) { Store.gc(pendingIds.slice()); proceed(); return; }
+    U.sheet('저장하지 않은 변경이 있습니다', [
+      { label: '작업 저장하고 방통시험으로', cls: 'strong', onPick: async () => {
+          const r = await save(true);
+          if (r) proceed();
+        } },
+      { label: '저장하지 않고 이동', cls: 'danger', onPick: () => {
+          Store.gc(pendingIds.slice()); proceed();
+        } }
+    ]);
+  }
+
   function bind() {
     $('#tk-back').addEventListener('click', tryClose);
+    const tb = $('#tk-bang');
+    if (tb) tb.addEventListener('click', gotoBang);
     $('#tk-delete').addEventListener('click', removeTask);
     $('#tk-save').addEventListener('click', () => { save(false); });
     $('#tk-export').addEventListener('click', () => { exportTask(); });
@@ -9164,10 +9187,15 @@
     return r;
   }
 
-  /* 목록·카톡에 쓰는 제목 — "201동 3층 · 감리" 꼴 */
+  /* 제목은 **동이 먼저**다(사용자 지시) — 목록 윗줄 = 동+층, 감리는 아랫줄 메타로 내려간다.
+     (작업 목록이 동수를 제목으로 쓰는 것과 같은 규칙) */
+  function bangPlace(b) {
+    return [b.dong, b.floor ? (b.floor + '층') : ''].filter(Boolean).join(' ') || '동 미지정';
+  }
+  /* 카톡 머리글 — "201동 3층 · 감리" (동 먼저) */
   function bangTitle(b) {
-    const place = [b.dong, b.floor ? (b.floor + '층') : ''].filter(Boolean).join(' ');
-    return [place, b.supervisor].filter(Boolean).join(' · ') || '감리 미지정';
+    return [bangPlace(b) !== '동 미지정' ? bangPlace(b) : '', b.supervisor]
+      .filter(Boolean).join(' · ') || '방통시험';
   }
 
   async function renderSaved() {
@@ -9192,10 +9220,12 @@
       const r = bangStats(b);
       const card = U.el('div', 'bang-saved-item' + (editing && editing.id === b.id ? ' editing' : ''));
       const main = U.el('div', 'bang-si-main');
-      main.appendChild(U.el('span', 'bang-si-sup', bangTitle(b)));
-      const sub = (r.kgm3 != null ? (r.kgm3 + 'kg/㎥') : '') +
-                  (r.slump != null ? ' · 슬럼프 ' + r.slump + 'mm' : '') +
-                  ((b.photos || []).length ? ' · 사진 ' + b.photos.length + '장' : '');
+      main.appendChild(U.el('span', 'bang-si-sup', bangPlace(b)));   // 윗줄 = 동(사용자 지시)
+      const sub = [b.supervisor,
+                   (r.kgm3 != null ? (r.kgm3 + 'kg/㎥') : ''),
+                   (r.slump != null ? '슬럼프 ' + r.slump + 'mm' : ''),
+                   ((b.photos || []).length ? '사진 ' + b.photos.length + '장' : '')]
+        .filter(Boolean).join(' · ');
       main.appendChild(U.el('span', 'bang-si-sub', sub));
       // 본문을 탭하면 수정 모드로 싣는다(사용자 지시)
       main.addEventListener('click', () => openEdit(b));
@@ -9325,7 +9355,9 @@
   }
 
   global.Bangtong = { init: init, open: open, close: close, isOpen: isOpen,
-                      openEdit: openEdit, exportRec: exportBang, titleOf: bangTitle, statsOf: bangStats,
+                      openEdit: openEdit, exportRec: exportBang,
+                      titleOf: bangTitle, placeOf: bangPlace, supOf: (b) => b.supervisor || '',
+                      statsOf: bangStats,
                       _calc: calc, _report: report };
 })(window);
 

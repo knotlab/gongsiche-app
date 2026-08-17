@@ -341,6 +341,15 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
 .sp-age{font-size:11px;font-weight:700;opacity:.75}
 .sp-cast{font-size:11px;font-weight:700;margin-top:2px;font-variant-numeric:tabular-nums;opacity:.9}
 .lbl-sub{font-weight:600;color:var(--text-2);opacity:.8}
+/* 분류 칩 아래 방통시험 진입(가로 버튼) — 공시체와 같은 자리에서 다룬다(사용자 지시) */
+.tk-bang{
+  display:flex;align-items:center;gap:8px;width:100%;min-height:var(--tap);
+  margin-top:6px;padding:9px 12px;border-radius:var(--r-md);
+  border:1.5px dashed var(--line);background:var(--surface);text-align:left;
+}
+.tk-bang .tkb-name{font-size:14px;font-weight:800;color:var(--accent);flex:0 0 auto}
+.tk-bang .tkb-sub{font-size:11px;font-weight:600;color:var(--text-2);min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .due-note{
   margin-top:7px;padding:7px 9px;border-radius:var(--r-sm);
   background:#fff7ed;color:#c2410c;font-size:12px;font-weight:700;line-height:1.4;
