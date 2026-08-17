@@ -597,8 +597,15 @@
     </div>
     <div class="card bang-card" id="bang-result"></div>
 
-    <!-- 저장(날짜별·감리·사진) -->
+    <!-- 저장(날짜별·동·층·감리·사진) -->
     <div class="bang-save-box">
+      <div class="bang-pair">
+        <button class="bang-sup" id="bang-dong"><span id="bang-dong-txt">동 선택</span></button>
+        <button class="bang-field bang-floor" data-bf="fl" id="bf-fl">
+          <span class="field-label">층 (선택)</span>
+          <span class="bang-val" id="bv-fl">—</span>
+        </button>
+      </div>
       <button class="bang-sup" id="bang-sup"><span id="bang-sup-txt">담당 감리 선택</span></button>
       <div class="photo-grid bang-photo-grid" id="bang-photos"></div>
       <div class="bang-photo-btns">

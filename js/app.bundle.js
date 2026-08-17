@@ -1258,6 +1258,8 @@
     return {
       id: b.id || U.uid(),
       day: goodDay(b.day, U.dayKey(now)),
+      dong: (b.dong || '').trim(),           // 동 — 작업과 같은 표기(사용자 지시로 추가)
+      floor: String(b.floor || '').trim(),   // 층수 메모 (예: "3" → 화면에서 "3층")
       supervisor: (b.supervisor || '').trim(),
       supPhone: (b.supPhone || '').trim(),
       jugu: (b.jugu === '1' || b.jugu === '24') ? b.jugu : '',
@@ -4857,16 +4859,20 @@
   /* ---------------- 데이터 ---------------- */
   let loadFail = null;      // 읽기 실패를 "작업 없음"과 구별해 보여준다 (실패면 에러 객체)
 
+  let bangs = [];                  // 기준일의 방통시험 기록(작업 탭에서도 보인다 — 사용자 지시)
+
   async function load() {
     // 날짜를 빠르게 넘기면 먼저 시작한 조회가 나중에 끝나 새 날짜 목록을 덮어쓴다.
     // 조회 시작 시점의 날짜를 붙들고, 그 사이 바뀌었으면 결과를 버린다.
     const want = U.dayKey(base.getTime());
-    let rows = [], fail = null;
+    let rows = [], brows = [], fail = null;
     try { rows = await Store.tasksOf(want); } catch (e) { console.error(e); fail = e || true; }
+    try { brows = await Store.bangsOf(want); } catch (e) { console.warn('[bangs]', e); }
     if (want !== U.dayKey(base.getTime())) return;      // 지나간 조회 — 버린다
     loadFail = fail;
     // 주구 분리(사용자 지시) — 현재 주구 작업만. 반대편은 홈 설정에서 세그를 바꿔야 보인다
     all = rows.filter((t) => Task.juguOf(t) === U.jugu());
+    bangs = brows.filter((b) => !b.jugu || b.jugu === U.jugu());
     const alive = Object.create(null);
     all.forEach((t) => { alive[t.id] = 1; });
     Object.keys(sel).forEach((id) => { if (!alive[id]) delete sel[id]; });
@@ -4936,6 +4942,7 @@
             : '조건에 맞는 작업이 없습니다.')
           : '이 날짜에 작업이 없습니다.<br>오른쪽 위 <b>+</b> 로 등록하세요.');
       list.appendChild(emptyNode);
+      appendBangs(list);               // 작업이 없어도 그날 방통시험은 보인다
       updateBar();
       return;
     }
@@ -4981,7 +4988,35 @@
     nodes.forEach((n) => frag.appendChild(n));
     list.innerHTML = '';
     list.appendChild(frag);
+    appendBangs(list);
     updateBar();
+  }
+
+  /* 그날의 방통시험 — 목록 끝에 별도 구간으로. 탭하면 방통 화면에서 수정, 보내기 버튼은 건별 카톡.
+     (선택·전송 묶음에는 안 낀다 — 방통은 자기 문구·사진으로 따로 나간다) */
+  function appendBangs(list) {
+    if (!bangs.length || !global.Bangtong) return;
+    const head = U.el('div', 'day-head');
+    head.appendChild(U.el('b', '', '방통시험'));
+    head.appendChild(U.el('span', '', bangs.length + '건'));
+    list.appendChild(head);
+    bangs.forEach((b) => {
+      const r = Bangtong.statsOf(b);
+      const card = U.el('div', 'bang-saved-item');
+      const main = U.el('div', 'bang-si-main');
+      main.appendChild(U.el('span', 'bang-si-sup', Bangtong.titleOf(b)));
+      const sub = (r.kgm3 != null ? (r.kgm3 + 'kg/㎥') : '') +
+                  (r.slump != null ? ' · 슬럼프 ' + r.slump + 'mm' : '') +
+                  ((b.photos || []).length ? ' · 사진 ' + b.photos.length + '장' : '');
+      main.appendChild(U.el('span', 'bang-si-sub', sub));
+      main.addEventListener('click', () => Bangtong.openEdit(b));
+      card.appendChild(main);
+      const send = U.el('button', 'bang-si-btn');
+      send.textContent = '보내기';
+      send.addEventListener('click', () => Bangtong.exportRec(b));
+      card.appendChild(send);
+      list.appendChild(card);
+    });
   }
 
   /* 감리(또는 완료) 구간 머리 — 누르면 그 구간 전체 선택 */
@@ -5599,6 +5634,8 @@
   }
 
   /* 동 → 감리. 하나면 바로 붙이고, 여럿이면 다 띄워 고르게 한다. */
+  /* 동 → 감리 싱크 규칙(사용자 지시): **감리가 비어 있을 때만** 자동으로 따라 채운다.
+     이미 감리가 있으면 동만 바꿔도 감리를 안 건드린다 — 커스텀 짝(다른 동 감리에게 보고 등)을 허용. */
   function pickDong(dong) {
     if (!tk) return;
     tk.dong = dong || '';
@@ -5607,15 +5644,12 @@
     renderReport();
     clearHints();
 
-    const sups = Contacts.byDong(dong);
-    // 지금 감리가 이 동 담당이 아니면 비운다 —
-    // 남겨 두면 동만 바꿨을 때 엉뚱한 감리에게 카톡이 간다.
-    const keep = !!tk.supervisor && sups.some((c) => Contacts.label(c) === tk.supervisor);
-    if (!keep) { tk.supervisor = ''; tk.supPhone = ''; }
+    if (tk.supervisor) { renderSup(); return; }        // 지정된 감리는 그대로 — 따라 바뀌지 않는다
 
-    if (!keep && sups.length === 1) { pickSup(sups[0], true); return; }
+    const sups = Contacts.byDong(dong);
+    if (sups.length === 1) { pickSup(sups[0], true); return; }
     renderSup();
-    if (!keep && sups.length > 1) {
+    if (sups.length > 1) {
       chips($('#tk-sup-hint'), '담당 감리',
         sups.map((c) => ({ label: Contacts.label(c), onPick: () => pickSup(c, true) })));
     }
@@ -5656,8 +5690,8 @@
     void hintEl;
   }
 
-  /* 감리 → 동. 그 감리가 맡은 동이 하나면 바로 붙이고, 여럿이면 다 띄운다.
-     (예: 이원일 이사는 305동과 214동B 둘 다 맡는다)
+  /* 감리 → 동 싱크 규칙(사용자 지시): **동이 비어 있을 때만** 자동으로 따라 채운다.
+     이미 동이 있으면 감리만 바꿔도 동을 안 건드린다 — 커스텀 짝을 허용.
      fromDong 이면 동에서 온 것이므로 되짚어 가지 않는다 — 안 그러면 서로 덮어쓴다. */
   function pickSup(c, fromDong) {
     if (!tk) return;
@@ -5669,10 +5703,9 @@
     const sh = $('#tk-sup-hint');
     if (sh) { sh.innerHTML = ''; sh.classList.add('hidden'); }
     if (fromDong) { $('#tk-dong-hint').classList.add('hidden'); return; }
+    if (tk.dong) { $('#tk-dong-hint').classList.add('hidden'); return; }   // 지정된 동은 그대로
 
     const ds = c ? Contacts.dongsOf(c) : [];
-    // 이미 그 감리가 맡은 동이면 그대로 둔다
-    if (tk.dong && ds.indexOf(tk.dong) >= 0) { $('#tk-dong-hint').classList.add('hidden'); return; }
     if (ds.length === 1) {
       tk.dong = ds[0];
       renderDong(); renderReport();
@@ -8832,9 +8865,12 @@
   const $ = U.$;
 
   /* 입력 중인 초안 — 값은 **숫자만 담은 문자열**(키패드가 그대로 채운다).
-     무게는 끝 두 자리가 소수(÷100), 슬럼프는 정수. 화면·계산은 그때그때 환산한다. */
-  let draft = { w: '', s1: '', s2: '', supervisor: '', supPhone: '', photos: [] };
-  let active = 'w';                    // 지금 키패드가 채우는 칸
+     무게는 끝 두 자리가 소수(÷100), 슬럼프·층은 정수. 화면·계산은 그때그때 환산한다. */
+  const EMPTY = () => ({ w: '', s1: '', s2: '', fl: '', dong: '', supervisor: '', supPhone: '', photos: [] });
+  let draft = EMPTY();
+  let active = 'w';                    // 지금 키패드가 채우는 칸 (w·s1·s2·fl)
+  let editing = null;                  // 저장된 기록 수정 중이면 { id, day, order, createdAt }
+  let stash = null;                    // 수정하러 들어올 때 새 입력 초안을 잠시 보관
 
   function num(s) {
     const v = parseFloat(String(s == null ? '' : s).trim().replace(/,/g, ''));
@@ -8887,14 +8923,15 @@
   }
 
   /* ---------------- 화면 ---------------- */
-  function fieldEls() { return { w: $('#bf-w'), s1: $('#bf-s1'), s2: $('#bf-s2') }; }
+  function fieldEls() { return { w: $('#bf-w'), s1: $('#bf-s1'), s2: $('#bf-s2'), fl: $('#bf-fl') }; }
 
   function renderFields() {
     const els = fieldEls();
     $('#bv-w').textContent = fmtWeight(draft.w);       // 무게: 소수 2자리
     $('#bv-s1').textContent = fmtInt(draft.s1);        // 슬럼프: 정수
     $('#bv-s2').textContent = fmtInt(draft.s2);
-    ['w', 's1', 's2'].forEach((f) => els[f].classList.toggle('on', active === f));
+    $('#bv-fl').textContent = digitsOf(draft.fl) ? (fmtInt(draft.fl) + '층') : '—';
+    ['w', 's1', 's2', 'fl'].forEach((f) => els[f].classList.toggle('on', active === f));
   }
 
   function renderResult() {
@@ -8924,6 +8961,8 @@
     const t = draft.supervisor ? draft.supervisor : '담당 감리 선택';
     $('#bang-sup-txt').textContent = t;
     $('#bang-sup').classList.toggle('set', !!draft.supervisor);
+    $('#bang-dong-txt').textContent = draft.dong || '동 선택';
+    $('#bang-dong').classList.toggle('set', !!draft.dong);
   }
 
   async function renderPhotos() {
@@ -8964,7 +9003,7 @@
     else if (k === 'clr') s = '';
     else if (/^[0-9]$/.test(k)) {
       s = s + k;
-      const max = (active === 'w') ? 6 : 4;          // 무게 9999.99 / 슬럼프 9999 까지
+      const max = (active === 'w') ? 6 : (active === 'fl' ? 2 : 4);   // 무게 9999.99 / 슬럼프 9999 / 층 99
       if (s.length > max) return;
     }
     draft[active] = s;
@@ -8972,29 +9011,51 @@
     U.buzz(4);
   }
 
-  /* ---------------- 초안 저장(재시작 대비) ---------------- */
+  /* ---------------- 초안 저장(재시작 대비) ----------------
+     수정 중엔 저장하지 않는다 — 새 입력 초안(stash)이 덮이면 안 된다 */
   function saveDraft() {
+    if (editing) return;
     try { localStorage.setItem(K_SAVE, JSON.stringify(draft)); } catch (e) {}
   }
   function loadDraft() {
     try {
       const j = JSON.parse(localStorage.getItem(K_SAVE) || 'null');
       if (j && typeof j === 'object') {
-        draft = {
-          w: j.w || '', s1: j.s1 || '', s2: j.s2 || '',
-          supervisor: j.supervisor || '', supPhone: j.supPhone || '',
+        draft = Object.assign(EMPTY(), {
+          w: j.w || '', s1: j.s1 || '', s2: j.s2 || '', fl: j.fl || '',
+          dong: j.dong || '', supervisor: j.supervisor || '', supPhone: j.supPhone || '',
           photos: Array.isArray(j.photos) ? j.photos.slice() : []
-        };
+        });
       }
     } catch (e) {}
   }
   function resetDraft() {
-    draft = { w: '', s1: '', s2: '', supervisor: '', supPhone: '', photos: [] };
+    draft = EMPTY();
     active = 'w';
     saveDraft();
   }
 
-  /* ---------------- 담당 감리 ---------------- */
+  /* ---------------- 동 · 담당 감리 ----------------
+     싱크 규칙(사용자 지시, 공시체 편집기와 동일): **빈 칸일 때만 자동으로 따라 채운다.**
+     이미 채워져 있으면 반대편을 건드리지 않는다 — 커스텀 짝을 허용한다. */
+  function pickDong() {
+    const list = Contacts.dongs();
+    const items = list.map((d) => {
+      const sups = Contacts.byDong(d).map((c) => Contacts.label(c)).join(', ');
+      return { label: d, sub: sups, cls: (draft.dong === d) ? 'strong' : '',
+               onPick: () => {
+        draft.dong = d;
+        if (!draft.supervisor) {                       // 미지정 → 지정일 때만 싱크
+          const cs = Contacts.byDong(d);
+          if (cs.length === 1) { draft.supervisor = Contacts.label(cs[0]); draft.supPhone = cs[0].phone || ''; }
+        }
+        renderSup(); saveDraft();
+      } };
+    });
+    items.unshift({ label: '지정 안 함', onPick: () => { draft.dong = ''; renderSup(); saveDraft(); } });
+    U.sheet('동수 고르기', items);
+  }
+
   function pickSup() {
     const rows = Contacts.search('');
     const items = [{ label: '지정 안 함', onPick: () => { draft.supervisor = ''; draft.supPhone = ''; renderSup(); saveDraft(); } }];
@@ -9002,7 +9063,14 @@
       items.push({
         label: Contacts.label(c),
         sub: Contacts.where(c) + ' · ' + c.phone,
-        onPick: () => { draft.supervisor = Contacts.label(c); draft.supPhone = c.phone || ''; renderSup(); saveDraft(); }
+        onPick: () => {
+          draft.supervisor = Contacts.label(c); draft.supPhone = c.phone || '';
+          if (!draft.dong) {                           // 미지정 → 지정일 때만 싱크
+            const ds = Contacts.dongsOf(c);
+            if (ds.length === 1) draft.dong = ds[0];
+          }
+          renderSup(); saveDraft();
+        }
       });
     });
     U.sheet('담당 감리 (' + (U.jugu() === '1' ? '1주구' : '2·4주구') + ')', items);
@@ -9037,24 +9105,69 @@
     const r = calc(vals);
     if (r.gml == null) { U.toast('몰탈 무게를 먼저 입력하세요'); return; }
     const rec = {
-      day: U.dayKey(Date.now()),
+      day: editing ? editing.day : U.dayKey(Date.now()),   // 수정은 원래 날짜를 지킨다
+      dong: draft.dong, floor: digitsOf(draft.fl),
       supervisor: draft.supervisor, supPhone: draft.supPhone,
       jugu: U.jugu(),
       photos: draft.photos.slice(),
       w: vals.w, s1: vals.s1, s2: vals.s2
     };
+    if (editing) {
+      rec.id = editing.id;
+      rec.order = editing.order;
+      rec.createdAt = editing.createdAt;
+    }
     try {
       await Store.putBang(rec);
     } catch (e) { console.error(e); U.toast('저장하지 못했습니다'); return; }
-    U.toast('방통시험을 저장했습니다' + (draft.supervisor ? ' · ' + draft.supervisor : ''));
-    resetDraft();
+    U.toast((editing ? '방통시험을 수정했습니다' : '방통시험을 저장했습니다') +
+            (draft.supervisor ? ' · ' + draft.supervisor : ''));
+    if (editing) { endEdit(); }
+    else { resetDraft(); }
     renderAll();
+    renderSaved();
+    try { if (Nav.current() === 'tasks') Tasks.refresh(); } catch (e) {}
+  }
+
+  /* 수정 마침 — 보관해 둔 새 입력 초안으로 되돌린다 */
+  function endEdit() {
+    editing = null;
+    draft = stash || EMPTY();
+    stash = null;
+    active = 'w';
+    const go = $('#bang-save');
+    if (go) go.textContent = '이 방통시험 저장';
+  }
+
+  /* 저장된 기록 수정 — 숫자를 키패드 문자열로 되돌려 싣는다 */
+  function openEdit(b) {
+    if (!editing) stash = draft;                       // 쓰던 새 입력은 잠시 보관
+    editing = { id: b.id, day: b.day, order: b.order, createdAt: b.createdAt };
+    draft = {
+      w: (b.w != null) ? String(Math.round(b.w * 100)) : '',
+      s1: (b.s1 != null) ? String(b.s1) : '',
+      s2: (b.s2 != null) ? String(b.s2) : '',
+      fl: digitsOf(b.floor),
+      dong: b.dong || '', supervisor: b.supervisor || '', supPhone: b.supPhone || '',
+      photos: (b.photos || []).slice()
+    };
+    active = 'w';
+    $('#view-bang').classList.remove('hidden');
+    const go = $('#bang-save');
+    if (go) go.textContent = '수정 저장';
+    renderFields(); renderResult(); renderSup(); renderPhotos();
     renderSaved();
   }
 
   function bangStats(b) {
     const r = calc({ w: b.w, s1: b.s1, s2: b.s2 });
     return r;
+  }
+
+  /* 목록·카톡에 쓰는 제목 — "201동 3층 · 감리" 꼴 */
+  function bangTitle(b) {
+    const place = [b.dong, b.floor ? (b.floor + '층') : ''].filter(Boolean).join(' ');
+    return [place, b.supervisor].filter(Boolean).join(' · ') || '감리 미지정';
   }
 
   async function renderSaved() {
@@ -9077,14 +9190,15 @@
         box.appendChild(U.el('div', 'bang-day-head', U.dayLabel(new Date(b.day + 'T00:00:00').getTime())));
       }
       const r = bangStats(b);
-      const card = U.el('div', 'bang-saved-item');
+      const card = U.el('div', 'bang-saved-item' + (editing && editing.id === b.id ? ' editing' : ''));
       const main = U.el('div', 'bang-si-main');
-      const title = (b.supervisor || '감리 미지정');
-      main.appendChild(U.el('span', 'bang-si-sup', title));
+      main.appendChild(U.el('span', 'bang-si-sup', bangTitle(b)));
       const sub = (r.kgm3 != null ? (r.kgm3 + 'kg/㎥') : '') +
                   (r.slump != null ? ' · 슬럼프 ' + r.slump + 'mm' : '') +
                   ((b.photos || []).length ? ' · 사진 ' + b.photos.length + '장' : '');
       main.appendChild(U.el('span', 'bang-si-sub', sub));
+      // 본문을 탭하면 수정 모드로 싣는다(사용자 지시)
+      main.addEventListener('click', () => openEdit(b));
       card.appendChild(main);
 
       const send = U.el('button', 'bang-si-btn');
@@ -9098,7 +9212,9 @@
       del.addEventListener('click', () => {
         U.confirmSheet('이 방통시험 기록을 지울까요?\n사진도 함께 지워집니다', '삭제', async () => {
           try { await Store.deleteBang(b.id); } catch (e) {}
+          if (editing && editing.id === b.id) { endEdit(); renderFields(); renderResult(); renderSup(); renderPhotos(); }
           renderSaved();
+          try { if (Nav.current() === 'tasks') Tasks.refresh(); } catch (e) {}
           U.toast('삭제했습니다');
         }, true);
       });
@@ -9110,7 +9226,8 @@
   /* 저장된 한 건을 카톡으로 — 문구 + 사진 묶어서 */
   async function exportBang(b) {
     const r = bangStats(b);
-    const text = (b.supervisor ? (b.supervisor + '\n') : '') + report(r);
+    const head = bangTitle(b);
+    const text = (head !== '감리 미지정' ? (head + '\n') : '') + report(r);
     let blobs = [];
     if ((b.photos || []).length) {
       U.toast('사진 준비 중…', 60000);
@@ -9125,7 +9242,7 @@
     }
     let copied = false;
     try { copied = await U.copyText(text); } catch (e) {}
-    const base = U.safeName((b.supervisor || '방통'), '방통') + '_' + (b.day || '').replace(/-/g, '');
+    const base = U.safeName((b.dong || b.supervisor || '방통'), '방통') + '_' + (b.day || '').replace(/-/g, '');
     let how = 'download';
     try {
       how = await Share.exportItems({ blobs: blobs, text: text, title: '방통시험', baseName: base });
@@ -9149,12 +9266,17 @@
 
   /* ---------------- 열기/닫기 ---------------- */
   function open() {
+    if (editing) { endEdit(); }          // 새로 열면 수정 모드는 버린다(저장 안 한 수정은 폐기)
     $('#view-bang').classList.remove('hidden');
     active = 'w';
     renderAll();
     renderSaved();
   }
-  function close() { $('#view-bang').classList.add('hidden'); }
+  function close() {
+    if (editing) { endEdit(); }          // 저장 안 한 수정은 폐기 — 원본은 그대로다
+    $('#view-bang').classList.add('hidden');
+    try { if (Nav.current() === 'tasks') Tasks.refresh(); } catch (e) {}
+  }
   function isOpen() { return !$('#view-bang').classList.contains('hidden'); }
 
   function init() {
@@ -9163,8 +9285,8 @@
     if (hb) hb.addEventListener('click', open);
     $('#bang-back').addEventListener('click', close);
 
-    // 칸 고르기
-    ['w', 's1', 's2'].forEach((f) => {
+    // 칸 고르기 (층 포함 — 키패드로 채우는 네 칸)
+    ['w', 's1', 's2', 'fl'].forEach((f) => {
       $('#bf-' + f).addEventListener('click', () => { active = f; renderFields(); U.buzz(4); });
     });
     // 키패드
@@ -9181,6 +9303,7 @@
       renderFields(); renderResult(); saveDraft();
     });
 
+    $('#bang-dong').addEventListener('click', pickDong);
     $('#bang-sup').addEventListener('click', pickSup);
     $('#bang-save').addEventListener('click', saveBang);
     $('#bang-copy').addEventListener('click', copyReport);
@@ -9202,6 +9325,7 @@
   }
 
   global.Bangtong = { init: init, open: open, close: close, isOpen: isOpen,
+                      openEdit: openEdit, exportRec: exportBang, titleOf: bangTitle, statsOf: bangStats,
                       _calc: calc, _report: report };
 })(window);
 

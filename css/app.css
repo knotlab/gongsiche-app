@@ -1178,6 +1178,11 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
   color:var(--text-2);font-size:15px;font-weight:700;
 }
 .bang-sup.set{color:var(--text);border-color:var(--accent)}
+/* 동+층 한 줄 — 동 버튼이 넓게, 층 칸은 좁게 */
+.bang-save-box .bang-pair{margin-top:0}
+.bang-pair .bang-sup{flex:1.4 1 0;width:auto;display:flex;align-items:center}
+.bang-field.bang-floor{flex:1 1 0;margin:0}
+.bang-saved-item.editing{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
 .bang-photo-grid:empty{display:none}
 .bang-photo-btns{display:flex;gap:10px}
 .bang-photo-btns .btn{flex:1 1 0}
