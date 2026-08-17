@@ -462,11 +462,30 @@
     <div class="field">
       <span class="field-label">공시체 분류 <span class="lbl-sub" id="tk-due-when"></span></span>
       <div class="spec-pick" id="tk-specs"></div>
-      <button class="tk-bang" id="tk-bang">
-        <span class="tkb-name">방통시험</span>
-        <span class="tkb-sub">몰탈 밀도·슬럼프 — 여기서 바로 등록</span>
-      </button>
       <div class="due-note hidden" id="tk-due-note"></div>
+    </div>
+
+    <!-- 방통시험 모드 — 분류에서 「방통시험」을 고르면 이 화면이 그대로 방통 입력이 된다(화면 이동 없음) -->
+    <div class="field hidden" id="tk-bang-fields">
+      <button class="bang-field" id="tkb-w">
+        <span class="field-label">몰탈 무게 (g)</span>
+        <span class="bang-val" id="tkbv-w">0.00</span>
+      </button>
+      <div class="bang-pair">
+        <button class="bang-field" id="tkb-s1">
+          <span class="field-label">슬럼프 ① (mm)</span>
+          <span class="bang-val" id="tkbv-s1">0</span>
+        </button>
+        <button class="bang-field" id="tkb-s2">
+          <span class="field-label">슬럼프 ② (mm)</span>
+          <span class="bang-val" id="tkbv-s2">0</span>
+        </button>
+        <button class="bang-field" id="tkb-fl">
+          <span class="field-label">층 (선택)</span>
+          <span class="bang-val" id="tkbv-fl">—</span>
+        </button>
+      </div>
+      <div class="card bang-card" id="tk-bang-result"></div>
     </div>
 
     <div class="two-col">
@@ -515,7 +534,7 @@
       <div class="sup-hint hidden" id="tk-sup-hint"></div>
     </div>
 
-    <label class="field">
+    <label class="field" id="tk-part-field">
       <span class="field-label">메모 <span class="lbl-sub">자유 기록</span></span>
       <input type="text" id="tk-part" maxlength="60"
              autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
@@ -525,7 +544,7 @@
     <div class="subtabs hidden" id="tk-subtabs"></div>
 
     <!-- 강도값 -->
-    <div class="field">
+    <div class="field" id="tk-sets-field">
       <span class="field-label" id="tk-sets-label">압축강도</span>
       <div class="set-list" id="tk-sets"></div>
       <button class="btn btn-calc" id="tk-add-set">
@@ -549,6 +568,22 @@
         </button>
       </div>
     </div>
+  </div>
+
+  <!-- 방통 모드 전용 숫자 키패드 (계산기와 같은 배열) -->
+  <div class="bang-keypad hidden" id="tk-bang-keypad">
+    <button class="key" data-tkk="7">7</button>
+    <button class="key" data-tkk="8">8</button>
+    <button class="key" data-tkk="9">9</button>
+    <button class="key" data-tkk="4">4</button>
+    <button class="key" data-tkk="5">5</button>
+    <button class="key" data-tkk="6">6</button>
+    <button class="key" data-tkk="1">1</button>
+    <button class="key" data-tkk="2">2</button>
+    <button class="key" data-tkk="3">3</button>
+    <button class="key key-clr" data-tkk="clr" aria-label="한 칸 비우기">C</button>
+    <button class="key" data-tkk="0">0</button>
+    <button class="key key-back" data-tkk="del" aria-label="한 글자 지우기">⌫</button>
   </div>
 
   <div class="ed-actions">

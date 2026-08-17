@@ -341,15 +341,20 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
 .sp-age{font-size:11px;font-weight:700;opacity:.75}
 .sp-cast{font-size:11px;font-weight:700;margin-top:2px;font-variant-numeric:tabular-nums;opacity:.9}
 .lbl-sub{font-weight:600;color:var(--text-2);opacity:.8}
-/* 분류 칩 아래 방통시험 진입(가로 버튼) — 공시체와 같은 자리에서 다룬다(사용자 지시) */
-.tk-bang{
-  display:flex;align-items:center;gap:8px;width:100%;min-height:var(--tap);
-  margin-top:6px;padding:9px 12px;border-radius:var(--r-md);
-  border:1.5px dashed var(--line);background:var(--surface);text-align:left;
-}
-.tk-bang .tkb-name{font-size:14px;font-weight:800;color:var(--accent);flex:0 0 auto}
-.tk-bang .tkb-sub{font-size:11px;font-weight:600;color:var(--text-2);min-width:0;
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 방통시험 칩 — 분류 칩과 같은 줄, 같은 모양(사용자 지시: 사족 없이) */
+.spec-pill.sp-bang{color:var(--accent);justify-content:center}
+.spec-pill.sp-bang .sp-name{font-size:13px;white-space:nowrap;letter-spacing:-.04em}
+/* 방통 모드 — 공시체 전용 구획을 숨기고 이 화면에서 바로 방통을 입력한다(화면 이동 없음) */
+#view-task.bangmode .two-col,
+#view-task.bangmode .age-hint,
+#view-task.bangmode #tk-due-when,
+#view-task.bangmode #tk-due-note,
+#view-task.bangmode #tk-subtabs,
+#view-task.bangmode #tk-sets-field,
+#view-task.bangmode #tk-part-field,
+#view-task.bangmode .photomark-check{display:none}
+#tk-bang-fields .bang-pair{margin-top:10px}
+#tk-bang-fields .bang-card{margin-top:12px}
 .due-note{
   margin-top:7px;padding:7px 9px;border-radius:var(--r-sm);
   background:#fff7ed;color:#c2410c;font-size:12px;font-weight:700;line-height:1.4;

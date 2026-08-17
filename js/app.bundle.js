@@ -5417,6 +5417,7 @@
   function openNow(task, dayKey) {
     tk = task ? JSON.parse(JSON.stringify(task)) : Task.draft(dayKey);
     dirty = false;
+    bangX = null;                    // 열 때는 항상 공시체 모드부터
     $('#tk-heading').textContent = task ? '작업' : '새 작업';
     $('#tk-delete').classList.toggle('hidden', !task);
     renderSpecs();
@@ -5435,6 +5436,7 @@
     renderReport();
     renderValues();
     renderPhotos();
+    syncBangUI();
     Nav.showTask(true);
   }
 
@@ -5455,6 +5457,7 @@
       b.appendChild(U.el('span', 'sp-cast', Spec.shortDate(Spec.defaultCastDay(s.key, day))));
       b.addEventListener('click', () => {
         if (tk.specKey === s.key) return;
+        if (bangX) { bangX = null; }                  // 방통 모드에서 분류로 되돌아온다
         // 28일↔단일재령으로 저장구조가 바뀌면 반대편에 든 사진·강도값이 저장 때 버려진다 —
         // 미리 옮겨 둔다(증발 방지, 반대심문 확인). store.taskRec 에도 같은 안전판이 있다.
         migrateAcrossSub(tk.specKey, s.key);
@@ -5465,9 +5468,16 @@
         dirty = true;
         renderSpecs(); renderAge(); renderReport();
         renderSubTabs(); renderValues(); renderPhotos();
+        syncBangUI();
       });
       wrap.appendChild(b);
     });
+
+    // 방통시험 — 분류 칩과 같은 줄·같은 동작(사용자 지시). 누르면 이 화면이 바로 방통 입력이 된다.
+    const bp = U.el('button', 'spec-pill sp-bang' + (tk.specKey === 'bang' ? ' on' : ''));
+    bp.appendChild(U.el('span', 'sp-name', '방통시험'));
+    bp.addEventListener('click', enterBang);
+    wrap.appendChild(bp);
 
     // 월요일이면 전날(일요일) 몫도 함께 시험한다
     const note = $('#tk-due-note');
@@ -5514,7 +5524,7 @@
     const el = $('#tk-report-prev');
     if (!el) return;
     el.innerHTML = '';
-    if (!tk) return;
+    if (!tk || bangX) return;        // 방통 모드 — 이 구획은 숨겨져 있고 spec 'bang' 은 보고축에 없다
     // 내보내기가 두 갈래라 문구도 둘이다 — 어느 쪽으로 보내든 뭐가 나갈지 여기서 본다
     const rows = [
       ['감리별', Task.supAxisOff(tk) ? '보내지 않음' : Task.exportLabel(tk)],
@@ -5568,6 +5578,91 @@
       if (photos.length || sets.length) U.toast('두 칸의 사진·값을 합쳤습니다');
     }
     curSub = 'water';
+  }
+
+  /* ---------------- 방통시험 모드 (사용자 지시: 분류 칩처럼, 화면 이동 없이) ----------------
+     「방통시험」 칩을 고르면 이 편집기가 그대로 방통 입력이 된다.
+     tk 는 공용 캐리어(동·감리·사진·날짜)로 계속 쓰고, 방통 고유값만 bangX 가 든다.
+     저장은 putTask 가 아니라 putBang — 값은 계산기식 숫자 문자열(무게=끝2자리 소수). */
+  let bangX = null;   // { w, s1, s2, fl(숫자 문자열), id(저장된 방통 id), active }
+  const isBang = () => !!bangX;
+  const bDigits = (s) => String(s || '').replace(/\D/g, '');
+
+  function enterBang() {
+    if (bangX) return;
+    if (!tk) return;
+    migrateAcrossSub(tk.specKey, 'bang');   // d28 에서 오면 사진을 평탄화(hasSubs('bang')=false)
+    tk.specKey = 'bang';
+    bangX = { w: '', s1: '', s2: '', fl: '', id: null, active: 'w' };
+    dirty = true;
+    renderSpecs(); renderSubTabs(); renderValues(); renderPhotos(); renderReport();
+    syncBangUI();
+  }
+
+  /* 방통 모드 화면 전환 — 공시체 전용 구획은 CSS(.bangmode)가 숨긴다 */
+  function syncBangUI() {
+    const on = isBang();
+    $('#view-task').classList.toggle('bangmode', on);
+    $('#tk-bang-fields').classList.toggle('hidden', !on);
+    $('#tk-bang-keypad').classList.toggle('hidden', !on);
+    $('#tk-heading').textContent = on ? '방통시험' : (tk && tk.id ? '작업' : '새 작업');
+    $('#tk-delete').classList.toggle('hidden', on ? !bangX.id : !(tk && tk.id));
+    if (on) { renderBangFields(); renderBangResult(); }
+  }
+
+  function renderBangFields() {
+    if (!bangX) return;
+    const w = bDigits(bangX.w);
+    $('#tkbv-w').textContent = w ? (parseInt(w, 10) / 100).toFixed(2) : '0.00';
+    $('#tkbv-s1').textContent = bDigits(bangX.s1) ? String(parseInt(bangX.s1, 10)) : '0';
+    $('#tkbv-s2').textContent = bDigits(bangX.s2) ? String(parseInt(bangX.s2, 10)) : '0';
+    $('#tkbv-fl').textContent = bDigits(bangX.fl) ? (parseInt(bangX.fl, 10) + '층') : '—';
+    ['w', 's1', 's2', 'fl'].forEach((f) => $('#tkb-' + f).classList.toggle('on', bangX.active === f));
+  }
+
+  function bangVals() {
+    const w = bDigits(bangX.w), a = bDigits(bangX.s1), b = bDigits(bangX.s2);
+    return {
+      w: w ? parseInt(w, 10) / 100 : null,
+      s1: a ? parseInt(a, 10) : null,
+      s2: b ? parseInt(b, 10) : null
+    };
+  }
+
+  function renderBangResult() {
+    if (!bangX) return;
+    $('#tk-bang-result').innerHTML = Bangtong.resultHTML(Bangtong._calc(bangVals()));
+  }
+
+  function bangPress(k) {
+    if (!bangX) return;
+    let s = bDigits(bangX[bangX.active]);
+    if (k === 'del') s = s.slice(0, -1);
+    else if (k === 'clr') s = '';
+    else if (/^[0-9]$/.test(k)) {
+      s = s + k;
+      const max = (bangX.active === 'w') ? 6 : (bangX.active === 'fl' ? 2 : 4);
+      if (s.length > max) return;
+    }
+    bangX[bangX.active] = s;
+    dirty = true;
+    renderBangFields(); renderBangResult();
+    U.buzz(4);
+  }
+
+  function bindBang() {
+    $('#tk-bang-keypad').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-tkk]');
+      if (b) bangPress(b.getAttribute('data-tkk'));
+    });
+    ['w', 's1', 's2', 'fl'].forEach((f) => {
+      $('#tkb-' + f).addEventListener('click', () => {
+        if (!bangX) return;
+        bangX.active = f;
+        renderBangFields();
+        U.buzz(4);
+      });
+    });
   }
 
   /* 지금 편집 중인 그릇. 28일이 아니면 작업 자체가 그릇이다. */
@@ -6070,6 +6165,33 @@
     // await 를 넘는 순간 tk 가 다른 작업으로 바뀔 수 있다(닫기·다른 작업 열기).
     // 저장 대상을 붙들어 두고, 화면 상태는 '아직 그 작업을 보고 있을 때만' 건드린다.
     const owner = tk;
+
+    // 방통 모드 — putTask 가 아니라 putBang. tk 는 동·감리·사진 캐리어다.
+    if (bangX) {
+      const bx = bangX;
+      const v = bangVals();
+      const rec = {
+        id: bx.id || undefined,
+        day: owner.day || U.dayKey(Date.now()),
+        dong: owner.dong || '', floor: bDigits(bx.fl),
+        supervisor: owner.supervisor || '', supPhone: owner.supPhone || '',
+        jugu: owner.jugu || U.jugu(),
+        photos: (owner.photos || []).slice(),
+        w: v.w, s1: v.s1, s2: v.s2
+      };
+      let saved;
+      try { saved = await Store.putBang(rec); }
+      catch (e) { console.error(e); U.toast('저장하지 못했습니다'); return null; }
+      if (bangX === bx) {
+        bx.id = saved.id;
+        if (tk === owner) { dirty = false; syncBangUI(); }
+      }
+      Store.gc((owner.photos || []).slice().concat(pendingIds));
+      refreshLists();
+      if (!silent) U.toast('방통시험을 저장했습니다');
+      return saved;
+    }
+
     let rec;
     try { rec = await Store.putTask(owner); }
     catch (e) { console.error(e); U.toast('저장하지 못했습니다'); return null; }
@@ -6087,6 +6209,20 @@
   }
 
   function removeTask() {
+    // 방통 모드 — 저장된 방통 기록을 지운다
+    if (bangX) {
+      if (!bangX.id) { tk = null; bangX = null; Nav.showTask(false); return; }
+      const bid = bangX.id;
+      const owner = tk;
+      U.confirmSheet('이 방통시험 기록을 지울까요?\n사진도 함께 지워집니다', '삭제', async () => {
+        try { await Store.deleteBang(bid); }
+        catch (e) { console.error(e); U.toast('삭제하지 못했습니다'); return; }
+        if (tk === owner) { tk = null; bangX = null; Nav.showTask(false); }
+        refreshLists();
+        U.toast('삭제했습니다');
+      }, true);
+      return;
+    }
     if (!tk || !tk.id) { tk = null; Nav.showTask(false); return; }
     const id = tk.id;
     const owner = tk;
@@ -6120,6 +6256,12 @@
 
   /* ---------------- 내보내기 ---------------- */
   async function exportTask() {
+    // 방통 모드 — 저장 뒤 방통 전용 카톡(문구+사진)으로 보낸다
+    if (bangX) {
+      const r = await save(true);
+      if (r) Bangtong.exportRec(r);
+      return;
+    }
     const rec = await save(true);
     if (!rec) return;
     const title = Task.summary(rec);
@@ -6188,29 +6330,9 @@
   }
 
   /* ---------------- 바인딩 ---------------- */
-  /* 분류 칩 아래 「방통시험」 — 작업 편집기에서 바로 방통 등록으로 간다(사용자 지시).
-     저장 안 한 변경이 있으면 tryClose 와 같은 규칙으로 묻는다. */
-  function gotoBang() {
-    if (!global.Bangtong) return;
-    const proceed = () => { tk = null; Nav.showTask(false); Bangtong.open(); };
-    if (!tk) { proceed(); return; }
-    collect();
-    if (!dirty) { Store.gc(pendingIds.slice()); proceed(); return; }
-    U.sheet('저장하지 않은 변경이 있습니다', [
-      { label: '작업 저장하고 방통시험으로', cls: 'strong', onPick: async () => {
-          const r = await save(true);
-          if (r) proceed();
-        } },
-      { label: '저장하지 않고 이동', cls: 'danger', onPick: () => {
-          Store.gc(pendingIds.slice()); proceed();
-        } }
-    ]);
-  }
-
   function bind() {
     $('#tk-back').addEventListener('click', tryClose);
-    const tb = $('#tk-bang');
-    if (tb) tb.addEventListener('click', gotoBang);
+    bindBang();
     $('#tk-delete').addEventListener('click', removeTask);
     $('#tk-save').addEventListener('click', () => { save(false); });
     $('#tk-export').addEventListener('click', () => { exportTask(); });
@@ -8957,25 +9079,29 @@
     ['w', 's1', 's2', 'fl'].forEach((f) => els[f].classList.toggle('on', active === f));
   }
 
+  /* 결과 카드 HTML — 방통 화면과 작업 편집기(방통 모드)가 같이 쓴다 */
+  function resultHTML(r) {
+    if (r.gml == null && r.slump == null) {
+      return '<p class="bang-empty">몰탈 무게와 슬럼프를 입력하세요</p>';
+    }
+    let h = '';
+    if (r.gml != null) {
+      h += '<div class="bang-row"><span>밀도</span><b>' + r.gml + ' g/ml = ' + r.kgm3 + ' kg/㎥</b>' +
+           badge(r.denOk) + '</div>' +
+           '<div class="bang-std">기준 ' + DEN_MIN + 'kg/㎥ 이상 · 실린더 ' + VOL + 'ml</div>';
+    }
+    if (r.slump != null) {
+      h += '<div class="bang-row"><span>슬럼프 평균</span><b>' + r.slump + ' mm</b>' + badge(r.slOk) + '</div>' +
+           '<div class="bang-std">기준 ' + SL_BASE + '±' + SL_TOL + 'mm</div>';
+    }
+    return h;
+  }
+
   function renderResult() {
     const r = calc(draftVals());
     const el = $('#bang-result');
     if (!el) return;
-    if (r.gml == null && r.slump == null) {
-      el.innerHTML = '<p class="bang-empty">몰탈 무게와 슬럼프를 입력하세요</p>';
-    } else {
-      let h = '';
-      if (r.gml != null) {
-        h += '<div class="bang-row"><span>밀도</span><b>' + r.gml + ' g/ml = ' + r.kgm3 + ' kg/㎥</b>' +
-             badge(r.denOk) + '</div>' +
-             '<div class="bang-std">기준 ' + DEN_MIN + 'kg/㎥ 이상 · 실린더 ' + VOL + 'ml</div>';
-      }
-      if (r.slump != null) {
-        h += '<div class="bang-row"><span>슬럼프 평균</span><b>' + r.slump + ' mm</b>' + badge(r.slOk) + '</div>' +
-             '<div class="bang-std">기준 ' + SL_BASE + '±' + SL_TOL + 'mm</div>';
-      }
-      el.innerHTML = h;
-    }
+    el.innerHTML = resultHTML(r);
     $('#bang-copy').disabled = (r.gml == null);
     $('#bang-save').disabled = (r.gml == null);
   }
@@ -9357,7 +9483,7 @@
   global.Bangtong = { init: init, open: open, close: close, isOpen: isOpen,
                       openEdit: openEdit, exportRec: exportBang,
                       titleOf: bangTitle, placeOf: bangPlace, supOf: (b) => b.supervisor || '',
-                      statsOf: bangStats,
+                      statsOf: bangStats, resultHTML: resultHTML,
                       _calc: calc, _report: report };
 })(window);
 
