@@ -9225,10 +9225,15 @@
     U.sheet('담당 감리 (' + (U.jugu() === '1' ? '1주구' : '2·4주구') + ')', items);
   }
 
-  /* ---------------- 사진 ---------------- */
-  async function addFiles(fileList) {
+  /* ---------------- 사진 ----------------
+     네이티브 촬영은 Native.shoot 이 원본을 갤러리(SD 설정 시 SD)에도 남긴다 — 공시체와 동일.
+     아이폰 PWA 의 <input capture> 촬영본은 사진 앱에 안 남으므로 공유 토스트로 저장 기회를 준다. */
+  async function addFiles(fileList, fromCamera) {
     const files = Array.prototype.slice.call(fileList || []).filter((f) => f && f.size);
     if (!files.length) return;
+    const shareFiles = [];
+    const wantShare = fromCamera && !Native.isNative() &&
+                      typeof navigator.share === 'function' && !!navigator.canShare;
     U.toast('사진 처리 중…', 60000);
     let ok = 0, fail = 0;
     try {
@@ -9237,14 +9242,26 @@
         try {
           const img = await U.processImage(f, { maxSide: 1600, thumbSide: 320, quality: 0.82 });
           await Store.putPhoto(Object.assign({ id: id }, img));
+          if (wantShare) {
+            try { shareFiles.push(new File([img.full], 'bang_' + id + '.jpg', { type: 'image/jpeg' })); }
+            catch (e) {}
+          }
           draft.photos.push(id); ok++;
         } catch (e) { console.error('[bang photo]', e); fail++; }
       }
       saveDraft();
       await renderPhotos();
     } finally {
-      U.toast(ok ? (ok + '장 추가했습니다' + (fail ? ' · ' + fail + '장 실패' : ''))
-                 : '사진을 불러오지 못했습니다');
+      const done = ok ? (ok + '장 추가했습니다' + (fail ? ' · ' + fail + '장 실패' : ''))
+                      : '사진을 불러오지 못했습니다';
+      if (ok && shareFiles.length && navigator.canShare({ files: shareFiles })) {
+        U.toast(done + '\n촬영본은 앱 안에만 있습니다', 8000, {
+          label: '사진 앱에 저장',
+          onClick: () => { navigator.share({ files: shareFiles }).catch(() => {}); }
+        });
+      } else {
+        U.toast(done);
+      }
     }
   }
 
@@ -9275,6 +9292,12 @@
     else { resetDraft(); }
     renderAll();
     renderSaved();
+    refreshOutside();
+  }
+
+  /* 홈·작업 탭의 방통 구간도 같이 갱신한다 — 어디서 열었든 목록이 낡으면 안 된다 */
+  function refreshOutside() {
+    try { Home.refresh(); } catch (e) {}
     try { if (Nav.current() === 'tasks') Tasks.refresh(); } catch (e) {}
   }
 
@@ -9370,7 +9393,7 @@
           try { await Store.deleteBang(b.id); } catch (e) {}
           if (editing && editing.id === b.id) { endEdit(); renderFields(); renderResult(); renderSup(); renderPhotos(); }
           renderSaved();
-          try { if (Nav.current() === 'tasks') Tasks.refresh(); } catch (e) {}
+          refreshOutside();
           U.toast('삭제했습니다');
         }, true);
       });
@@ -9431,7 +9454,7 @@
   function close() {
     if (editing) { endEdit(); }          // 저장 안 한 수정은 폐기 — 원본은 그대로다
     $('#view-bang').classList.add('hidden');
-    try { if (Nav.current() === 'tasks') Tasks.refresh(); } catch (e) {}
+    refreshOutside();
   }
   function isOpen() { return !$('#view-bang').classList.contains('hidden'); }
 
@@ -9466,12 +9489,12 @@
 
     // 사진 — 네이티브 카메라 우선, 없으면 파일 입력 폴백
     const shootInput = $('#bang-file-shoot'), pickInput = $('#bang-file-pick');
-    shootInput.addEventListener('change', (e) => { addFiles(e.target.files); e.target.value = ''; });
+    shootInput.addEventListener('change', (e) => { addFiles(e.target.files, true); e.target.value = ''; });
     pickInput.addEventListener('change', (e) => { addFiles(e.target.files); e.target.value = ''; });
     $('#bang-shoot').addEventListener('click', async () => {
       const files = await Native.shoot();
       if (files === null) { shootInput.click(); return; }
-      if (files.length) addFiles(files);
+      if (files.length) addFiles(files, true);
     });
     $('#bang-pick').addEventListener('click', async () => {
       const files = await Native.pick();
@@ -9729,8 +9752,12 @@
 
     U.$('#task-title').textContent = (isToday() ? '오늘' : Spec.shortDate(base)) + ' 작업';
 
-    let tasks = [], failed = null;
+    let tasks = [], bangs = [], failed = null;
     try { tasks = await Task.list(day); } catch (e) { console.error(e); failed = e || true; }
+    // 그날 방통시험도 따로 보여준다(사용자 지시) — 실패해도 작업 목록은 그대로 산다
+    try {
+      bangs = (await Store.bangsOf(day)).filter((b) => !b.jugu || b.jugu === U.jugu());
+    } catch (e) { console.warn('[home bangs]', e); }
     if (my !== taskSeq) return;      // 그 사이 날짜가 또 바뀌었다 — 지나간 조회는 버린다
 
     list.innerHTML = '';
@@ -9747,7 +9774,8 @@
     }
     const c = Task.counts(tasks);
     U.$('#task-count').textContent = c.done + '/' + c.all;
-    if (!tasks.length) { list.appendChild(emptyNode); return; }
+    if (!tasks.length && !bangs.length) { list.appendChild(emptyNode); return; }
+    if (!tasks.length) { appendBangRows(list, bangs); return; }   // 작업이 없어도 방통은 보인다
 
     /* 만들 땐 하나씩이지만 수행은 감리별로 몰아서 한다 → 감리별로 묶고,
        끝난 작업은 맨 아래로 내린다. */
@@ -9799,6 +9827,33 @@
       row.appendChild(flag);
 
       row.addEventListener('click', () => TaskUI.open(t, day));
+      list.appendChild(row);
+    });
+
+    appendBangRows(list, bangs);
+  }
+
+  /* 그날의 방통시험 — 작업 아래 별도 구간(사용자 지시). 탭하면 방통 화면에서 수정 */
+  function appendBangRows(list, bangs) {
+    if (!bangs || !bangs.length || !global.Bangtong) return;
+    const h = U.el('div', 'grp-head');
+    h.appendChild(U.el('span', '', '방통시험'));
+    list.appendChild(h);
+    bangs.forEach((b) => {
+      const row = U.el('button', 'task-row');
+      row.appendChild(U.el('span', 'due-spec', '방통'));
+      const body = U.el('div', 'task-body');
+      const title = U.el('div', 'task-part', Bangtong.placeOf(b));
+      if (b.supervisor) title.appendChild(U.el('span', 'row-sup', b.supervisor));
+      body.appendChild(title);
+      const r = Bangtong.statsOf(b);
+      const meta = [];
+      if (r.kgm3 != null) meta.push(r.kgm3 + 'kg/㎥');
+      if (r.slump != null) meta.push('슬럼프 ' + r.slump + 'mm');
+      if ((b.photos || []).length) meta.push('사진 ' + b.photos.length + '장');
+      body.appendChild(U.el('div', 'task-meta', meta.join(' · ')));
+      row.appendChild(body);
+      row.addEventListener('click', () => Bangtong.openEdit(b));
       list.appendChild(row);
     });
   }
