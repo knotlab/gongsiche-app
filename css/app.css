@@ -579,6 +579,14 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
 }
 .chips-head-btns::-webkit-scrollbar{display:none}
 .chips-head-btns .mini-btn{flex:0 0 auto}
+/* 채우기 편차 슬라이더 — 채우기 버튼 줄 바로 아래 */
+.spread-row{display:flex;align-items:center;gap:8px;min-height:var(--tap);margin-bottom:6px}
+.spread-label{flex:0 0 auto;font-size:12px;font-weight:600;color:var(--text-2)}
+.spread-row input[type="range"]{flex:1 1 auto;min-width:0;accent-color:var(--accent)}
+.spread-val{
+  flex:0 0 auto;min-width:34px;text-align:right;
+  font-size:12px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums;
+}
 .mini-btn{
   position:relative;
   font-size:12px;font-weight:600;padding:8px 11px;min-height:38px;border-radius:var(--r-sm);

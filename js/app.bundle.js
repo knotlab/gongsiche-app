@@ -3069,7 +3069,7 @@
 /* ============ contacts.js — 감리 연락처 ============
    자동 생성 파일. 직접 고치지 말고 contacts.csv 를 갱신한 뒤
    node tools/make-contacts.js 를 다시 돌릴 것.
-   생성: 2026-08-05 · 57명
+   생성: 2026-08-21 · 59명
 ================================================= */
 (function (global) {
   'use strict';
@@ -3587,6 +3587,24 @@
       "phone": "010-8977-4811",
       "raw": "공공청사 송영수 이사",
       "jugu": "24"
+    },
+    {
+      "team": "주구중심",
+      "dong": "B2",
+      "name": "이상규",
+      "rank": "이사",
+      "phone": "",
+      "raw": "HD 주구중심 B2 이상규 이사",
+      "jugu": "24"
+    },
+    {
+      "team": "주구중심",
+      "dong": "B3",
+      "name": "한형구",
+      "rank": "상무",
+      "phone": "010-4097-7577",
+      "raw": "HD 주구중심 B3 한형구 상무",
+      "jugu": "24"
     }
   ];
 
@@ -3709,11 +3727,15 @@
   }
   function subPhotos(t, key) { return subOf(t, key).photos; }
 
-  /* 완료 — 보통은 사진 한 장이면 끝.
-     28일은 **수중·봉함 둘 다** 찍어야 끝이다(사용자 지시) — 한쪽만 찍고 넘어가는 걸 막는다. */
+  /* 완료 — 사진은 전경+판넬 2장이 한 짝이다(사용자 지시). n 장이 0 초과 짝수여야 끝.
+     28일은 **수중·봉함 둘 다** 그 조건을 만족해야 끝이다 — 한쪽만 찍고 넘어가는 걸 막는다. */
+  function evenPhotos(photos) {
+    const n = (photos || []).length;
+    return n > 0 && n % 2 === 0;
+  }
   function isDone(t) {
-    if (hasSubs(t)) return Spec.SUBS.every((s) => subPhotos(t, s.key).length >= 1);
-    return ((t && t.photos) || []).length >= 1;
+    if (hasSubs(t)) return Spec.SUBS.every((s) => evenPhotos(subPhotos(t, s.key)));
+    return evenPhotos((t && t.photos) || []);
   }
 
   /* 아직 사진이 없는 칸 이름들. 28일이 아니면 빈 배열.
@@ -3723,11 +3745,22 @@
     return Spec.SUBS.filter((s) => subPhotos(t, s.key).length === 0).map((s) => s.name);
   }
 
-  /* 목록에 붙일 한마디: '봉함 미완료' · '수중·봉함 미완료' · 끝났으면 '' */
+  /* 목록에 붙일 한마디: '봉함 미완료' · '수중 사진 홀수' · '사진 홀수' · 끝났으면 ''
+     0장인 칸은 기존대로 "미완료", 짝을 못 채운 홀수 장 칸은 "사진 홀수"로 갈라 말한다 —
+     둘 다 isDone 은 false 지만 뭘 더 찍어야 하는지가 다르다. */
   function doneNote(t) {
-    const left = pendingSubs(t);
-    if (!left.length) return '';
-    return left.join('·') + ' 미완료';
+    if (hasSubs(t)) {
+      const bits = [];
+      const left = pendingSubs(t);
+      if (left.length) bits.push(left.join('·') + ' 미완료');
+      Spec.SUBS.forEach((s) => {
+        const n = subPhotos(t, s.key).length;
+        if (n > 0 && n % 2 !== 0) bits.push(s.name + ' 사진 홀수');
+      });
+      return bits.join(' · ');
+    }
+    const n = ((t && t.photos) || []).length;
+    return (n > 0 && n % 2 !== 0) ? '사진 홀수' : '';
   }
 
   function counts(items) {
@@ -3839,12 +3872,19 @@
      문구는 "201동 수직입니다" / "204동 28일강도입니다" 형식(수중은 28일강도로 쓴다). */
 
   /* 카톡에 쓸 동 표기. 연락처의 동은 "215동(특화동)" · "305동, 214동B" 처럼
-     지저분한 것이 섞여 있어 앞의 「숫자+동」만 뽑는다. 없으면 적힌 그대로. */
+     지저분한 것이 섞여 있어 앞의 「숫자+동」만 뽑는다. 없으면 적힌 그대로.
+     A/B 접미와 특화동 표기는 **지워지면 안 된다**(사용자 지시) — "214동B"를 "214동"으로
+     보내면 옆동(214동A)과 헷갈려 카톡이 엉뚱한 동으로 나간다. 괄호·공백 유무는 다양해도
+     "214동B" / "215동 특화동" 꼴로 정규화해 돌려준다. 다중 동은 여전히 첫 동만 본다. */
   function dongText(d) {
     const s = String(d || '').trim();
     if (!s) return '';
-    const m = s.match(/(\d+\s*동)/);
-    return m ? m[1].replace(/\s+/g, '') : s;
+    const m = s.match(/(\d+)\s*동\s*(\(?\s*특화동\s*\)?|[A-Za-z])?/);
+    if (!m) return s;
+    const suf = (m[2] || '').replace(/[()\s]/g, '');
+    if (!suf) return m[1] + '동';
+    if (suf === '특화동') return m[1] + '동 특화동';
+    return m[1] + '동' + suf.toUpperCase();
   }
 
   /* 규칙이 정해주는 표기 날짜 (재령·검수용으로 계속 쓴다) */
@@ -4029,12 +4069,17 @@
   const K_AUTO = 'gsc.autoreg.v1';
   const K_FACTOR = 'gsc.factor.v1';
   const K_DIGITS = 'gsc.digits.v1';
+  const K_SPREAD = 'gsc.fill.spread.v1';
   const DEFAULT_FACTOR = 0.97;
+  const DEFAULT_SPREAD = 0.35;
+  const MIN_SPREAD = 0.10;
+  const MAX_SPREAD = 1.50;
 
   let digits = '';
   let entries = [];        // [{v:Number, d:'2453'}]
   let autoReg = true;
   let factor = DEFAULT_FACTOR;   // 보정계수 (평균 × factor)
+  let spread = DEFAULT_SPREAD;   // 채우기 편차 — 슬라이더가 곧 이 값이다
   let justAdded = -1;             // 방금 등록된 칩 인덱스 (애니메이션용)
 
   /* ---------- 값 변환 ---------- */
@@ -4060,6 +4105,7 @@
       localStorage.setItem(K_AUTO, autoReg ? '1' : '0');
       localStorage.setItem(K_FACTOR, String(factor));
       localStorage.setItem(K_DIGITS, digits);
+      localStorage.setItem(K_SPREAD, String(spread));
     } catch (e) { /* 저장 실패는 치명적이지 않음 */ }
   }
 
@@ -4112,6 +4158,8 @@
       if (!isNaN(f)) factor = f;
       const d = localStorage.getItem(K_DIGITS);
       if (d && /^\d{1,6}$/.test(d)) digits = d;
+      const sp = parseFloat(localStorage.getItem(K_SPREAD));
+      if (isFinite(sp) && sp >= MIN_SPREAD && sp <= MAX_SPREAD) spread = Math.round(sp * 100) / 100;
     } catch (e) { entries = []; }
   }
 
@@ -4431,9 +4479,9 @@
   }
 
   /* ---------- 랜덤값 채우기 (beta) ----------
-     입력된 값을 기준으로 비슷한 값을 만들어 3개(한 세트) 또는 9개(판 전체)까지 채운다.
-     직접 입력한 **마지막 값은 항상 맨 끝자리**(3번 또는 9번)로 옮긴다(사용자 지시).
-     퍼짐: 입력값들의 표본편차(1개뿐이면 값의 1.5%), 최소 0.35 — 판에 적힌 값처럼 흩어진다. */
+     입력된 값을 기준으로 비슷한 값을 만들어 9개(판 전체)까지 채운다.
+     직접 입력한 **마지막 값은 항상 맨 끝자리**(9번)로 옮긴다(사용자 지시).
+     퍼짐은 슬라이더(#fill-spread, 모듈 전역 `spread`)가 곧 값이다 — 판에 적힌 값처럼 흩어진다. */
   function fillRandom(target) {
     const n = entries.length;
     if (!n) { U.toast('기준이 될 값을 먼저 입력하세요'); return; }
@@ -4442,10 +4490,6 @@
       return;
     }
     const s = stats();
-    // 퍼짐: 입력값들의 표본편차(1개뿐이면 값의 1.5%), 최소 0.35.
-    // 처음(±1.5×0.15)엔 값들이 너무 몰렸다(사용자 피드백) — 전형 편차가 spread 수준이 되게 ×3.
-    const spread = Math.max(
-      (s.sd != null && isFinite(s.sd)) ? s.sd : s.avg * 0.015, 0.35);
     const made = [];
     for (let i = target - n; i > 0; i--) {
       // 균등난수 둘의 합 → 가운데가 두터운 종 모양 (자연스러운 흩어짐)
@@ -4461,6 +4505,45 @@
     save(); render();
     U.buzz(12);
     U.toast(made.length + '개를 채웠습니다 · 입력한 값이 맨 끝(' + entries.length + '번)입니다');
+  }
+
+  /* 28일 작업의 봉함 칸에 연결됐을 때만 쓰는 채우기 — 같은 세트의 수중 칸 값에 평균을 맞춘다.
+     수중 칸 개수만큼 채우되 이미 입력한 값은 그대로 두고 모자란 만큼만 만든다. */
+  async function fillSealFromWater() {
+    if (!linkedId || linkedSub !== 'seal') return;
+    // await 너머에서 다른 세트로 갈아탈 수 있다 — 지금 대상을 붙들어 두고, 끝나고도 같은지 확인한다.
+    const id = linkedId, sub = linkedSub;
+    let t = null;
+    try { t = await Store.getTask(id); } catch (e) { console.error(e); }
+    if (linkedId !== id || linkedSub !== sub) return;   // 그 사이 다른 세트로 이동함
+    if (!t) { U.toast('작업을 찾지 못했습니다'); return; }
+
+    const waterVals = [];
+    Store.normalizeSets(Task.subOf(t, 'water')).forEach((s) => {
+      (s.values || []).forEach((v) => { if (typeof v.v === 'number' && isFinite(v.v)) waterVals.push(v.v); });
+    });
+    if (!waterVals.length) { U.toast('수중 칸에 값이 없습니다'); return; }
+
+    const target = waterVals.length;
+    const n = entries.length;
+    if (n >= target) {
+      U.toast('이미 ' + n + '개가 있습니다 — ' + target + '개보다 적을 때 채워집니다');
+      return;
+    }
+    const avg = waterVals.reduce((a, b) => a + b, 0) / waterVals.length;
+    const made = [];
+    for (let i = target - n; i > 0; i--) {
+      const jitter = ((Math.random() + Math.random()) - 1) * spread * 3;
+      const v = Math.round(Math.max(0.01, Math.min(MAX_VALUE, avg + jitter)) * 100) / 100;
+      const e = normalizeEntry({ v: v, r: 1 });   // r = 랜덤 표식 — 칩이 색으로 구분된다
+      if (e) made.push(e);
+    }
+    entries = entries.concat(made);
+    digits = '';
+    justAdded = entries.length - 1;
+    save(); render();
+    U.buzz(12);
+    U.toast(made.length + '개를 채웠습니다 · 수중 평균 ' + U.fix2(avg) + ' 기준');
   }
 
   /* 되묻지 않고 바로 지운다. 대신 토스트에서 한 번에 되돌릴 수 있다. */
@@ -4517,6 +4600,12 @@
     return true;
   }
 
+  /* 「수중 평균 맞춰 채우기」는 28일 작업의 봉함 칸에 연결됐을 때만 의미가 있다 */
+  function syncFillSealBtn() {
+    const btn = U.$('#btn-fill-seal');
+    if (btn) btn.classList.toggle('hidden', !(linkedId && linkedSub === 'seal'));
+  }
+
   function linkTo(taskId, setId, label, values, f, subKey) {
     const incoming = (values || []).slice();
     // 어디에도 저장되지 않은 입력 버퍼를 말없이 덮지 않는다 — 공시체는 이미 깨서 재측정이 안 된다.
@@ -4546,6 +4635,7 @@
     bar.classList.toggle('hidden', !linkedId);
     const fin = U.$('#factor');
     if (fin) fin.value = factorText(factor);
+    syncFillSealBtn();
     fit();   // 연결바(약 59px)가 생기면 남는 높이가 그만큼 줄어든다
   }
 
@@ -4554,6 +4644,7 @@
     linkedSet = null;
     linkedSub = null;
     U.$('#calc-link').classList.add('hidden');
+    syncFillSealBtn();
     fit();   // 연결바가 사라져 높이가 도로 늘었다
   }
 
@@ -4736,8 +4827,23 @@
 
     U.$('#calc-link-save').addEventListener('click', saveToTask);
     U.$('#btn-clear').addEventListener('click', clearAll);
-    U.$('#btn-fill3').addEventListener('click', () => fillRandom(3));
     U.$('#btn-fill9').addEventListener('click', () => fillRandom(9));
+    U.$('#btn-fill-seal').addEventListener('click', fillSealFromWater);
+
+    /* 채우기 편차 슬라이더 */
+    const spreadEl = U.$('#fill-spread');
+    const spreadVal = U.$('#fill-spread-val');
+    if (spreadEl) {
+      spreadEl.value = String(spread);
+      if (spreadVal) spreadVal.textContent = U.fix2(spread);
+      spreadEl.addEventListener('input', () => {
+        const v = parseFloat(spreadEl.value);
+        if (!isFinite(v)) return;
+        spread = Math.min(MAX_SPREAD, Math.max(MIN_SPREAD, Math.round(v * 100) / 100));
+        if (spreadVal) spreadVal.textContent = U.fix2(spread);
+        save();
+      });
+    }
 
     U.$('#calc-menu-btn').addEventListener('click', () => {
       U.sheet('계산 옵션', [
@@ -5234,6 +5340,28 @@
     return normTeam(hit && hit.team);
   }
 
+  /* 블럭 판정 — 현장 배치도(3BL/4BL) 실측(사용자 지시).
+     A5=4블럭 / A9·B2·B3=3블럭 / 3XX동=전부 4블럭 /
+     2XX동은 {203,204,213,214}만 4블럭·나머지 3블럭 / 그 외(1XX동 등)는 블럭 없음.
+     특화동·A/B 접미(214동B·215동 특화동)는 "동" 뒤에 붙으므로 앞 숫자만 잡으면 자연히 무시된다. */
+  function blockOf(t) {
+    const raw = String((t && t.dong) || Task.dongOf(t) || '').trim();
+    if (!raw) return '';
+    const lm = raw.match(/^([A-Za-z])\s*(\d+)/);
+    if (lm) {
+      const key = lm[1].toUpperCase() + lm[2];
+      if (key === 'A5') return '4블럭';
+      if (key === 'A9' || key === 'B2' || key === 'B3') return '3블럭';
+      return '';
+    }
+    const dm = raw.match(/(\d+)\s*동/);
+    if (!dm) return '';
+    const n = dm[1];
+    if (n[0] === '3') return '4블럭';
+    if (n[0] === '2') return (['203', '204', '213', '214'].indexOf(n) >= 0) ? '4블럭' : '3블럭';
+    return '';
+  }
+
   function syncFilterBtn() {
     const b = U.$('#tasks-filter');
     if (!b) return;
@@ -5259,6 +5387,16 @@
       items.push({
         label: '종류 · ' + s.name,
         onPick: () => setFilter({ label: s.name, test: (t) => t.specKey === s.key })
+      });
+    });
+    // 블럭별 — 이 날짜 작업들 중 블럭 판정되는 게 있을 때만(공구 목록과 같은 패턴)
+    const blocks = [];
+    all.forEach((t) => { const bl = blockOf(t); if (bl && blocks.indexOf(bl) < 0) blocks.push(bl); });
+    if (blocks.length) items.push({ sep: true });
+    blocks.sort().forEach((bl) => {
+      items.push({
+        label: '블럭 · ' + bl,
+        onPick: () => setFilter({ label: bl, test: (t) => blockOf(t) === bl })
       });
     });
     // 공구별 — 이 날짜 작업들의 감리 소속에서 뽑는다

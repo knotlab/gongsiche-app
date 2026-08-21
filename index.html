@@ -340,10 +340,17 @@
       <span>등록값 <b id="chip-count">0</b></span>
       <div class="chips-head-btns">
         <!-- 결과 복사·작업에 넣기는 오른쪽 위 ⋯ 메뉴로(사용자 지시 — 작업 연결의 「작업에 저장」과 중복) -->
-        <button class="mini-btn" id="btn-fill3">3개 채우기</button>
         <button class="mini-btn" id="btn-fill9">9개 채우기</button>
+        <!-- 28일 작업의 봉함 칸에 연결됐을 때만 보인다(calc.js linkTo/unlink) -->
+        <button class="mini-btn hidden" id="btn-fill-seal">수중 평균 맞춰 채우기</button>
         <button class="mini-btn danger" id="btn-clear">전체 지우기</button>
       </div>
+    </div>
+    <!-- 채우기 편차 — 슬라이더가 곧 생성값의 흩어짐 폭이다(calc.js fillRandom) -->
+    <div class="spread-row">
+      <span class="spread-label">편차</span>
+      <input type="range" id="fill-spread" min="0.10" max="1.50" step="0.05" value="0.35" aria-label="채우기 편차">
+      <span class="spread-val" id="fill-spread-val">0.35</span>
     </div>
     <div class="chips" id="chips"></div>
   </div>
