@@ -2523,25 +2523,11 @@
   }
 
   /* 이름 붙은 파일 하나 내보내기(ZIP·백업).
-     네이티브는 **폰에 저장**(문서/공시체백업)이 기본이다 — 공유 시트를 바로 열면
-     카톡(나와의 채팅)으로 새는 것처럼 보인다(사용자 지적). 공유는 호출부 토스트의
-     「공유」 버튼(shareFile)으로만 한다. 웹(아이폰 PWA)은 공유 시트가 파일 앱으로
-     가는 유일한 길이라 그대로 둔다. */
+     네이티브도 **공유 시트만** 연다(사용자 지시: 폰 용량이 빠듯해 문서 폴더 저장 금지 —
+     공유용 임시 사본은 캐시라 OS 가 알아서 정리한다). 어디로 보낼지는 사용자가 시트에서 고른다. */
   async function exportFile(blob, name, title) {
     const c = cap();
-    if (c) {
-      try {
-        if (!c.Filesystem) throw new Error('Filesystem 플러그인 없음');
-        const data = await blobToBase64(blob);
-        await c.Filesystem.writeFile({
-          path: '공시체백업/' + name, data: data, directory: 'DOCUMENTS', recursive: true
-        });
-        return 'saved';                          // 문서/공시체백업/<name>
-      } catch (e) {
-        console.warn('[share] 문서 저장 실패 — 공유 시트로 폴백', e);
-        return shareFile(blob, name, title);
-      }
-    }
+    if (c) return shareFile(blob, name, title);
     let file = null;
     try { file = new File([blob], name, { type: blob.type || 'application/zip' }); } catch (e) {}
     if (file && canWebShareFiles([file])) {
@@ -5742,14 +5728,7 @@
       if (!entries.length) { U.toast('내보낼 사진·강도값이 없습니다'); return; }
       const zip = Share.makeZip(entries);
       const how = await Share.exportFile(zip, zipName, zipName);
-      if (how === 'saved') {
-        // 폰에 저장이 기본 — 카톡 등으로 보내는 건 원할 때만(사용자 지시)
-        U.toast('문서/공시체백업/' + zipName + ' 에 저장했습니다', 6000, {
-          label: '공유',
-          onClick: () => { Share.shareFile(zip, zipName, zipName); }
-        });
-      }
-      else if (how === 'cancel') U.toast('내보내기를 취소했습니다');
+      if (how === 'cancel') U.toast('내보내기를 취소했습니다');
       else if (how === 'fail') U.toast('공유에 실패했습니다');
       else if (how === 'download') U.toast(zipName + ' 파일로 저장했습니다');
       else U.toast(zipName + ' — 보낼 앱을 선택하세요');
@@ -10211,14 +10190,9 @@
           const blob = new Blob([JSON.stringify(info)], { type: 'application/json' });
           const name = '공시체백업_' + stamp + '.json';
           const how = await Share.exportFile(blob, name, '공시체 백업');
-          if (how === 'saved') {
-            U.toast('문서/공시체백업/' + name + ' 에 저장했습니다', 6000,
-              { label: '공유', onClick: () => { Share.shareFile(blob, name, '공시체 백업'); } });
-          } else {
-            U.toast(how === 'cancel' ? '취소했습니다'
-                  : how === 'fail' ? '내보내기에 실패했습니다'
-                  : '백업 파일을 내보냈습니다 — 파일 앱에 보관하세요', 4000);
-          }
+          U.toast(how === 'cancel' ? '취소했습니다'
+                : how === 'fail' ? '내보내기에 실패했습니다'
+                : '백업 파일을 내보냈습니다 — 파일 앱·카톡 나에게 보내기로 보관하세요', 4000);
         } catch (e) { console.error(e); U.toast('백업을 만들지 못했습니다'); }
       }
     });
@@ -10251,14 +10225,9 @@
           const zip = Share.makeZip(entries);
           const zname = '공시체백업_' + stamp + '.zip';
           const how = await Share.exportFile(zip, zname, '공시체 전체 백업');
-          if (how === 'saved') {
-            U.toast('문서/공시체백업/' + zname + ' 에 저장했습니다 (사진 ' + got + '장)', 6000,
-              { label: '공유', onClick: () => { Share.shareFile(zip, zname, '공시체 전체 백업'); } });
-          } else {
-            U.toast(how === 'cancel' ? '취소했습니다'
-                  : how === 'fail' ? '내보내기에 실패했습니다'
-                  : '전체 백업(사진 ' + got + '장)을 내보냈습니다', 4000);
-          }
+          U.toast(how === 'cancel' ? '취소했습니다'
+                : how === 'fail' ? '내보내기에 실패했습니다'
+                : '전체 백업(사진 ' + got + '장)을 내보냈습니다 — 보관할 곳을 고르세요', 4000);
         } catch (e) { console.error(e); U.toast('백업을 만들지 못했습니다'); }
       }
     });
