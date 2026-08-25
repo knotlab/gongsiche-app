@@ -4591,7 +4591,6 @@
     const s = stats();
     U.$('#stat-avg').textContent = s.n ? U.fix2(s.avg) : '–';
     U.$('#stat-corr').textContent = s.n ? U.fix2(s.corr) : '–';
-    U.$('#chip-count').textContent = s.n;
   }
 
   function render() { renderDisplay(); renderChips(); renderStats(); fit(); }

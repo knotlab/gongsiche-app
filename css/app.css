@@ -570,19 +570,15 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
   background:var(--surface);border-radius:var(--r);box-shadow:var(--shadow);padding:8px 10px 8px;
 }
 /* 버튼이 줄바꿈되면 세로 공간을 크게 먹는다 → 한 줄 고정, 좁으면 가로 스크롤 */
-.chips-head{display:flex;align-items:center;flex-wrap:nowrap;gap:6px;margin-bottom:6px}
-.chips-head>span{flex:0 0 auto;font-size:13px;color:var(--text-2);font-weight:600}
+/* 등록값 개수는 뺐다(사용자 지시) — 편차 슬라이더가 왼쪽, 채우기 버튼이 오른쪽 한 줄 */
+.chips-head{display:flex;align-items:center;flex-wrap:nowrap;gap:6px;margin-bottom:6px;min-height:var(--tap)}
 .chips-head b{color:var(--text)}
-.chips-head-btns{
-  flex:1 1 auto;min-width:0;display:flex;gap:5px;justify-content:flex-end;
-  overflow-x:auto;scrollbar-width:none;
-}
+.chips-head input[type="range"]{flex:1 1 auto;min-width:40px;accent-color:var(--accent)}
+/* 버튼은 안 줄인다 — 줄이면 「9개 채우기」가 잘려 보인다. 슬라이더가 남는 폭을 쓴다 */
+.chips-head-btns{flex:0 0 auto;display:flex;gap:5px;justify-content:flex-end}
 .chips-head-btns::-webkit-scrollbar{display:none}
 .chips-head-btns .mini-btn{flex:0 0 auto}
-/* 채우기 편차 슬라이더 — 채우기 버튼 줄 바로 아래 */
-.spread-row{display:flex;align-items:center;gap:8px;min-height:var(--tap);margin-bottom:6px}
 .spread-label{flex:0 0 auto;font-size:12px;font-weight:600;color:var(--text-2)}
-.spread-row input[type="range"]{flex:1 1 auto;min-width:0;accent-color:var(--accent)}
 .spread-val{
   flex:0 0 auto;min-width:34px;text-align:right;
   font-size:12px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums;
