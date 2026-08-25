@@ -342,11 +342,13 @@
 
   <!-- 등록된 값 — 스크롤 영역 밖에 둬야 9개까지 항상 보인다 -->
   <div class="chips-wrap">
-    <!-- 개수 표시는 뺐다(사용자 지시) — 편차 슬라이더가 그 자리를 쓴다(공간 활용) -->
+    <!-- 개수 표시는 뺐다(사용자 지시) — 편차 슬라이더가 그 자리를 쓴다.
+         라벨·숫자는 슬라이더 위에 얹어 트랙 폭을 최대로(사용자 지시) -->
     <div class="chips-head">
-      <span class="spread-label">편차</span>
-      <input type="range" id="fill-spread" min="0.10" max="1.50" step="0.05" value="0.35" aria-label="채우기 편차">
-      <span class="spread-val" id="fill-spread-val">0.35</span>
+      <div class="spread-box">
+        <span class="spread-cap">편차 <b id="fill-spread-val">0.35</b></span>
+        <input type="range" id="fill-spread" min="0.10" max="1.50" step="0.05" value="0.35" aria-label="채우기 편차">
+      </div>
       <div class="chips-head-btns">
         <!-- 결과 복사·작업에 넣기는 오른쪽 위 ⋯ 메뉴로(사용자 지시 — 작업 연결의 「작업에 저장」과 중복) -->
         <button class="mini-btn" id="btn-fill9">9개 채우기</button>
