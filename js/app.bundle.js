@@ -2407,6 +2407,7 @@
     const enc = new TextEncoder();
     let rows = '<row r="1">';
     headers.forEach((h, i) => {
+      if (h === '' || h == null) return;        // 구분용 빈 열은 제목 셀을 안 만든다
       rows += '<c r="' + colRef(i) + '1" t="inlineStr"><is><t>' + xmlEsc(h) + '</t></is></c>';
     });
     rows += '</row>';
@@ -5718,10 +5719,15 @@
         }
       }
 
-      // 폴더별 강도값.xlsx — 열=작업, 행=값(위→아래)
+      // 폴더별 강도값.xlsx — 열=작업, 행=값(위→아래). 작업 사이엔 빈 열 하나(사용자 지시: 구분)
       for (const folder of Object.keys(sheets)) {
         const cols = sheets[folder];
-        const xlsx = Share.makeXlsx(cols.map((c) => c.header), cols.map((c) => c.vals));
+        const heads = [], colsArr = [];
+        cols.forEach((c, i) => {
+          if (i) { heads.push(''); colsArr.push([]); }
+          heads.push(c.header); colsArr.push(c.vals);
+        });
+        const xlsx = Share.makeXlsx(heads, colsArr);
         entries.push({ name: folder + '/강도값.xlsx', data: new Uint8Array(await xlsx.arrayBuffer()) });
       }
 
