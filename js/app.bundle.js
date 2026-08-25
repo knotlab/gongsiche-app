@@ -6235,6 +6235,13 @@
       return { label: d, sub: sups, cls: (tk && tk.dong === d) ? 'strong' : '',
                onPick: () => pickDong(d) };
     });
+    // 명부에 없는 동·장소도 쓴다(사용자 지시) — prompt 는 설정(서버 백업)과 같은 방식
+    items.unshift({ label: '직접 입력', sub: '명부에 없는 동·장소',
+      onPick: () => {
+        const v = prompt('동 이름 (예: 220동, A9, 옥탑)', (tk && tk.dong) || '');
+        if (v === null) return;
+        pickDong(v.trim());
+      } });
     items.unshift({ label: '지정 안 함', onPick: () => pickDong('') });
     U.sheet('동수 고르기', items);
   }
@@ -6311,6 +6318,27 @@
       none.appendChild(U.el('span', 'sup-name ph', '지정 안 함'));
       none.addEventListener('click', () => { pickSup(null); Nav.showSup(false); });
       frag.appendChild(none);
+
+      // 명부에 없는 감리도 쓴다(사용자 지시) — 이름 필수, 전화는 선택(비우면 전화버튼 숨김)
+      const custom = U.el('button', 'sup-item');
+      const cl = U.el('div', 'sup-left');
+      cl.appendChild(U.el('span', 'sup-name', '직접 입력'));
+      cl.appendChild(U.el('span', 'sup-sub', '명부에 없는 감리'));
+      custom.appendChild(cl);
+      custom.addEventListener('click', () => {
+        if (!tk) return;
+        const name = prompt('감리 이름·직급 (예: 홍길동 소장)', tk.supervisor || '');
+        if (name === null || !name.trim()) return;
+        const phone = prompt('전화번호 (선택 — 비워도 됩니다)', tk.supPhone || '');
+        tk.supervisor = name.trim();
+        tk.supPhone = (phone === null) ? '' : phone.trim();
+        dirty = true;
+        renderSup(); renderReport();
+        const sh = $('#tk-sup-hint');
+        if (sh) { sh.innerHTML = ''; sh.classList.add('hidden'); }
+        Nav.showSup(false);
+      });
+      frag.appendChild(custom);
 
       rows.forEach((c) => {
         const b = U.el('button', 'sup-item' + (tk && tk.supPhone === c.phone ? ' on' : ''));
@@ -9694,6 +9722,13 @@
         renderSup(); saveDraft();
       } };
     });
+    items.unshift({ label: '직접 입력', sub: '명부에 없는 동·장소',
+      onPick: () => {
+        const v = prompt('동 이름 (예: 220동, A9, 옥탑)', draft.dong || '');
+        if (v === null) return;
+        draft.dong = v.trim();
+        renderSup(); saveDraft();
+      } });
     items.unshift({ label: '지정 안 함', onPick: () => { draft.dong = ''; renderSup(); saveDraft(); } });
     U.sheet('동수 고르기', items);
   }
@@ -9701,6 +9736,15 @@
   function pickSup() {
     const rows = Contacts.search('');
     const items = [{ label: '지정 안 함', onPick: () => { draft.supervisor = ''; draft.supPhone = ''; renderSup(); saveDraft(); } }];
+    items.push({ label: '직접 입력', sub: '명부에 없는 감리',
+      onPick: () => {
+        const name = prompt('감리 이름·직급 (예: 홍길동 소장)', draft.supervisor || '');
+        if (name === null || !name.trim()) return;
+        const phone = prompt('전화번호 (선택 — 비워도 됩니다)', draft.supPhone || '');
+        draft.supervisor = name.trim();
+        draft.supPhone = (phone === null) ? '' : phone.trim();
+        renderSup(); saveDraft();
+      } });
     rows.forEach((c) => {
       items.push({
         label: Contacts.label(c),
