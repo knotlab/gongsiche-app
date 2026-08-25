@@ -1260,6 +1260,7 @@
       day: goodDay(b.day, U.dayKey(now)),
       dong: (b.dong || '').trim(),           // 동 — 작업과 같은 표기(사용자 지시로 추가)
       floor: String(b.floor || '').trim(),   // 층수 메모 (예: "3" → 화면에서 "3층")
+      memo: (b.memo || '').trim(),           // 자유 메모(사용자 지시로 추가)
       supervisor: (b.supervisor || '').trim(),
       supPhone: (b.supPhone || '').trim(),
       jugu: (b.jugu === '1' || b.jugu === '24') ? b.jugu : '',
@@ -2311,8 +2312,105 @@
     return n === 'AbortError' || /abort|cancel|취소|dismiss/i.test(m);
   }
 
+  /* ---------------- ZIP 생성 (무압축 STORE — 외부 라이브러리 금지 방침) ----------------
+     사진(JPEG)은 어차피 더 안 눌리므로 STORE 로 충분하다.
+     파일명은 UTF-8 플래그(0x0800)를 세워 한글 폴더·이름이 어디서든 제대로 풀리게 한다. */
+  const CRC_TABLE = (() => {
+    const t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      t[n] = c >>> 0;
+    }
+    return t;
+  })();
+  function crc32(u8) {
+    let c = 0xFFFFFFFF;
+    for (let i = 0; i < u8.length; i++) c = CRC_TABLE[(c ^ u8[i]) & 0xFF] ^ (c >>> 8);
+    return (c ^ 0xFFFFFFFF) >>> 0;
+  }
+
+  /* entries: [{ name: '폴더/파일.jpg', data: Uint8Array }] → ZIP Blob */
+  function makeZip(entries) {
+    const enc = new TextEncoder();
+    const now = new Date();
+    const dosTime = ((now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1)) & 0xFFFF;
+    const dosDate = (((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate()) & 0xFFFF;
+
+    const parts = [];        // Blob 조각들 (본문)
+    const centrals = [];     // 중앙 디렉터리 조각들
+    let offset = 0;
+
+    const u16 = (v) => new Uint8Array([v & 255, (v >>> 8) & 255]);
+    const u32 = (v) => new Uint8Array([v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255]);
+
+    entries.forEach((e) => {
+      const nameU8 = enc.encode(e.name);
+      const data = e.data;
+      const crc = crc32(data);
+      // 로컬 파일 헤더
+      const local = new Blob([
+        u32(0x04034B50), u16(20), u16(0x0800), u16(0),      // sig, ver, UTF-8 플래그, STORE
+        u16(dosTime), u16(dosDate),
+        u32(crc), u32(data.length), u32(data.length),
+        u16(nameU8.length), u16(0), nameU8
+      ]);
+      parts.push(local, data);
+      // 중앙 디렉터리 항목
+      centrals.push(new Blob([
+        u32(0x02014B50), u16(20), u16(20), u16(0x0800), u16(0),
+        u16(dosTime), u16(dosDate),
+        u32(crc), u32(data.length), u32(data.length),
+        u16(nameU8.length), u16(0), u16(0), u16(0), u16(0),
+        u32(0), u32(offset), nameU8
+      ]));
+      offset += 30 + nameU8.length + data.length;
+    });
+
+    const centralBlob = new Blob(centrals);
+    const eocd = new Blob([
+      u32(0x06054B50), u16(0), u16(0),
+      u16(entries.length), u16(entries.length),
+      u32(centralBlob.size), u32(offset), u16(0)
+    ]);
+    return new Blob(parts.concat([centralBlob, eocd]), { type: 'application/zip' });
+  }
+
+  /* 이름 붙은 파일 하나 내보내기 (ZIP 등) — exportItems 는 .jpg 전용이라 따로 간다 */
+  async function exportFile(blob, name, title) {
+    const c = cap();
+    if (c) {
+      try {
+        if (!c.Filesystem) throw new Error('Filesystem 플러그인 없음');
+        const data = await blobToBase64(blob);
+        const res = await c.Filesystem.writeFile({
+          path: 'share/' + name, data: data, directory: 'CACHE', recursive: true
+        });
+        await c.Share.share({ title: title || name, files: [res.uri], dialogTitle: '보낼 앱 선택' });
+        return 'capacitor';
+      } catch (e) {
+        if (isCancel(e)) return 'cancel';
+        console.warn('[share] zip capacitor 실패', e);
+        return 'fail';
+      }
+    }
+    let file = null;
+    try { file = new File([blob], name, { type: blob.type || 'application/zip' }); } catch (e) {}
+    if (file && canWebShareFiles([file])) {
+      try { await navigator.share({ files: [file], title: title || name }); return 'webshare'; }
+      catch (e) { if (isCancel(e)) return 'cancel'; }
+    }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    return 'download';
+  }
+
   global.Share = {
     exportItems: exportItems,
+    makeZip: makeZip, exportFile: exportFile,
     isNative: () => !!cap(),
     hasWebShare: () => !!(navigator.share)
   };
@@ -5247,16 +5345,17 @@
     const btn = U.$('#tasks-send');
     const btnSup = U.$('#tasks-send-sup');
     const info = U.$('#tasks-info');
-    const off = (n === 0 || p === 0);
     // 축마다 묶음 수가 다르다 — 누르기 전에 몇 번 보내야 하는지 보여 준다.
     // 봉함은 감리축으로 안 나가므로 봉함만 골랐으면 감리별은 0 이 된다.
     const rows = n ? selected() : [];
     const gd = n ? Task.groupByDay(rows).filter((x) => x.photos > 0).length : 0;
     const gs = n ? Task.groupForExport(rows).filter((x) => x.photos > 0).length : 0;
-    btn.disabled = off || gd === 0;
+    // 사진이 없어도 강도값이 있으면 파일(압축) 내보내기는 되므로 버튼을 살려 둔다
+    const hasVals = n ? rows.some((t) => Task.filledSets(t).length > 0) : false;
+    btn.disabled = (n === 0) || (gd === 0 && !hasVals);
     btn.classList.toggle('off', btn.disabled);
     if (btnSup) {
-      btnSup.disabled = off || gs === 0;
+      btnSup.disabled = (n === 0) || (gs === 0 && !hasVals);
       btnSup.classList.toggle('off', btnSup.disabled);
     }
     btn.textContent = (n && p) ? ('날짜별 ' + gd) : '날짜별';
@@ -5425,6 +5524,73 @@
     U.sheet('무엇만 볼까요?', items);
   }
 
+  /* ---------------- 파일(압축) 내보내기 ----------------
+     기준일 이름의 ZIP(예: 0815.zip) 하나로 — 분류 폴더(수직/수평/필러/수중/봉함, 있는 것만),
+     각 폴더에 사진(동_타설-시험.jpg)과 강도값 텍스트(값은 줄바꿈 구분). 사용자 지시 양식. */
+  const ZIP_FOLDER = { vert: '수직', horiz: '수평', filler: '필러', water: '수중', seal: '봉함' };
+  const mmdd = (d) => (d ? String(d).slice(5).replace('-', '') : '0000');
+
+  async function exportDayZip(rows) {
+    U.toast('압축파일 만드는 중…', 60000);
+    const zipName = mmdd(U.dayKey(base.getTime())) + '.zip';
+    const entries = [];
+    const used = Object.create(null);          // 같은 동·날짜가 겹치면 _2, _3 …
+    const uniq = (name) => {
+      if (!used[name]) { used[name] = 1; return name; }
+      return name + '_' + (++used[name]);
+    };
+
+    try {
+      for (const t of rows) {
+        // 28일은 수중/봉함 칸이 각각 제 폴더로, 단일재령·구버전(water/seal)은 분류 폴더로
+        const pieces = Task.hasSubs(t)
+          ? Spec.SUBS.map((s) => ({ folder: ZIP_FOLDER[s.key], box: Task.subOf(t, s.key) }))
+          : [{ folder: ZIP_FOLDER[t.specKey], box: { photos: (t.photos || []), sets: Task.setsOf(t) } }];
+        const nameBase = U.safeName(Task.dongOf(t) || '동미지정', '동미지정') +
+                         '_' + mmdd(t.castDay) + '-' + mmdd(Task.testDayOf(t));
+
+        for (const pc of pieces) {
+          if (!pc.folder) continue;            // 모르는 분류는 만들지 않는다
+          const ids = pc.box.photos || [];
+          const sets = Store.normalizeSets(pc.box);
+          const vals = [];
+          sets.forEach((s) => (s.values || []).forEach((v) => vals.push(v.v)));
+          if (!ids.length && !vals.length) continue;
+          const key = uniq(pc.folder + '/' + nameBase);
+
+          if (ids.length) {
+            let photos = [];
+            try { photos = await Store.getPhotos(ids); } catch (e) {}
+            const byId = {}; photos.forEach((p) => { byId[p.id] = p; });
+            let n = 0;
+            for (const id of ids) {
+              const b = byId[id] ? await Store.fullBlob(byId[id]) : null;
+              if (!b) continue;
+              n++;
+              entries.push({ name: key + '_' + n + '.jpg', data: new Uint8Array(await b.arrayBuffer()) });
+            }
+          }
+          if (vals.length) {
+            // 강도값 텍스트 — 값 하나가 한 줄(사용자 지시: 구분자는 엔터)
+            const txt = vals.map((v) => U.fix2(v)).join('\r\n');
+            entries.push({ name: key + '.txt', data: new TextEncoder().encode(txt) });
+          }
+        }
+      }
+
+      if (!entries.length) { U.toast('내보낼 사진·강도값이 없습니다'); return; }
+      const zip = Share.makeZip(entries);
+      const how = await Share.exportFile(zip, zipName, zipName);
+      if (how === 'cancel') U.toast('내보내기를 취소했습니다');
+      else if (how === 'fail') U.toast('공유에 실패했습니다');
+      else if (how === 'download') U.toast(zipName + ' 파일로 저장했습니다');
+      else U.toast(zipName + ' — 보낼 앱을 선택하세요');
+    } catch (e) {
+      console.error('[zip]', e);
+      U.toast('압축파일을 만들지 못했습니다');
+    }
+  }
+
   /* 내보내기 두 갈래 — 묶는 축만 다르고 보내는 방식은 같다.
        byDay : 같은 날 같은 분류끼리   → "7/22 필러"
        bySup : 감리·동·분류가 같은 것 → "201동 수직입니다" */
@@ -5434,7 +5600,10 @@
     const bySup = (axis === 'sup');
     const groups = (bySup ? Task.groupForExport(rows) : Task.groupByDay(rows))
       .filter((g) => g.photos > 0);
-    if (!groups.length) {
+    // 사진이 없어도 강도값이 있으면 파일(압축) 내보내기는 된다 — 시트를 아예 안 여는 건
+    // 사진도 값도 없을 때뿐이다
+    const hasVals = rows.some((t) => Task.filledSets(t).length > 0);
+    if (!groups.length && !hasVals) {
       // 봉함은 감리축으로 안 보낸다 — 사진이 없는 것과 구별해 알린다
       if (bySup && rows.every(Task.supAxisOff)) {
         U.toast('봉함은 감리별로 보내지 않습니다\n날짜별로 보내세요', 3500);
@@ -5445,13 +5614,22 @@
     }
 
     const items = [];
-    // 사진 도장(동·분류·날짜) — 원할 때만(사용자 지시). 설정은 다음에도 기억된다.
+    // 파일(압축) 내보내기 — 카톡 묶음과 별개의 보관·전달용(사용자 지시 양식)
     items.push({
-      label: '사진 도장: ' + (U.wmPref() ? '켬' : '끔'),
-      sub: '사진 귀퉁이에 동·분류·날짜를 찍어 보냅니다 — 탭해서 ' + (U.wmPref() ? '끄기' : '켜기'),
-      onPick: () => { U.setWmPref(!U.wmPref()); askSend(axis); }
+      label: '파일로 내보내기 — ' + mmdd(U.dayKey(base.getTime())) + '.zip',
+      sub: '분류 폴더별 사진 + 강도값 텍스트 압축파일',
+      onPick: () => exportDayZip(rows)
     });
     items.push({ sep: true });
+    // 사진 도장(동·분류·날짜) — 원할 때만(사용자 지시). 설정은 다음에도 기억된다.
+    if (groups.length) {
+      items.push({
+        label: '사진 도장: ' + (U.wmPref() ? '켬' : '끔'),
+        sub: '사진 귀퉁이에 동·분류·날짜를 찍어 보냅니다 — 탭해서 ' + (U.wmPref() ? '끄기' : '켜기'),
+        onPick: () => { U.setWmPref(!U.wmPref()); askSend(axis); }
+      });
+      items.push({ sep: true });
+    }
     groups.forEach((g) => {
       const over = g.photos > WARN_PHOTOS;
       const who = bySup ? (g.sup || '감리 미지정') : (g.items.length + '건');
@@ -5725,6 +5903,13 @@
   let bangX = null;   // { w, s1, s2, fl(숫자 문자열), id(저장된 방통 id), active }
   const isBang = () => !!bangX;
   const bDigits = (s) => String(s || '').replace(/\D/g, '');
+  // 무게는 자율 입력(사용자 지시) — 숫자와 소수점 하나만 남긴다
+  const bClean = (s) => {
+    let t = String(s || '').replace(/[^0-9.]/g, '');
+    const i = t.indexOf('.');
+    if (i >= 0) t = t.slice(0, i + 1) + t.slice(i + 1).replace(/\./g, '');
+    return t;
+  };
 
   function enterBang() {
     if (bangX) return;
@@ -5750,8 +5935,7 @@
 
   function renderBangFields() {
     if (!bangX) return;
-    const w = bDigits(bangX.w);
-    $('#tkbv-w').textContent = w ? (parseInt(w, 10) / 100).toFixed(2) : '0.00';
+    $('#tkbv-w').textContent = bClean(bangX.w) || '0';   // 무게: 친 그대로(자율)
     $('#tkbv-s1').textContent = bDigits(bangX.s1) ? String(parseInt(bangX.s1, 10)) : '0';
     $('#tkbv-s2').textContent = bDigits(bangX.s2) ? String(parseInt(bangX.s2, 10)) : '0';
     $('#tkbv-fl').textContent = bDigits(bangX.fl) ? (parseInt(bangX.fl, 10) + '층') : '—';
@@ -5759,9 +5943,10 @@
   }
 
   function bangVals() {
-    const w = bDigits(bangX.w), a = bDigits(bangX.s1), b = bDigits(bangX.s2);
+    const w = parseFloat(bClean(bangX.w));
+    const a = bDigits(bangX.s1), b = bDigits(bangX.s2);
     return {
-      w: w ? parseInt(w, 10) / 100 : null,
+      w: (isFinite(w) && w > 0) ? w : null,
       s1: a ? parseInt(a, 10) : null,
       s2: b ? parseInt(b, 10) : null
     };
@@ -5774,12 +5959,16 @@
 
   function bangPress(k) {
     if (!bangX) return;
-    let s = bDigits(bangX[bangX.active]);
+    const isW = (bangX.active === 'w');
+    let s = isW ? bClean(bangX[bangX.active]) : bDigits(bangX[bangX.active]);
     if (k === 'del') s = s.slice(0, -1);
     else if (k === 'clr') s = '';
-    else if (/^[0-9]$/.test(k)) {
-      s = s + k;
-      const max = (bangX.active === 'w') ? 6 : (bangX.active === 'fl' ? 2 : 4);
+    else if (k === '.') {
+      if (!isW || s.indexOf('.') >= 0) return;          // 소수점은 무게 칸에서만, 하나만
+      s = (s === '' ? '0.' : s + '.');
+    } else if (/^[0-9]$/.test(k)) {
+      s = (s === '0') ? k : (s + k);
+      const max = isW ? 10 : (bangX.active === 'fl' ? 2 : 4);
       if (s.length > max) return;
     }
     bangX[bangX.active] = s;
@@ -6312,6 +6501,7 @@
         id: bx.id || undefined,
         day: owner.day || U.dayKey(Date.now()),
         dong: owner.dong || '', floor: bDigits(bx.fl),
+        memo: (owner.part || '').trim(),               // 메모 칸(#tk-part)을 방통 메모로 쓴다
         supervisor: owner.supervisor || '', supPhone: owner.supPhone || '',
         jugu: owner.jugu || U.jugu(),
         photos: (owner.photos || []).slice(),
@@ -9125,9 +9315,9 @@
 ;
 /* ===== js/bangtong.js ===== */
 /* ============ bangtong.js — 방통시험 계산·저장 (beta) ============
-   바닥 몰탈(방통) 품질시험. 입력은 **계산기와 같은 숫자 키패드**로 넣는다(OS 키보드 안 씀).
-   몰탈 무게는 공시체 계산기처럼 **끝 두 자리가 소수**다 — "97116" → 971.16 (소수점 키 없음).
-   슬럼프는 정수(mm). 입력: 몰탈 무게(g) · 슬럼프 2회(mm — 평균)
+   바닥 몰탈(방통) 품질시험. 입력은 **숫자 키패드**로 넣는다(OS 키보드 안 씀).
+   몰탈 무게는 **자율 입력**이다(사용자 지시: 자릿수 안 정함) — 소수점(.) 키로 그대로 친다.
+   슬럼프·층은 정수. 입력: 몰탈 무게(g) · 슬럼프 2회(mm — 평균) · 메모(자유)
    고정값(현장 기준): 시료실린더 400ml · 밀도기준 2400kg/㎥ 이상 · 슬럼프기준 220±20mm
    저장: **날짜별 · 담당 감리 · 사진**(동은 없다 — 사용자 지시). 저장한 건 목록에서 카톡으로 내보낸다.
    카톡 문구는 사용자 예시 양식 그대로:
@@ -9143,13 +9333,15 @@
   const VOL = 400;                     // 시료실린더 부피 (ml)
   const DEN_MIN = 2400;                // 밀도 기준 (kg/㎥ 이상)
   const SL_BASE = 220, SL_TOL = 20;    // 슬럼프 기준 (mm)
-  const K_SAVE = 'gsc.bang.draft.v1';
+  // v2: 무게가 ÷100 숫자열에서 자율 문자열("971.16")로 바뀌어 옛 초안과 호환되지 않는다
+  const K_SAVE = 'gsc.bang.draft.v2';
 
   const $ = U.$;
 
-  /* 입력 중인 초안 — 값은 **숫자만 담은 문자열**(키패드가 그대로 채운다).
-     무게는 끝 두 자리가 소수(÷100), 슬럼프·층은 정수. 화면·계산은 그때그때 환산한다. */
-  const EMPTY = () => ({ w: '', s1: '', s2: '', fl: '', dong: '', supervisor: '', supPhone: '', photos: [] });
+  /* 입력 중인 초안 — 값은 문자열(키패드가 그대로 채운다).
+     무게는 친 그대로("971.16" — 소수점 포함 자율), 슬럼프·층은 정수. 계산은 그때그때 환산. */
+  const EMPTY = () => ({ w: '', s1: '', s2: '', fl: '', memo: '',
+                         dong: '', supervisor: '', supPhone: '', photos: [] });
   let draft = EMPTY();
   let active = 'w';                    // 지금 키패드가 채우는 칸 (w·s1·s2·fl)
   let editing = null;                  // 저장된 기록 수정 중이면 { id, day, order, createdAt }
@@ -9162,9 +9354,15 @@
 
   /* 숫자 문자열 → 값 */
   const digitsOf = (s) => String(s == null ? '' : s).replace(/\D/g, '');
-  function weightVal(s) { const d = digitsOf(s); return d ? (parseInt(d, 10) / 100) : null; }
+  // 무게는 친 그대로(소수점 포함) — 숫자와 점 하나만 남긴다
+  function wclean(s) {
+    let t = String(s == null ? '' : s).replace(/[^0-9.]/g, '');
+    const i = t.indexOf('.');
+    if (i >= 0) t = t.slice(0, i + 1) + t.slice(i + 1).replace(/\./g, '');
+    return t;
+  }
+  function weightVal(s) { const v = parseFloat(wclean(s)); return (isFinite(v) && v > 0) ? v : null; }
   function intVal(s) { const d = digitsOf(s); return d ? parseInt(d, 10) : null; }
-  function fmtWeight(s) { const d = digitsOf(s); return d ? (parseInt(d, 10) / 100).toFixed(2) : '0.00'; }
   function fmtInt(s) { const d = digitsOf(s); return d ? String(parseInt(d, 10)) : '0'; }
   /* 초안의 세 칸을 계산·저장용 숫자로 */
   function draftVals() { return { w: weightVal(draft.w), s1: intVal(draft.s1), s2: intVal(draft.s2) }; }
@@ -9210,11 +9408,13 @@
 
   function renderFields() {
     const els = fieldEls();
-    $('#bv-w').textContent = fmtWeight(draft.w);       // 무게: 소수 2자리
+    $('#bv-w').textContent = wclean(draft.w) || '0';   // 무게: 친 그대로(자율 — 사용자 지시)
     $('#bv-s1').textContent = fmtInt(draft.s1);        // 슬럼프: 정수
     $('#bv-s2').textContent = fmtInt(draft.s2);
     $('#bv-fl').textContent = digitsOf(draft.fl) ? (fmtInt(draft.fl) + '층') : '—';
     ['w', 's1', 's2', 'fl'].forEach((f) => els[f].classList.toggle('on', active === f));
+    const mi = $('#bang-memo');
+    if (mi && mi.value !== (draft.memo || '')) mi.value = draft.memo || '';
   }
 
   /* 결과 카드 HTML — 방통 화면과 작업 편집기(방통 모드)가 같이 쓴다 */
@@ -9283,14 +9483,19 @@
 
   function renderAll() { renderFields(); renderResult(); renderSup(); renderPhotos(); saveDraft(); }
 
-  /* ---------------- 키패드 (숫자만 — 소수점 키 없음) ---------------- */
+  /* ---------------- 키패드 ----------------
+     무게 칸은 소수점(.)까지 자율 입력(사용자 지시), 슬럼프·층은 정수만. */
   function press(k) {
-    let s = digitsOf(draft[active]);
+    let s = (active === 'w') ? wclean(draft[active]) : digitsOf(draft[active]);
     if (k === 'del') s = s.slice(0, -1);
     else if (k === 'clr') s = '';
-    else if (/^[0-9]$/.test(k)) {
-      s = s + k;
-      const max = (active === 'w') ? 6 : (active === 'fl' ? 2 : 4);   // 무게 9999.99 / 슬럼프 9999 / 층 99
+    else if (k === '.') {
+      if (active !== 'w') return;                       // 정수 칸에선 무시
+      if (s.indexOf('.') >= 0) return;
+      s = (s === '' ? '0.' : s + '.');
+    } else if (/^[0-9]$/.test(k)) {
+      s = (s === '0') ? k : (s + k);
+      const max = (active === 'w') ? 10 : (active === 'fl' ? 2 : 4);  // 무게는 넉넉히·슬럼프 9999·층 99
       if (s.length > max) return;
     }
     draft[active] = s;
@@ -9310,6 +9515,7 @@
       if (j && typeof j === 'object') {
         draft = Object.assign(EMPTY(), {
           w: j.w || '', s1: j.s1 || '', s2: j.s2 || '', fl: j.fl || '',
+          memo: j.memo || '',
           dong: j.dong || '', supervisor: j.supervisor || '', supPhone: j.supPhone || '',
           photos: Array.isArray(j.photos) ? j.photos.slice() : []
         });
@@ -9411,6 +9617,7 @@
     const rec = {
       day: editing ? editing.day : U.dayKey(Date.now()),   // 수정은 원래 날짜를 지킨다
       dong: draft.dong, floor: digitsOf(draft.fl),
+      memo: (draft.memo || '').trim(),
       supervisor: draft.supervisor, supPhone: draft.supPhone,
       jugu: U.jugu(),
       photos: draft.photos.slice(),
@@ -9454,10 +9661,11 @@
     if (!editing) stash = draft;                       // 쓰던 새 입력은 잠시 보관
     editing = { id: b.id, day: b.day, order: b.order, createdAt: b.createdAt };
     draft = {
-      w: (b.w != null) ? String(Math.round(b.w * 100)) : '',
+      w: (b.w != null) ? String(b.w) : '',               // 자율 입력 — 저장값 그대로 되싣는다
       s1: (b.s1 != null) ? String(b.s1) : '',
       s2: (b.s2 != null) ? String(b.s2) : '',
       fl: digitsOf(b.floor),
+      memo: b.memo || '',
       dong: b.dong || '', supervisor: b.supervisor || '', supPhone: b.supPhone || '',
       photos: (b.photos || []).slice()
     };
@@ -9511,7 +9719,8 @@
       const sub = [b.supervisor,
                    (r.kgm3 != null ? (r.kgm3 + 'kg/㎥') : ''),
                    (r.slump != null ? '슬럼프 ' + r.slump + 'mm' : ''),
-                   ((b.photos || []).length ? '사진 ' + b.photos.length + '장' : '')]
+                   ((b.photos || []).length ? '사진 ' + b.photos.length + '장' : ''),
+                   (b.memo || '')]
         .filter(Boolean).join(' · ');
       main.appendChild(U.el('span', 'bang-si-sub', sub));
       // 본문을 탭하면 수정 모드로 싣는다(사용자 지시)
@@ -9544,7 +9753,8 @@
   async function exportBang(b) {
     const r = bangStats(b);
     const head = bangTitle(b);
-    const text = (head !== '감리 미지정' ? (head + '\n') : '') + report(r);
+    const text = (head !== '감리 미지정' ? (head + '\n') : '') + report(r) +
+                 (b.memo ? ('\n' + b.memo) : '');
     let blobs = [];
     if ((b.photos || []).length) {
       U.toast('사진 준비 중…', 60000);
@@ -9622,6 +9832,8 @@
 
     $('#bang-dong').addEventListener('click', pickDong);
     $('#bang-sup').addEventListener('click', pickSup);
+    const mi = $('#bang-memo');
+    if (mi) mi.addEventListener('input', () => { draft.memo = mi.value; saveDraft(); });
     $('#bang-save').addEventListener('click', saveBang);
     $('#bang-copy').addEventListener('click', copyReport);
 
@@ -9989,6 +10201,7 @@
       if (r.kgm3 != null) meta.push(r.kgm3 + 'kg/㎥');
       if (r.slump != null) meta.push('슬럼프 ' + r.slump + 'mm');
       if ((b.photos || []).length) meta.push('사진 ' + b.photos.length + '장');
+      if (b.memo) meta.push(b.memo);
       body.appendChild(U.el('div', 'task-meta', meta.join(' · ')));
       row.appendChild(body);
       row.addEventListener('click', () => Bangtong.openEdit(b));

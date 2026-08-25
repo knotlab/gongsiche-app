@@ -345,13 +345,13 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
 .spec-pill.sp-bang{color:var(--accent);justify-content:center}
 .spec-pill.sp-bang .sp-name{font-size:13px;white-space:nowrap;letter-spacing:-.04em}
 /* 방통 모드 — 공시체 전용 구획을 숨기고 이 화면에서 바로 방통을 입력한다(화면 이동 없음) */
+/* 메모(#tk-part-field)는 방통에도 있다(사용자 지시) — 숨기지 않는다 */
 #view-task.bangmode .two-col,
 #view-task.bangmode .age-hint,
 #view-task.bangmode #tk-due-when,
 #view-task.bangmode #tk-due-note,
 #view-task.bangmode #tk-subtabs,
 #view-task.bangmode #tk-sets-field,
-#view-task.bangmode #tk-part-field,
 #view-task.bangmode .photomark-check{display:none}
 #tk-bang-fields .bang-pair{margin-top:10px}
 #tk-bang-fields .bang-card{margin-top:12px}
@@ -1200,6 +1200,12 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
   color:var(--text-2);font-size:15px;font-weight:700;
 }
 .bang-sup.set{color:var(--text);border-color:var(--accent)}
+.bang-memo{
+  width:100%;min-height:var(--tap);padding:10px 14px;
+  border:1px solid var(--line);border-radius:var(--r-md);
+  background:var(--surface);color:var(--text);font-size:15px;font-weight:600;
+}
+.bang-memo:focus{outline:none;border-color:var(--accent)}
 /* 동+층 한 줄 — 동 버튼이 넓게, 층 칸은 좁게 */
 .bang-save-box .bang-pair{margin-top:0}
 .bang-pair .bang-sup{flex:1.4 1 0;width:auto;display:flex;align-items:center}
