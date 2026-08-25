@@ -4828,7 +4828,7 @@
     return true;
   }
 
-  /* 「수중 평균 맞춰 채우기」는 28일 작업의 봉함 칸에 연결됐을 때만 의미가 있다 */
+  /* 「봉함 채우기」(수중 평균 기반)는 28일 작업의 봉함 칸에 연결됐을 때만 의미가 있다 */
   function syncFillSealBtn() {
     const btn = U.$('#btn-fill-seal');
     if (btn) btn.classList.toggle('hidden', !(linkedId && linkedSub === 'seal'));
