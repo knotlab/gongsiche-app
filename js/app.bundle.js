@@ -1322,6 +1322,22 @@
     });
   }
 
+  /* 지금 DB 전체(작업+방통)를 백업 모양(info)으로 — 수동 백업 파일 내보내기가 쓴다.
+     미러·restoreBackup 과 같은 형식이라 그대로 되살릴 수 있다. */
+  function fullSnapshot() {
+    return run((db) => {
+      const t = db.transaction(['tasks', 'bangs']);
+      return Promise.all([
+        reqp(t.objectStore('tasks').getAll()),
+        reqp(t.objectStore('bangs').getAll())
+      ]);
+    }).then((pair) => ({
+      at: Date.now(), day: U.dayKey(Date.now()),
+      n: (pair[0] || []).length,
+      tasks: pair[0] || [], bangs: pair[1] || []
+    }));
+  }
+
   function bakInfo(key) {
     try {
       const j = JSON.parse(localStorage.getItem(key));
@@ -1531,7 +1547,7 @@
     allTasks: allTasks,
     putBang: putBang, bangsOf: bangsOf, allBangs: allBangs, getBang: getBang, deleteBang: deleteBang,
     normalizeSets: normalizeSets,
-    taskCount: taskCount, backupInfo: backupInfo, backupNow: backupNow,
+    taskCount: taskCount, backupInfo: backupInfo, backupNow: backupNow, fullSnapshot: fullSnapshot,
     backupDaily: backupDaily, restoreBackup: restoreBackup,
     backupToFileDaily: backupToFileDaily, fileBackupInfo: fileBackupInfo,
     mirrorInfo: mirrorInfo, mirrorSoon: mirrorSoon,
@@ -2376,6 +2392,42 @@
     return new Blob(parts.concat([centralBlob, eocd]), { type: 'application/zip' });
   }
 
+  /* ZIP 해제 — makeZip 이 만든 무압축(STORE) ZIP 전용(백업 불러오기).
+     중앙 디렉터리를 뒤에서부터 찾아 항목을 자른다. 압축(method≠0)은 다루지 않는다. */
+  function parseZip(buf) {
+    const u8 = new Uint8Array(buf);
+    const dv = new DataView(buf);
+    const dec = new TextDecoder();
+    // EOCD(0x06054b50) 를 끝에서부터 찾는다 (코멘트 최대 64KB)
+    let eocd = -1;
+    for (let i = u8.length - 22; i >= Math.max(0, u8.length - 22 - 65536); i--) {
+      if (dv.getUint32(i, true) === 0x06054B50) { eocd = i; break; }
+    }
+    if (eocd < 0) throw new Error('ZIP 형식이 아닙니다');
+    const count = dv.getUint16(eocd + 10, true);
+    let p = dv.getUint32(eocd + 16, true);           // 중앙 디렉터리 시작
+    const out = [];
+    for (let k = 0; k < count; k++) {
+      if (dv.getUint32(p, true) !== 0x02014B50) break;
+      const method = dv.getUint16(p + 10, true);
+      const size = dv.getUint32(p + 24, true);
+      const nameLen = dv.getUint16(p + 28, true);
+      const extraLen = dv.getUint16(p + 30, true);
+      const cmtLen = dv.getUint16(p + 32, true);
+      const localOff = dv.getUint32(p + 42, true);
+      const name = dec.decode(u8.subarray(p + 46, p + 46 + nameLen));
+      if (method === 0) {
+        // 로컬 헤더의 이름·엑스트라 길이를 다시 읽어 데이터 시작점을 잡는다
+        const ln = dv.getUint16(localOff + 26, true);
+        const le = dv.getUint16(localOff + 28, true);
+        const start = localOff + 30 + ln + le;
+        out.push({ name: name, data: u8.subarray(start, start + size) });
+      }
+      p += 46 + nameLen + extraLen + cmtLen;
+    }
+    return out;
+  }
+
   /* 이름 붙은 파일 하나 내보내기 (ZIP 등) — exportItems 는 .jpg 전용이라 따로 간다 */
   async function exportFile(blob, name, title) {
     const c = cap();
@@ -2410,7 +2462,7 @@
 
   global.Share = {
     exportItems: exportItems,
-    makeZip: makeZip, exportFile: exportFile,
+    makeZip: makeZip, parseZip: parseZip, exportFile: exportFile,
     isNative: () => !!cap(),
     hasWebShare: () => !!(navigator.share)
   };
@@ -10018,7 +10070,135 @@
     }
   }
 
+  /* ---------------- 수동 백업 파일 (아이폰 증발 대응) ----------------
+     아이폰(PWA)은 웹뷰 밖 자동 사본(SharedPreferences·파일백업)이 없다 — 오리진 저장소가
+     통째로 날아가면(아이콘 재설치·저장공간 축출) 미러까지 같이 죽는다. 그래서 **오리진 밖**
+     (파일 앱·iCloud·카톡)으로 내보내는 수동 백업이 아이폰의 유일한 진짜 안전판이다. */
+  async function openBackupSheet() {
+    // 진단 — 다음 사고 때 원인을 좁힐 수 있게 상태를 보여준다
+    let diag = '';
+    try {
+      const per = (navigator.storage && navigator.storage.persisted)
+        ? await navigator.storage.persisted() : null;
+      const est = await Store.estimate();
+      const bits = [];
+      if (per != null) bits.push('영구저장 ' + (per ? '승인' : '미승인'));
+      if (est && est.usage != null) bits.push(U.fmtBytes(est.usage) + ' 사용');
+      diag = bits.join(' · ');
+    } catch (e) {}
+
+    const stamp = U.dayKey(Date.now()).replace(/-/g, '');
+    const items = [];
+    items.push({
+      label: '백업 내보내기 (.json)', cls: 'strong',
+      sub: '작업·방통 전체(사진 제외) — 파일 앱·카톡으로 보관',
+      onPick: async () => {
+        try {
+          const info = await Store.fullSnapshot();
+          if (!info.tasks.length && !info.bangs.length) { U.toast('백업할 데이터가 없습니다'); return; }
+          const blob = new Blob([JSON.stringify(info)], { type: 'application/json' });
+          const how = await Share.exportFile(blob, '공시체백업_' + stamp + '.json', '공시체 백업');
+          U.toast(how === 'cancel' ? '취소했습니다'
+                : how === 'fail' ? '내보내기에 실패했습니다'
+                : '백업 파일을 내보냈습니다 — 파일 앱이나 카톡 나에게 보내기로 보관하세요', 4000);
+        } catch (e) { console.error(e); U.toast('백업을 만들지 못했습니다'); }
+      }
+    });
+    items.push({
+      label: '전체 백업 내보내기 (.zip — 사진 포함)',
+      sub: '사진 원본까지 담습니다 — 장수가 많으면 오래 걸립니다',
+      onPick: async () => {
+        U.toast('전체 백업 만드는 중…', 120000);
+        try {
+          const info = await Store.fullSnapshot();
+          if (!info.tasks.length && !info.bangs.length) { U.toast('백업할 데이터가 없습니다'); return; }
+          // 참조되는 사진 id 전부(작업 두 칸 + 방통)
+          const ids = [];
+          const mark = Object.create(null);
+          const add = (p) => { if (p && !mark[p]) { mark[p] = 1; ids.push(p); } };
+          info.tasks.forEach((t) => {
+            (t.photos || []).forEach(add);
+            if (t.sub) Spec.SUBS.forEach((s) => (((t.sub[s.key] || {}).photos) || []).forEach(add));
+          });
+          (info.bangs || []).forEach((b) => (b.photos || []).forEach(add));
+          const entries = [{ name: 'backup.json', data: new TextEncoder().encode(JSON.stringify(info)) }];
+          let got = 0;
+          for (const id of ids) {
+            try {
+              const p = await Store.getPhoto(id);
+              const b = p ? await Store.fullBlob(p) : null;
+              if (b) { entries.push({ name: 'photos/' + id + '.jpg', data: new Uint8Array(await b.arrayBuffer()) }); got++; }
+            } catch (e) {}
+          }
+          const zip = Share.makeZip(entries);
+          const how = await Share.exportFile(zip, '공시체백업_' + stamp + '.zip', '공시체 전체 백업');
+          U.toast(how === 'cancel' ? '취소했습니다'
+                : how === 'fail' ? '내보내기에 실패했습니다'
+                : '전체 백업(사진 ' + got + '장)을 내보냈습니다', 4000);
+        } catch (e) { console.error(e); U.toast('백업을 만들지 못했습니다'); }
+      }
+    });
+    items.push({ sep: true });
+    items.push({
+      label: '백업 파일 불러오기',
+      sub: '.json 또는 .zip — 같은 작업은 파일 내용으로 덮어씁니다',
+      onPick: () => { const f = U.$('#bak-file'); if (f) { f.value = ''; f.click(); } }
+    });
+    U.sheet('백업 파일' + (diag ? '\n' + diag : ''), items);
+  }
+
+  /* 백업 파일 불러오기 — .json(메타) / .zip(사진 포함, makeZip 산출물) */
+  async function importBackupFile(file) {
+    if (!file) return;
+    U.toast('백업 읽는 중…', 120000);
+    let info = null, photoEntries = [];
+    try {
+      if (/\.zip$/i.test(file.name)) {
+        const entries = Share.parseZip(await file.arrayBuffer());
+        const bj = entries.find((e) => e.name === 'backup.json');
+        if (!bj) { U.toast('backup.json 이 없는 압축입니다'); return; }
+        info = JSON.parse(new TextDecoder().decode(bj.data));
+        photoEntries = entries.filter((e) => /^photos\/.+\.jpg$/i.test(e.name));
+      } else {
+        info = JSON.parse(await file.text());
+      }
+    } catch (e) { console.error(e); U.toast('백업 파일을 읽지 못했습니다'); return; }
+    if (!info || (!Array.isArray(info.tasks) && !Array.isArray(info.bangs))) {
+      U.toast('공시체 백업 형식이 아닙니다'); return;
+    }
+    const n = (info.tasks || []).length, nb = (info.bangs || []).length;
+    U.confirmSheet(
+      '백업을 불러올까요?\n작업 ' + n + '건 · 방통 ' + nb + '건' +
+      (photoEntries.length ? ' · 사진 ' + photoEntries.length + '장' : '') +
+      '\n같은 작업은 파일 내용으로 덮어씁니다', '불러오기',
+      async () => {
+        U.toast('복원 중…', 120000);
+        try {
+          // 사진 먼저 되살린다(있는 id 는 건너뜀) — 그래야 restoreBackup 세척에서 살아남는다
+          for (const pe of photoEntries) {
+            const id = pe.name.slice('photos/'.length).replace(/\.jpg$/i, '');
+            try {
+              const exist = await Store.getPhoto(id);
+              if (exist) continue;
+              const img = await U.processImage(new Blob([pe.data], { type: 'image/jpeg' }),
+                                               { maxSide: 1600, thumbSide: 320, quality: 0.82 });
+              await Store.putPhoto(Object.assign({ id: id }, img));
+            } catch (e) { console.warn('[bak photo]', e); }
+          }
+          const k = await Store.restoreBackup(info);
+          U.toast('작업 ' + k + '건을 복원했습니다');
+          refresh();
+        } catch (e) { console.error(e); U.toast('복원하지 못했습니다'); }
+      });
+  }
+
   function bindSettings() {
+    const bakRow = U.$('#opt-bak-row');
+    if (bakRow) bakRow.addEventListener('click', openBackupSheet);
+    const bakFile = U.$('#bak-file');
+    if (bakFile) bakFile.addEventListener('change', (e) => {
+      importBackupFile(e.target.files && e.target.files[0]);
+    });
     const dark = U.$('#opt-dark');
     if (dark) dark.addEventListener('change', () => U.setTheme(dark.checked ? 'dark' : 'light'));
     const sd = U.$('#opt-sd');

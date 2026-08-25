@@ -280,6 +280,12 @@
         <span class="opt-label">서버 백업 <b class="beta">BETA</b></span>
         <span class="opt-value" id="opt-sync-val">꺼짐</span>
       </button>
+      <!-- 수동 백업 파일 — 아이폰(PWA)은 오리진 밖 자동백업이 없어 이게 유일한 외부 사본이다 -->
+      <button class="opt-row opt-btn" id="opt-bak-row">
+        <span class="opt-label">백업 파일</span>
+        <span class="opt-value" id="opt-bak-val">내보내기·불러오기</span>
+      </button>
+      <input type="file" id="bak-file" accept=".json,.zip,application/json,application/zip" hidden>
     </div>
 
   </div>
