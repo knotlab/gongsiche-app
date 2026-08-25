@@ -4300,9 +4300,9 @@
   const K_DIGITS = 'gsc.digits.v1';
   const K_SPREAD = 'gsc.fill.spread.v1';
   const DEFAULT_FACTOR = 0.97;
-  const DEFAULT_SPREAD = 0.35;
-  const MIN_SPREAD = 0.10;
-  const MAX_SPREAD = 1.50;
+  const DEFAULT_SPREAD = 1;      // 편차 범위 1~3 (사용자 지시)
+  const MIN_SPREAD = 1;
+  const MAX_SPREAD = 3;
 
   let digits = '';
   let entries = [];        // [{v:Number, d:'2453'}]
