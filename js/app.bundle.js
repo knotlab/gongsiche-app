@@ -5694,8 +5694,14 @@
           if (!pc.folder) continue;            // 모르는 분류는 만들지 않는다
           const ids = pc.box.photos || [];
           const sets = Store.normalizeSets(pc.box);
+          // 한 칸에 세트가 여럿(회사·LOT별)이면 세트 사이에 빈 행 하나 — 세로로 구분(사용자 지시).
+          // null 은 makeXlsx 가 셀을 안 만들어 빈 칸이 된다.
           const vals = [];
-          sets.forEach((s) => (s.values || []).forEach((v) => vals.push(v.v)));
+          sets.forEach((s) => {
+            if (!(s.values || []).length) return;
+            if (vals.length) vals.push(null);
+            s.values.forEach((v) => vals.push(v.v));
+          });
           if (!ids.length && !vals.length) continue;
           const key = uniq(pc.folder + '/' + nameBase);
 
