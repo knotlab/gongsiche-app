@@ -5494,7 +5494,7 @@
       const hasVals = n ? rows.some((t) => Task.filledSets(t).length > 0) : false;
       zb.disabled = (n === 0) || (p === 0 && !hasVals);
       zb.classList.toggle('off', zb.disabled);
-      zb.textContent = n ? ('파일 내보내기 — ' + mmdd(U.dayKey(base.getTime())) + '.zip') : '파일 내보내기';
+      zb.textContent = n ? ('파일 내보내기 — ' + zipTitle()) : '파일 내보내기';
     }
     btn.textContent = (n && p) ? ('날짜별 ' + gd) : '날짜별';
     if (btnSup) btnSup.textContent = (n && p) ? ('감리별 ' + gs) : '감리별';
@@ -5669,10 +5669,12 @@
      수중 칸의 폴더명은 카톡 문구와 같은 「28일강도」다(사용자 지시). */
   const ZIP_FOLDER = { vert: '수직', horiz: '수평', filler: '필러', water: '28일강도', seal: '봉함' };
   const mmdd = (d) => (d ? String(d).slice(5).replace('-', '') : '0000');
+  // 압축파일 이름 — 「8월 25일 강도시험분.zip」 꼴(사용자 지시)
+  const zipTitle = () => (base.getMonth() + 1) + '월 ' + base.getDate() + '일 강도시험분.zip';
 
   async function exportDayZip(rows) {
     U.toast('압축파일 만드는 중…', 60000);
-    const zipName = mmdd(U.dayKey(base.getTime())) + '.zip';
+    const zipName = zipTitle();
     const entries = [];
     const used = Object.create(null);          // 같은 동·날짜가 겹치면 _2, _3 …
     const uniq = (name) => {
