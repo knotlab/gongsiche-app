@@ -882,6 +882,12 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
 .bat-bar{flex-wrap:wrap}
 .bat-info{flex:1 0 100%;font-size:13px;font-weight:700;color:var(--text-2);margin-bottom:2px}
 .bat-bar .btn{flex:1 1 0;min-width:0;height:50px}
+/* 파일(압축) 내보내기 — 날짜별·감리별 아래 한 줄 전체(사용자 지시) */
+.bat-bar .btn-zip{
+  flex:1 0 100%;height:var(--tap);
+  background:var(--surface-2);color:var(--text);border:1px solid var(--line);
+  font-weight:800;
+}
 .btn.off{opacity:.45}
 #view-batch .topbar .mini-btn{flex:0 0 auto}
 

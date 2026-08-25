@@ -2392,6 +2392,64 @@
     return new Blob(parts.concat([centralBlob, eocd]), { type: 'application/zip' });
   }
 
+  /* ---------------- 엑셀(.xlsx) 생성 ----------------
+     xlsx = XML 몇 장을 담은 ZIP 이다 — makeZip 을 그대로 재활용해 라이브러리 없이 만든다.
+     headers = 열 제목(작업 이름), cols = 열별 숫자 배열(위→아래). */
+  function xmlEsc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  function colRef(i) {          // 0→A, 25→Z, 26→AA …
+    let s = ''; i++;
+    while (i) { i--; s = String.fromCharCode(65 + (i % 26)) + s; i = (i / 26) | 0; }
+    return s;
+  }
+  function makeXlsx(headers, cols) {
+    const enc = new TextEncoder();
+    let rows = '<row r="1">';
+    headers.forEach((h, i) => {
+      rows += '<c r="' + colRef(i) + '1" t="inlineStr"><is><t>' + xmlEsc(h) + '</t></is></c>';
+    });
+    rows += '</row>';
+    const maxLen = cols.reduce((m, c) => Math.max(m, c.length), 0);
+    for (let r = 0; r < maxLen; r++) {
+      let row = '<row r="' + (r + 2) + '">';
+      cols.forEach((c, i) => {
+        if (c[r] != null) row += '<c r="' + colRef(i) + (r + 2) + '"><v>' + c[r] + '</v></c>';
+      });
+      rows += row + '</row>';
+    }
+    const XMLH = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    const sheet = XMLH +
+      '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+      '<sheetData>' + rows + '</sheetData></worksheet>';
+    const ct = XMLH +
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+      '<Default Extension="xml" ContentType="application/xml"/>' +
+      '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+      '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
+      '</Types>';
+    const rels = XMLH +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>' +
+      '</Relationships>';
+    const wb = XMLH +
+      '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ' +
+      'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+      '<sheets><sheet name="강도값" sheetId="1" r:id="rId1"/></sheets></workbook>';
+    const wbrels = XMLH +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>' +
+      '</Relationships>';
+    return makeZip([
+      { name: '[Content_Types].xml', data: enc.encode(ct) },
+      { name: '_rels/.rels', data: enc.encode(rels) },
+      { name: 'xl/workbook.xml', data: enc.encode(wb) },
+      { name: 'xl/_rels/workbook.xml.rels', data: enc.encode(wbrels) },
+      { name: 'xl/worksheets/sheet1.xml', data: enc.encode(sheet) }
+    ]);
+  }
+
   /* ZIP 해제 — makeZip 이 만든 무압축(STORE) ZIP 전용(백업 불러오기).
      중앙 디렉터리를 뒤에서부터 찾아 항목을 자른다. 압축(method≠0)은 다루지 않는다. */
   function parseZip(buf) {
@@ -2428,8 +2486,8 @@
     return out;
   }
 
-  /* 이름 붙은 파일 하나 내보내기 (ZIP 등) — exportItems 는 .jpg 전용이라 따로 간다 */
-  async function exportFile(blob, name, title) {
+  /* 공유 시트로 파일 하나 보내기(카톡 등) — 사용자가 「공유」를 눌렀을 때만 쓴다 */
+  async function shareFile(blob, name, title) {
     const c = cap();
     if (c) {
       try {
@@ -2442,7 +2500,7 @@
         return 'capacitor';
       } catch (e) {
         if (isCancel(e)) return 'cancel';
-        console.warn('[share] zip capacitor 실패', e);
+        console.warn('[share] file capacitor 실패', e);
         return 'fail';
       }
     }
@@ -2452,6 +2510,10 @@
       try { await navigator.share({ files: [file], title: title || name }); return 'webshare'; }
       catch (e) { if (isCancel(e)) return 'cancel'; }
     }
+    return downloadOne(blob, name);
+  }
+
+  function downloadOne(blob, name) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = name;
@@ -2460,9 +2522,39 @@
     return 'download';
   }
 
+  /* 이름 붙은 파일 하나 내보내기(ZIP·백업).
+     네이티브는 **폰에 저장**(문서/공시체백업)이 기본이다 — 공유 시트를 바로 열면
+     카톡(나와의 채팅)으로 새는 것처럼 보인다(사용자 지적). 공유는 호출부 토스트의
+     「공유」 버튼(shareFile)으로만 한다. 웹(아이폰 PWA)은 공유 시트가 파일 앱으로
+     가는 유일한 길이라 그대로 둔다. */
+  async function exportFile(blob, name, title) {
+    const c = cap();
+    if (c) {
+      try {
+        if (!c.Filesystem) throw new Error('Filesystem 플러그인 없음');
+        const data = await blobToBase64(blob);
+        await c.Filesystem.writeFile({
+          path: '공시체백업/' + name, data: data, directory: 'DOCUMENTS', recursive: true
+        });
+        return 'saved';                          // 문서/공시체백업/<name>
+      } catch (e) {
+        console.warn('[share] 문서 저장 실패 — 공유 시트로 폴백', e);
+        return shareFile(blob, name, title);
+      }
+    }
+    let file = null;
+    try { file = new File([blob], name, { type: blob.type || 'application/zip' }); } catch (e) {}
+    if (file && canWebShareFiles([file])) {
+      try { await navigator.share({ files: [file], title: title || name }); return 'webshare'; }
+      catch (e) { if (isCancel(e)) return 'cancel'; }
+    }
+    return downloadOne(blob, name);
+  }
+
   global.Share = {
     exportItems: exportItems,
-    makeZip: makeZip, parseZip: parseZip, exportFile: exportFile,
+    makeZip: makeZip, parseZip: parseZip, makeXlsx: makeXlsx,
+    exportFile: exportFile, shareFile: shareFile,
     isNative: () => !!cap(),
     hasWebShare: () => !!(navigator.share)
   };
@@ -5402,13 +5494,20 @@
     const rows = n ? selected() : [];
     const gd = n ? Task.groupByDay(rows).filter((x) => x.photos > 0).length : 0;
     const gs = n ? Task.groupForExport(rows).filter((x) => x.photos > 0).length : 0;
-    // 사진이 없어도 강도값이 있으면 파일(압축) 내보내기는 되므로 버튼을 살려 둔다
-    const hasVals = n ? rows.some((t) => Task.filledSets(t).length > 0) : false;
-    btn.disabled = (n === 0) || (gd === 0 && !hasVals);
+    const off = (n === 0 || p === 0);
+    btn.disabled = off || gd === 0;
     btn.classList.toggle('off', btn.disabled);
     if (btnSup) {
-      btnSup.disabled = (n === 0) || (gs === 0 && !hasVals);
+      btnSup.disabled = off || gs === 0;
       btnSup.classList.toggle('off', btnSup.disabled);
+    }
+    // 파일(압축) 내보내기 — 사진이 없어도 강도값만 있으면 된다
+    const zb = U.$('#tasks-zip');
+    if (zb) {
+      const hasVals = n ? rows.some((t) => Task.filledSets(t).length > 0) : false;
+      zb.disabled = (n === 0) || (p === 0 && !hasVals);
+      zb.classList.toggle('off', zb.disabled);
+      zb.textContent = n ? ('파일 내보내기 — ' + mmdd(U.dayKey(base.getTime())) + '.zip') : '파일 내보내기';
     }
     btn.textContent = (n && p) ? ('날짜별 ' + gd) : '날짜별';
     if (btnSup) btnSup.textContent = (n && p) ? ('감리별 ' + gs) : '감리별';
@@ -5577,9 +5676,11 @@
   }
 
   /* ---------------- 파일(압축) 내보내기 ----------------
-     기준일 이름의 ZIP(예: 0815.zip) 하나로 — 분류 폴더(수직/수평/필러/수중/봉함, 있는 것만),
-     각 폴더에 사진(동_타설-시험.jpg)과 강도값 텍스트(값은 줄바꿈 구분). 사용자 지시 양식. */
-  const ZIP_FOLDER = { vert: '수직', horiz: '수평', filler: '필러', water: '수중', seal: '봉함' };
+     기준일 이름의 ZIP(예: 0815.zip) 하나로 — 분류 폴더(수직/수평/필러/28일강도/봉함, 있는 것만),
+     각 폴더에 사진(동_타설-시험_n.jpg)과 **강도값 엑셀 한 장**(강도값.xlsx — 작업마다 열,
+     값은 위→아래. 같은 분류라도 열 제목으로 구분). 사용자 지시 양식.
+     수중 칸의 폴더명은 카톡 문구와 같은 「28일강도」다(사용자 지시). */
+  const ZIP_FOLDER = { vert: '수직', horiz: '수평', filler: '필러', water: '28일강도', seal: '봉함' };
   const mmdd = (d) => (d ? String(d).slice(5).replace('-', '') : '0000');
 
   async function exportDayZip(rows) {
@@ -5591,6 +5692,7 @@
       if (!used[name]) { used[name] = 1; return name; }
       return name + '_' + (++used[name]);
     };
+    const sheets = Object.create(null);        // 폴더 → [{ header, vals }] (엑셀 열들)
 
     try {
       for (const t of rows) {
@@ -5623,17 +5725,31 @@
             }
           }
           if (vals.length) {
-            // 강도값 텍스트 — 값 하나가 한 줄(사용자 지시: 구분자는 엔터)
-            const txt = vals.map((v) => U.fix2(v)).join('\r\n');
-            entries.push({ name: key + '.txt', data: new TextEncoder().encode(txt) });
+            // 강도값은 폴더당 엑셀 한 장에 모은다 — 작업 이름이 열 제목(같은 분류 구분)
+            (sheets[pc.folder] = sheets[pc.folder] || [])
+              .push({ header: key.slice(pc.folder.length + 1), vals: vals });
           }
         }
+      }
+
+      // 폴더별 강도값.xlsx — 열=작업, 행=값(위→아래)
+      for (const folder of Object.keys(sheets)) {
+        const cols = sheets[folder];
+        const xlsx = Share.makeXlsx(cols.map((c) => c.header), cols.map((c) => c.vals));
+        entries.push({ name: folder + '/강도값.xlsx', data: new Uint8Array(await xlsx.arrayBuffer()) });
       }
 
       if (!entries.length) { U.toast('내보낼 사진·강도값이 없습니다'); return; }
       const zip = Share.makeZip(entries);
       const how = await Share.exportFile(zip, zipName, zipName);
-      if (how === 'cancel') U.toast('내보내기를 취소했습니다');
+      if (how === 'saved') {
+        // 폰에 저장이 기본 — 카톡 등으로 보내는 건 원할 때만(사용자 지시)
+        U.toast('문서/공시체백업/' + zipName + ' 에 저장했습니다', 6000, {
+          label: '공유',
+          onClick: () => { Share.shareFile(zip, zipName, zipName); }
+        });
+      }
+      else if (how === 'cancel') U.toast('내보내기를 취소했습니다');
       else if (how === 'fail') U.toast('공유에 실패했습니다');
       else if (how === 'download') U.toast(zipName + ' 파일로 저장했습니다');
       else U.toast(zipName + ' — 보낼 앱을 선택하세요');
@@ -5652,10 +5768,7 @@
     const bySup = (axis === 'sup');
     const groups = (bySup ? Task.groupForExport(rows) : Task.groupByDay(rows))
       .filter((g) => g.photos > 0);
-    // 사진이 없어도 강도값이 있으면 파일(압축) 내보내기는 된다 — 시트를 아예 안 여는 건
-    // 사진도 값도 없을 때뿐이다
-    const hasVals = rows.some((t) => Task.filledSets(t).length > 0);
-    if (!groups.length && !hasVals) {
+    if (!groups.length) {
       // 봉함은 감리축으로 안 보낸다 — 사진이 없는 것과 구별해 알린다
       if (bySup && rows.every(Task.supAxisOff)) {
         U.toast('봉함은 감리별로 보내지 않습니다\n날짜별로 보내세요', 3500);
@@ -5666,22 +5779,13 @@
     }
 
     const items = [];
-    // 파일(압축) 내보내기 — 카톡 묶음과 별개의 보관·전달용(사용자 지시 양식)
+    // 사진 도장(동·분류·날짜) — 원할 때만(사용자 지시). 설정은 다음에도 기억된다.
     items.push({
-      label: '파일로 내보내기 — ' + mmdd(U.dayKey(base.getTime())) + '.zip',
-      sub: '분류 폴더별 사진 + 강도값 텍스트 압축파일',
-      onPick: () => exportDayZip(rows)
+      label: '사진 도장: ' + (U.wmPref() ? '켬' : '끔'),
+      sub: '사진 귀퉁이에 동·분류·날짜를 찍어 보냅니다 — 탭해서 ' + (U.wmPref() ? '끄기' : '켜기'),
+      onPick: () => { U.setWmPref(!U.wmPref()); askSend(axis); }
     });
     items.push({ sep: true });
-    // 사진 도장(동·분류·날짜) — 원할 때만(사용자 지시). 설정은 다음에도 기억된다.
-    if (groups.length) {
-      items.push({
-        label: '사진 도장: ' + (U.wmPref() ? '켬' : '끔'),
-        sub: '사진 귀퉁이에 동·분류·날짜를 찍어 보냅니다 — 탭해서 ' + (U.wmPref() ? '끄기' : '켜기'),
-        onPick: () => { U.setWmPref(!U.wmPref()); askSend(axis); }
-      });
-      items.push({ sep: true });
-    }
     groups.forEach((g) => {
       const over = g.photos > WARN_PHOTOS;
       const who = bySup ? (g.sup || '감리 미지정') : (g.items.length + '건');
@@ -5719,6 +5823,14 @@
     // 목록 필터 — 종류·공구·감리 (사용자 지시: 전송 시트가 아니라 목록에서)
     const fb = U.$('#tasks-filter');
     if (fb) fb.addEventListener('click', pickFilter);
+
+    // 파일(압축) 내보내기 — 전용 버튼(사용자 지시: 시트 안 아님)
+    const zb = U.$('#tasks-zip');
+    if (zb) zb.addEventListener('click', () => {
+      const rows = selected();
+      if (!rows.length) { U.toast('작업을 선택하세요'); return; }
+      exportDayZip(rows);
+    });
 
     // 홈뿐 아니라 여기서도 등록한다. 보고 있는 날짜에 그대로 만든다.
     U.$('#tasks-add').addEventListener('click', () => {
@@ -10097,10 +10209,16 @@
           const info = await Store.fullSnapshot();
           if (!info.tasks.length && !info.bangs.length) { U.toast('백업할 데이터가 없습니다'); return; }
           const blob = new Blob([JSON.stringify(info)], { type: 'application/json' });
-          const how = await Share.exportFile(blob, '공시체백업_' + stamp + '.json', '공시체 백업');
-          U.toast(how === 'cancel' ? '취소했습니다'
-                : how === 'fail' ? '내보내기에 실패했습니다'
-                : '백업 파일을 내보냈습니다 — 파일 앱이나 카톡 나에게 보내기로 보관하세요', 4000);
+          const name = '공시체백업_' + stamp + '.json';
+          const how = await Share.exportFile(blob, name, '공시체 백업');
+          if (how === 'saved') {
+            U.toast('문서/공시체백업/' + name + ' 에 저장했습니다', 6000,
+              { label: '공유', onClick: () => { Share.shareFile(blob, name, '공시체 백업'); } });
+          } else {
+            U.toast(how === 'cancel' ? '취소했습니다'
+                  : how === 'fail' ? '내보내기에 실패했습니다'
+                  : '백업 파일을 내보냈습니다 — 파일 앱에 보관하세요', 4000);
+          }
         } catch (e) { console.error(e); U.toast('백업을 만들지 못했습니다'); }
       }
     });
@@ -10131,10 +10249,16 @@
             } catch (e) {}
           }
           const zip = Share.makeZip(entries);
-          const how = await Share.exportFile(zip, '공시체백업_' + stamp + '.zip', '공시체 전체 백업');
-          U.toast(how === 'cancel' ? '취소했습니다'
-                : how === 'fail' ? '내보내기에 실패했습니다'
-                : '전체 백업(사진 ' + got + '장)을 내보냈습니다', 4000);
+          const zname = '공시체백업_' + stamp + '.zip';
+          const how = await Share.exportFile(zip, zname, '공시체 전체 백업');
+          if (how === 'saved') {
+            U.toast('문서/공시체백업/' + zname + ' 에 저장했습니다 (사진 ' + got + '장)', 6000,
+              { label: '공유', onClick: () => { Share.shareFile(zip, zname, '공시체 전체 백업'); } });
+          } else {
+            U.toast(how === 'cancel' ? '취소했습니다'
+                  : how === 'fail' ? '내보내기에 실패했습니다'
+                  : '전체 백업(사진 ' + got + '장)을 내보냈습니다', 4000);
+          }
         } catch (e) { console.error(e); U.toast('백업을 만들지 못했습니다'); }
       }
     });
