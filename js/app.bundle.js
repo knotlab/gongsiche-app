@@ -4300,8 +4300,8 @@
   const K_DIGITS = 'gsc.digits.v1';
   const K_SPREAD = 'gsc.fill.spread.v1';
   const DEFAULT_FACTOR = 0.97;
-  const DEFAULT_SPREAD = 1;      // 편차 범위 1~3 (사용자 지시)
-  const MIN_SPREAD = 1;
+  const DEFAULT_SPREAD = 1;      // 편차 범위 0.5~3 (사용자 지시)
+  const MIN_SPREAD = 0.5;
   const MAX_SPREAD = 3;
 
   let digits = '';
@@ -4740,17 +4740,22 @@
   async function fillSealFromWater() {
     if (!linkedId || linkedSub !== 'seal') return;
     // await 너머에서 다른 세트로 갈아탈 수 있다 — 지금 대상을 붙들어 두고, 끝나고도 같은지 확인한다.
-    const id = linkedId, sub = linkedSub;
+    const id = linkedId, sub = linkedSub, setId = linkedSet;
     let t = null;
     try { t = await Store.getTask(id); } catch (e) { console.error(e); }
-    if (linkedId !== id || linkedSub !== sub) return;   // 그 사이 다른 세트로 이동함
+    if (linkedId !== id || linkedSub !== sub || linkedSet !== setId) return;   // 그 사이 다른 세트로 이동함
     if (!t) { U.toast('작업을 찾지 못했습니다'); return; }
 
-    const waterVals = [];
-    Store.normalizeSets(Task.subOf(t, 'water')).forEach((s) => {
-      (s.values || []).forEach((v) => { if (typeof v.v === 'number' && isFinite(v.v)) waterVals.push(v.v); });
-    });
-    if (!waterVals.length) { U.toast('수중 칸에 값이 없습니다'); return; }
+    // 수중이 여러 세트(회사·LOT)면 **연결된 봉함 세트의 순번**에 대응하는 수중 세트만 따른다 —
+    // 첫 봉함은 첫 수중, 둘째는 둘째와 비슷하게. 전부 합산하면 개수·평균이 다 틀어진다(사용자 확인 버그).
+    const waterSets = Store.normalizeSets(Task.subOf(t, 'water'))
+      .filter((s) => (s.values || []).some((v) => typeof v.v === 'number' && isFinite(v.v)));
+    if (!waterSets.length) { U.toast('수중 칸에 값이 없습니다'); return; }
+    const sealSets = Store.normalizeSets(Task.subOf(t, 'seal'));
+    let idx = sealSets.findIndex((s) => s.id === setId);
+    if (idx < 0) idx = 0;
+    const src = waterSets[Math.min(idx, waterSets.length - 1)];
+    const waterVals = src.values.map((v) => v.v).filter((v) => typeof v === 'number' && isFinite(v));
 
     const target = waterVals.length;
     const n = entries.length;
@@ -5684,12 +5689,16 @@
 
     try {
       for (const t of rows) {
+        // 폴더 이름은 날짜별 내보내기 라벨과 같은 꼴(사용자 지시) — 「8.25 봉함」
+        // ('/' 는 압축 안에서 하위 폴더가 되므로 '.' 로). 날짜는 보고 날짜 규칙(reportDayOf)을 따른다.
+        const dtag = (Spec.md(Task.reportDayOf(t) || t.day) || '').replace('/', '.');
+        const fname = (k) => (dtag ? dtag + ' ' : '') + ZIP_FOLDER[k];
         // 28일은 수중/봉함 칸이 각각 제 폴더로, 단일재령·구버전(water/seal)은 분류 폴더로
         const pieces = Task.hasSubs(t)
-          ? Spec.SUBS.map((s) => ({ folder: ZIP_FOLDER[s.key], box: Task.subOf(t, s.key) }))
-          : [{ folder: ZIP_FOLDER[t.specKey], box: { photos: (t.photos || []), sets: Task.setsOf(t) } }];
-        const nameBase = U.safeName(Task.dongOf(t) || '동미지정', '동미지정') +
-                         '_' + mmdd(t.castDay) + '-' + mmdd(Task.testDayOf(t));
+          ? Spec.SUBS.map((s) => ({ folder: fname(s.key), box: Task.subOf(t, s.key) }))
+          : [{ folder: ZIP_FOLDER[t.specKey] ? fname(t.specKey) : '', box: { photos: (t.photos || []), sets: Task.setsOf(t) } }];
+        // 사진·열 이름은 동만(사용자 지시) — 날짜는 폴더가 이미 말해 준다
+        const nameBase = U.safeName(Task.dongOf(t) || '동미지정', '동미지정');
 
         for (const pc of pieces) {
           if (!pc.folder) continue;            // 모르는 분류는 만들지 않는다
