@@ -5971,13 +5971,20 @@
      타설계획표 사진(OCR.parsePlan — 담당감리·동·부위가 같은 행)으로도 목록을 채운다.
      버퍼는 localStorage 에 남아 재시작해도 산다. */
   const K_PLANBUF = 'gsc.plan.buffer.v1';
+  /* 항목별 분류 체크박스(사용자 지시) — 기본 전부 켬, 끈 분류는 등록하지 않는다 */
+  const PLAN_NAMES = [
+    { key: 'vert', name: '수직' }, { key: 'horiz', name: '수평' },
+    { key: 'filler', name: '필러' }, { key: 'd28', name: '28일' }
+  ];
+  const plAllSpecs = () => PLAN_NAMES.map((n) => n.key);
   let plDong = '', plSup = '', plPhone = '';
   let plBuf = [];
 
   function plLoad() {
     try {
       const j = JSON.parse(localStorage.getItem(K_PLANBUF) || '[]');
-      if (Array.isArray(j)) plBuf = j.filter((x) => x && x.dong);
+      if (Array.isArray(j)) plBuf = j.filter((x) => x && x.dong)
+        .map((x) => { if (!Array.isArray(x.specs)) x.specs = plAllSpecs(); return x; });
     } catch (e) {}
   }
   function plSave() { try { localStorage.setItem(K_PLANBUF, JSON.stringify(plBuf)); } catch (e) {} }
@@ -6057,7 +6064,8 @@
     plBuf.push({
       id: U.uid(), castDay: planCastDay(), dong: plDong,
       supervisor: plSup, supPhone: plPhone,
-      part: ($('#plan-part') ? $('#plan-part').value.trim() : '')
+      part: ($('#plan-part') ? $('#plan-part').value.trim() : ''),
+      specs: plAllSpecs()
     });
     plSave();
     // 연속 입력 대비 — 날짜는 유지, 동·감리·부위만 비운다
@@ -6085,9 +6093,30 @@
       const sub = [it.supervisor || '감리 미지정', Spec.md(it.castDay) + ' 타설', it.part || '']
         .filter(Boolean).join(' · ');
       main.appendChild(U.el('span', 'bang-si-sub', sub));
-      card.appendChild(main);
+      // 분류 체크박스 — 기본 전부 켬, 끈 분류는 올릴 때 뺀다(사용자 지시)
       const upBtn = U.el('button', 'bang-si-btn');
+      const cks = U.el('div', 'plan-cks');
+      PLAN_NAMES.forEach((nm) => {
+        const on = it.specs.indexOf(nm.key) >= 0;
+        const lab = U.el('label', 'plan-ck' + (on ? ' on' : ''));
+        const ck = document.createElement('input');
+        ck.type = 'checkbox';
+        ck.checked = on;
+        ck.addEventListener('change', () => {
+          if (ck.checked) { if (it.specs.indexOf(nm.key) < 0) it.specs.push(nm.key); }
+          else it.specs = it.specs.filter((k) => k !== nm.key);
+          lab.classList.toggle('on', ck.checked);
+          upBtn.disabled = !it.specs.length;
+          plSave();
+        });
+        lab.appendChild(ck);
+        lab.appendChild(document.createTextNode(nm.name));
+        cks.appendChild(lab);
+      });
+      main.appendChild(cks);
+      card.appendChild(main);
       upBtn.textContent = '올리기';
+      upBtn.disabled = !it.specs.length;
       upBtn.addEventListener('click', () => uploadPlanItem(it));
       card.appendChild(upBtn);
       const del = U.el('button', 'bang-si-del');
@@ -6105,7 +6134,8 @@
   /* 한 건 올리기 — 수직·수평·필러·28일 4건 등록(동·분류·타설일 중복은 건너뜀) */
   async function registerPlanItem(it) {
     const cast = new Date(it.castDay + 'T00:00:00');
-    const plan = Spec.SPECS.map((s) => ({
+    const want = Array.isArray(it.specs) ? it.specs : plAllSpecs();
+    const plan = Spec.SPECS.filter((s) => want.indexOf(s.key) >= 0).map((s) => ({
       spec: s, testDay: U.dayKey(Spec.testDayOf(cast, s.age).getTime())
     }));
     let existing = [];
@@ -6130,6 +6160,7 @@
   }
 
   async function uploadPlanItem(it) {
+    if (Array.isArray(it.specs) && !it.specs.length) { U.toast('분류를 하나는 선택하세요'); return; }
     const r = await registerPlanItem(it);
     plBuf = plBuf.filter((x) => x.id !== it.id);
     plSave(); renderPlanBuf(); refreshLists();
@@ -6138,7 +6169,9 @@
 
   async function uploadPlanAll() {
     if (!plBuf.length) return;
-    const list = plBuf.slice();
+    // 분류를 전부 끈 항목은 두고 간다 — 지우면 담아둔 내용이 사라진다
+    const list = plBuf.filter((it) => !Array.isArray(it.specs) || it.specs.length);
+    if (!list.length) { U.toast('선택된 분류가 없습니다'); return; }
     U.toast('올리는 중…', 60000);
     let ok = 0, skip = 0;
     for (const it of list) {
@@ -6187,7 +6220,8 @@
         id: U.uid(), castDay: castDay, dong: it.dong,
         supervisor: c ? Contacts.label(c) : (it.sup || ''),
         supPhone: c ? (c.phone || '') : '',
-        part: it.part || ''
+        part: it.part || '',
+        specs: plAllSpecs()
       });
       added++;
     });

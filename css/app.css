@@ -1242,6 +1242,13 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
 .bang-si-btn{flex:0 0 auto;min-height:38px;padding:0 12px;border-radius:var(--r-sm);
   background:var(--accent);color:var(--on-accent);font-size:13px;font-weight:800}
 .bang-si-del{flex:0 0 auto;width:32px;height:38px;color:var(--danger);font-size:20px;font-weight:700}
+/* 플래너 버퍼 — 항목별 분류 체크박스(기본 전부 켬) */
+.plan-cks{display:flex;gap:6px;margin-top:4px;flex-wrap:wrap}
+.plan-ck{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--text-2);
+  padding:4px 8px;border:1px solid var(--line);border-radius:var(--r-sm);position:relative}
+.plan-ck input{width:14px;height:14px;accent-color:var(--accent);margin:0}
+.plan-ck.on{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
+.plan-ck::after{content:'';position:absolute;inset:-9px 0}   /* 히트영역 세로만 44px — 옆 칩과 안 겹치게 */
 
 /* 키패드 — 계산기와 같은 3열 배열, 화면 아래 고정 */
 .bang-keypad{
