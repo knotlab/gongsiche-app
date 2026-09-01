@@ -2101,7 +2101,7 @@
     const items = [];
     items.push({
       label: serverUrl() ? '서버 주소 바꾸기' : '서버 주소 넣기',
-      sub: serverUrl() || '예: http://100.64.0.10:8787 (Tailscale IP)',
+      sub: serverUrl() || '예: https://….ts.net (아이폰) · http://100.x.x.x:8787',
       onPick: () => {
         const v = prompt('관리자 서버 주소', serverUrl() || 'http://');
         if (v === null) return;
@@ -10579,6 +10579,11 @@
      아이폰(PWA)은 웹뷰 밖 자동 사본(SharedPreferences·파일백업)이 없다 — 오리진 저장소가
      통째로 날아가면(아이콘 재설치·저장공간 축출) 미러까지 같이 죽는다. 그래서 **오리진 밖**
      (파일 앱·iCloud·카톡)으로 내보내는 수동 백업이 아이폰의 유일한 진짜 안전판이다. */
+  const K_BAKLAST = 'gsc.bak.last.v1';   // 마지막 내보내기 시각 — 리마인더 판단용
+  const K_BAKNAG = 'gsc.bak.nag.v1';     // 리마인더는 하루 한 번만
+  const bakLast = () => { try { return +localStorage.getItem(K_BAKLAST) || 0; } catch (e) { return 0; } };
+  const bakStamp = () => { try { localStorage.setItem(K_BAKLAST, String(Date.now())); } catch (e) {} };
+
   async function openBackupSheet() {
     // 진단 — 다음 사고 때 원인을 좁힐 수 있게 상태를 보여준다
     let diag = '';
@@ -10589,6 +10594,8 @@
       const bits = [];
       if (per != null) bits.push('영구저장 ' + (per ? '승인' : '미승인'));
       if (est && est.usage != null) bits.push(U.fmtBytes(est.usage) + ' 사용');
+      const last = bakLast();
+      bits.push(last ? '마지막 내보내기 ' + U.dayLabel(last) : '내보낸 적 없음');
       diag = bits.join(' · ');
     } catch (e) {}
 
@@ -10604,6 +10611,7 @@
           const blob = new Blob([JSON.stringify(info)], { type: 'application/json' });
           const name = '공시체백업_' + stamp + '.json';
           const how = await Share.exportFile(blob, name, '공시체 백업');
+          if (how !== 'cancel' && how !== 'fail') bakStamp();
           U.toast(how === 'cancel' ? '취소했습니다'
                 : how === 'fail' ? '내보내기에 실패했습니다'
                 : '백업 파일을 내보냈습니다 — 파일 앱·카톡 나에게 보내기로 보관하세요', 4000);
@@ -10639,6 +10647,7 @@
           const zip = Share.makeZip(entries);
           const zname = '공시체백업_' + stamp + '.zip';
           const how = await Share.exportFile(zip, zname, '공시체 전체 백업');
+          if (how !== 'cancel' && how !== 'fail') bakStamp();
           U.toast(how === 'cancel' ? '취소했습니다'
                 : how === 'fail' ? '내보내기에 실패했습니다'
                 : '전체 백업(사진 ' + got + '장)을 내보냈습니다 — 보관할 곳을 고르세요', 4000);
@@ -10829,7 +10838,7 @@
     sorted.forEach((t) => {
       const done = Task.isDone(t);
       // 미완료 구간에서만 감리 헤더를 세운다. 완료는 '완료' 한 덩어리.
-      const head = done ? ' done' : supKey(t);
+      const head = done ? ' done' : supKey(t);
       if (head !== lastHead) {
         lastHead = head;
         const h = U.el('div', 'grp-head' + (done ? ' done' : ''));
@@ -10930,16 +10939,40 @@
     renderWeather(false);
   }
 
+  /* 아이폰(설치형 PWA) 백업 리마인더 — 오리진 통삭제는 앱이 못 막으니(조사 확정)
+     밖으로 사본을 자주 내보내게 하는 수밖에 없다. 서버백업이 꺼져 있고 수동 백업이
+     7일 넘게 없으면 하루 한 번만 권한다. 네이티브(갤럭시)는 미러·파일백업이 있어 제외. */
+  function maybeNagBackup() {
+    try {
+      const C = global.Capacitor;
+      if (C && C.isNativePlatform && C.isNativePlatform()) return;
+      const standalone = (global.matchMedia && matchMedia('(display-mode: standalone)').matches)
+        || navigator.standalone === true;
+      if (!standalone) return;                   // 데스크톱 브라우저(개발)에선 안 띄운다
+      if (global.Sync && Sync.isOn()) return;    // 서버 실시간 백업이 돌면 그걸로 충분
+      if (Date.now() - bakLast() < 7 * 24 * 3600 * 1000) return;
+      const today = U.dayKey(Date.now());
+      if (localStorage.getItem(K_BAKNAG) === today) return;
+      Store.taskCount().then((n) => {
+        if (!n) return;
+        try { localStorage.setItem(K_BAKNAG, today); } catch (e) {}
+        U.toast('백업을 내보낸 지 일주일이 넘었습니다', 8000,
+          { label: '지금 내보내기', onClick: openBackupSheet });
+      }).catch(() => {});
+    } catch (e) {}
+  }
+
   function init() {
     bind();
     renderDayNav();
     renderClock();
     clearInterval(clockTimer);
     clockTimer = setInterval(renderClock, 1000);
+    setTimeout(maybeNagBackup, 3500);
   }
 
   global.Home = {
-    init: init, refresh: refresh,
+    init: init, refresh: refresh, _nagBackup: maybeNagBackup,
     _shiftState: shiftState, _base: () => base, _goDay: goDay, _greeting: greeting
   };
 })(window);
