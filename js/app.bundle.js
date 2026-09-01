@@ -3157,6 +3157,62 @@
     return { values: values, excluded: excluded };
   }
 
+  /* ---------------- ③ 타설계획표 → 플래너 대기 목록 ----------------
+     표 형식(실측 스크린샷): 공구 블록마다 「담당감리 <이름>」 행과 분홍 제목칸
+     「209동 2PH1 벽체」가 **같은 행**에 있다. 행을 Y 로 묶고 그 행에서
+     감리 이름·동(다중 "209,210동" · 블록 "A9")·부위(나머지 텍스트)를 뽑는다.
+     타설일은 표에 없다 — 플래너 화면의 타설일 입력을 따른다. */
+  function parsePlan(lines) {
+    const rows = clusterRows(lines);
+    const items = [];
+    const seen = Object.create(null);
+    rows.forEach((row) => {
+      const text = row.map((l) => l.text).join('  ');
+      if (!/담당\s*감리/.test(text)) return;
+      let name = '';
+      const nm = text.match(/담당\s*감리\s*([가-힣]{2,4})/);
+      if (nm) name = nm[1];
+      else {
+        // 라벨과 이름이 다른 인식 조각으로 쪼개진 경우 — 행 안의 독립 한글 이름 토큰
+        for (const l of row) {
+          if (/담당|감리|반입|반출|규격|펌프/.test(l.text)) continue;
+          const m2 = l.text.trim().match(/^([가-힣]{2,4})$/);
+          if (m2) { name = m2[1]; break; }
+        }
+      }
+      // 동 — "209동" · "209,210동"(숫자 나열 뒤 동 하나) 우선, 없으면 블록(A9·B2·B-3)
+      let dong = '', part = '';
+      for (const l of row) {
+        const dm = l.text.match(/(\d{2,3}(?:\s*[,，]\s*\d{2,3})*)\s*동/);
+        if (dm) {
+          const nums = dm[1].split(/[,，]/).map((s) => s.trim()).filter(Boolean);
+          dong = nums.map((n) => n + '동').join(', ');
+          part = l.text.replace(dm[0], '').trim();
+          break;
+        }
+      }
+      if (!dong) {
+        for (const l of row) {
+          if (/담당\s*감리/.test(l.text)) continue;
+          // PH1·B4F·25F 같은 부위 표기는 블록이 아니다 — A·B 계열 + 뒤에 영숫자 없음만 인정
+          const bm = l.text.match(/(?:^|[^A-Za-z0-9가-힣])([AB]-?\d{1,2})(?![0-9A-Za-z])/);
+          if (bm) {
+            dong = bm[1].replace('-', '');
+            part = l.text.replace(bm[0], ' ').trim();
+            break;
+          }
+        }
+      }
+      if (!dong) return;
+      part = part.replace(/^[\s·,，-]+|[\s·,，-]+$/g, '').slice(0, 40);
+      const key = dong + '|' + name;
+      if (seen[key]) return;
+      seen[key] = 1;
+      items.push({ dong: dong, sup: name, part: part });
+    });
+    return { items: items, rows: rows.length };
+  }
+
   /* 잘라·키운 이미지(base64)를 읽는다 — 2패스용 */
   async function readData(b64) {
     const P = plugin();
@@ -3288,7 +3344,7 @@
   global.OCR = {
     available: available, read: read, readData: readData,
     readBoard: readBoard, readBoardSmart: readBoardSmart, pathToJpegB64: pathToJpegB64,
-    parseSchedule: parseSchedule, parseBoard: parseBoard,
+    parseSchedule: parseSchedule, parseBoard: parseBoard, parsePlan: parsePlan,
     _clusterRows: clusterRows
   };
 })(window);
@@ -5909,87 +5965,244 @@
     try { if (Nav.current() === 'tasks') Tasks.refresh(); } catch (e) {}
   }
 
-  /* ---------------- 공시체 플래너 (사용자 요청 신기능) ----------------
-     타설일 하나 넣으면 수직·수평·필러·28일 네 작업을 규칙(휴일 이월 포함)대로 한 번에 등록한다.
-     각 작업의 목록 날짜(day)=시험일 — OCR 일정표 등록과 같은 모양. 이미 있는 건 건너뛴다. */
+  /* ---------------- 공시체 플래너 (전용 화면 — 사용자 지시) ----------------
+     타설일·동·감리를 전용 화면(#view-plan)에서 입력해 **대기 목록(버퍼)**에 담고,
+     「올리기」를 누른 것만 수직·수평·필러·28일 4건으로 등록한다(휴일 이월 규칙, day=시험일).
+     타설계획표 사진(OCR.parsePlan — 담당감리·동·부위가 같은 행)으로도 목록을 채운다.
+     버퍼는 localStorage 에 남아 재시작해도 산다. */
+  const K_PLANBUF = 'gsc.plan.buffer.v1';
+  let plDong = '', plSup = '', plPhone = '';
+  let plBuf = [];
+
+  function plLoad() {
+    try {
+      const j = JSON.parse(localStorage.getItem(K_PLANBUF) || '[]');
+      if (Array.isArray(j)) plBuf = j.filter((x) => x && x.dong);
+    } catch (e) {}
+  }
+  function plSave() { try { localStorage.setItem(K_PLANBUF, JSON.stringify(plBuf)); } catch (e) {} }
+
   function openPlanner() {
-    const mk = (d) => U.dayKey(d.getTime());
-    const today = new Date();
-    const opt = (label, day, cls) => ({ label: label + ' (' + Spec.md(day) + ')', cls: cls || '',
-                                        onPick: () => planDong(day) });
-    const items = [
-      opt('오늘 타설', mk(today), 'strong'),
-      opt('어제 타설', mk(Spec.addDays(today, -1))),
-      opt('그제 타설', mk(Spec.addDays(today, -2)))
-    ];
-    items.push({ label: '직접 입력', sub: 'YYYY-MM-DD', onPick: () => {
-      const v = prompt('타설일 (YYYY-MM-DD)', mk(today));
-      if (v === null) return;
-      const t = v.trim();
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(t) || isNaN(new Date(t + 'T00:00:00'))) {
-        U.toast('YYYY-MM-DD 형식으로 입력하세요'); return;
-      }
-      planDong(t);
-    } });
-    U.sheet('플래너 — 타설일이 언제인가요?', items);
+    plLoad();
+    const ci = $('#plan-cast');
+    if (ci && !ci.value) ci.value = U.dayKey(Date.now());
+    renderPlanPick(); renderPlanBuf();
+    const ob = $('#plan-ocr');
+    if (ob) ob.classList.toggle('hidden', !(global.OCR && OCR.available && OCR.available()));
+    Nav.showPlan(true);
   }
 
-  function planDong(castDay) {
+  function renderPlanPick() {
+    const dt = $('#plan-dong-txt'), st = $('#plan-sup-txt');
+    if (dt) { dt.textContent = plDong || '동 선택'; dt.classList.toggle('ph', !plDong); }
+    if (st) { st.textContent = plSup || '감리 선택'; st.classList.toggle('ph', !plSup); }
+  }
+
+  /* 동·감리 픽커 — 싱크는 빈 칸일 때만(전 화면 공통 규칙), 직접 입력 지원 */
+  function planPickDong() {
     const items = Contacts.dongs().map((d) => ({
       label: d, sub: Contacts.byDong(d).map((c) => Contacts.label(c)).join(', '),
-      onPick: () => planSup(castDay, d)
+      cls: (plDong === d) ? 'strong' : '',
+      onPick: () => {
+        plDong = d;
+        if (!plSup) {
+          const cs = Contacts.byDong(d);
+          if (cs.length === 1) { plSup = Contacts.label(cs[0]); plPhone = cs[0].phone || ''; }
+        }
+        renderPlanPick();
+      }
     }));
     items.unshift({ label: '직접 입력', sub: '명부에 없는 동', onPick: () => {
-      const v = prompt('동 이름 (예: 220동)');
-      if (v === null || !v.trim()) return;
-      planSup(castDay, v.trim());
+      const v = prompt('동 이름 (예: 220동, A9)', plDong || '');
+      if (v === null) return;
+      plDong = v.trim();
+      renderPlanPick();
     } });
-    U.sheet('어느 동인가요?', items);
+    items.unshift({ label: '지정 안 함', onPick: () => { plDong = ''; renderPlanPick(); } });
+    U.sheet('동수 고르기', items);
   }
 
-  function planSup(castDay, dong) {
-    const sups = Contacts.byDong(dong);
-    if (sups.length === 1) { planConfirm(castDay, dong, sups[0]); return; }
-    if (!sups.length) { planConfirm(castDay, dong, null); return; }
-    U.sheet('담당 감리가 누구인가요?', sups.map((c) => ({
-      label: Contacts.label(c), sub: Contacts.where(c),
-      onPick: () => planConfirm(castDay, dong, c)
-    })).concat([{ label: '지정 안 함', onPick: () => planConfirm(castDay, dong, null) }]));
+  function planPickSup() {
+    const items = [{ label: '지정 안 함', onPick: () => { plSup = ''; plPhone = ''; renderPlanPick(); } }];
+    items.push({ label: '직접 입력', sub: '명부에 없는 감리', onPick: () => {
+      const name = prompt('감리 이름·직급 (예: 홍길동 소장)', plSup || '');
+      if (name === null || !name.trim()) return;
+      const phone = prompt('전화번호 (선택 — 비워도 됩니다)', plPhone || '');
+      plSup = name.trim(); plPhone = (phone === null) ? '' : phone.trim();
+      renderPlanPick();
+    } });
+    Contacts.search('').forEach((c) => {
+      items.push({
+        label: Contacts.label(c), sub: Contacts.where(c) + ' · ' + c.phone,
+        onPick: () => {
+          plSup = Contacts.label(c); plPhone = c.phone || '';
+          if (!plDong) {
+            const ds = Contacts.dongsOf(c);
+            if (ds.length === 1) plDong = ds[0];
+          }
+          renderPlanPick();
+        }
+      });
+    });
+    U.sheet('담당 감리 (' + (U.jugu() === '1' ? '1주구' : '2·4주구') + ')', items);
   }
 
-  async function planConfirm(castDay, dong, sup) {
-    const cast = new Date(castDay + 'T00:00:00');
+  function planCastDay() {
+    const v = ($('#plan-cast') && $('#plan-cast').value) || '';
+    return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : U.dayKey(Date.now());
+  }
+
+  function planAdd() {
+    if (!plDong) { U.toast('동을 먼저 고르세요'); return; }
+    plBuf.push({
+      id: U.uid(), castDay: planCastDay(), dong: plDong,
+      supervisor: plSup, supPhone: plPhone,
+      part: ($('#plan-part') ? $('#plan-part').value.trim() : '')
+    });
+    plSave();
+    // 연속 입력 대비 — 날짜는 유지, 동·감리·부위만 비운다
+    plDong = ''; plSup = ''; plPhone = '';
+    if ($('#plan-part')) $('#plan-part').value = '';
+    renderPlanPick(); renderPlanBuf();
+    U.buzz(6);
+  }
+
+  function renderPlanBuf() {
+    const box = $('#plan-buf');
+    if (!box) return;
+    box.innerHTML = '';
+    $('#plan-buf-n').textContent = plBuf.length;
+    const up = $('#plan-up-all');
+    if (up) { up.disabled = !plBuf.length; up.textContent = plBuf.length ? ('전체 올리기 (' + plBuf.length + '건)') : '전체 올리기'; }
+    if (!plBuf.length) {
+      box.appendChild(U.el('p', 'empty-msg', '비어 있습니다 — 위에서 담거나 계획표를 스캔하세요'));
+      return;
+    }
+    plBuf.forEach((it) => {
+      const card = U.el('div', 'bang-saved-item');
+      const main = U.el('div', 'bang-si-main');
+      main.appendChild(U.el('span', 'bang-si-sup', it.dong));
+      const sub = [it.supervisor || '감리 미지정', Spec.md(it.castDay) + ' 타설', it.part || '']
+        .filter(Boolean).join(' · ');
+      main.appendChild(U.el('span', 'bang-si-sub', sub));
+      card.appendChild(main);
+      const upBtn = U.el('button', 'bang-si-btn');
+      upBtn.textContent = '올리기';
+      upBtn.addEventListener('click', () => uploadPlanItem(it));
+      card.appendChild(upBtn);
+      const del = U.el('button', 'bang-si-del');
+      del.textContent = '×';
+      del.setAttribute('aria-label', '빼기');
+      del.addEventListener('click', () => {
+        plBuf = plBuf.filter((x) => x.id !== it.id);
+        plSave(); renderPlanBuf();
+      });
+      card.appendChild(del);
+      box.appendChild(card);
+    });
+  }
+
+  /* 한 건 올리기 — 수직·수평·필러·28일 4건 등록(동·분류·타설일 중복은 건너뜀) */
+  async function registerPlanItem(it) {
+    const cast = new Date(it.castDay + 'T00:00:00');
     const plan = Spec.SPECS.map((s) => ({
       spec: s, testDay: U.dayKey(Spec.testDayOf(cast, s.age).getTime())
     }));
-    // 이미 있는 것(동·분류·타설일 동일)은 건너뛴다 — OCR 등록과 같은 규칙(현재 주구 안에서만)
     let existing = [];
     try { existing = (await Store.allTasks()).filter((t) => Task.juguOf(t) === U.jugu()); } catch (e) {}
     const dkey = (s) => String(s || '').replace(/[\s()（）]/g, '');
     const fresh = plan.filter((p) => !existing.some((t) =>
-      (dkey(t.dong) || dkey(Task.dongOf(t))) === dkey(dong) &&
-      t.specKey === p.spec.key && (t.castDay || '') === castDay));
-    if (!fresh.length) { U.toast('그 동·타설일 작업이 이미 전부 등록돼 있습니다'); return; }
-    const lines = fresh.map((p) => p.spec.name + ' · 시험 ' + Spec.md(p.testDay)).join('\n');
-    U.confirmSheet(
-      dong + ' · ' + Spec.md(castDay) + ' 타설' + (sup ? ' · ' + Contacts.label(sup) : '') + '\n' + lines +
-      (fresh.length < plan.length ? '\n(이미 있는 ' + (plan.length - fresh.length) + '건은 건너뜁니다)' : ''),
-      fresh.length + '건 등록', async () => {
-        let ok = 0;
-        for (const p of fresh) {
-          try {
-            await Store.putTask({
-              day: p.testDay, testDay: p.testDay, specKey: p.spec.key, castDay: castDay,
-              dong: dong, jugu: U.jugu(),
-              supervisor: sup ? Contacts.label(sup) : '', supPhone: sup ? (sup.phone || '') : '',
-              part: '', photos: [], sets: []
-            });
-            ok++;
-          } catch (e) { console.error('[planner]', e); }
-        }
-        refreshLists();
-        U.toast('작업 ' + ok + '건을 등록했습니다 — 각 시험일 목록에 들어갔습니다', 3500);
+      (dkey(t.dong) || dkey(Task.dongOf(t))) === dkey(it.dong) &&
+      t.specKey === p.spec.key && (t.castDay || '') === it.castDay));
+    let ok = 0;
+    for (const p of fresh) {
+      try {
+        await Store.putTask({
+          day: p.testDay, testDay: p.testDay, specKey: p.spec.key, castDay: it.castDay,
+          dong: it.dong, jugu: U.jugu(),
+          supervisor: it.supervisor || '', supPhone: it.supPhone || '',
+          part: it.part || '', photos: [], sets: []
+        });
+        ok++;
+      } catch (e) { console.error('[planner]', e); }
+    }
+    return { ok: ok, skip: plan.length - fresh.length };
+  }
+
+  async function uploadPlanItem(it) {
+    const r = await registerPlanItem(it);
+    plBuf = plBuf.filter((x) => x.id !== it.id);
+    plSave(); renderPlanBuf(); refreshLists();
+    U.toast(it.dong + ' — ' + r.ok + '건 등록' + (r.skip ? ' · 이미 있던 ' + r.skip + '건 건너뜀' : ''), 3000);
+  }
+
+  async function uploadPlanAll() {
+    if (!plBuf.length) return;
+    const list = plBuf.slice();
+    U.toast('올리는 중…', 60000);
+    let ok = 0, skip = 0;
+    for (const it of list) {
+      const r = await registerPlanItem(it);
+      ok += r.ok; skip += r.skip;
+      plBuf = plBuf.filter((x) => x.id !== it.id);
+      plSave();
+    }
+    renderPlanBuf(); refreshLists();
+    U.toast('작업 ' + ok + '건을 등록했습니다' + (skip ? ' · 이미 있던 ' + skip + '건 건너뜀' : ''), 3500);
+  }
+
+  /* 타설계획표 사진 → 대기 목록 (전용 OCR — 사용자 지시) */
+  function planScan() {
+    U.sheet('타설계획표 사진', [
+      { label: '촬영', onPick: async () => planScanPath(await Native.shootPath()) },
+      { label: '앨범에서 고르기', onPick: async () => planScanPath(await Native.pickPath()) }
+    ]);
+  }
+
+  async function planScanPath(path) {
+    if (!path) return;
+    U.toast('계획표를 읽는 중…', 60000);
+    let doc;
+    try { doc = await OCR.read(path); }
+    catch (e) { console.warn('[plan ocr]', e); U.toast('사진을 읽지 못했습니다'); return; }
+    U.toast('읽기 완료', 700);
+    const parsed = OCR.parsePlan(doc.lines);
+    if (!parsed.items.length) {
+      U.toast('계획표에서 담당감리·동을 찾지 못했습니다\n표가 크게 나오게 찍어 보세요', 3500);
+      return;
+    }
+    const castDay = planCastDay();
+    const byName = (nm) => {
+      if (!nm) return null;
+      return Contacts.mine().find((c) => c.name === nm) ||
+             Contacts.LIST.find((c) => c.name === nm) || null;
+    };
+    let added = 0;
+    parsed.items.forEach((it) => {
+      const dup = plBuf.some((b) => b.dong === it.dong && b.castDay === castDay &&
+                                    (b.supervisor || '').indexOf(it.sup || '') >= 0);
+      if (dup) return;
+      const c = byName(it.sup);
+      plBuf.push({
+        id: U.uid(), castDay: castDay, dong: it.dong,
+        supervisor: c ? Contacts.label(c) : (it.sup || ''),
+        supPhone: c ? (c.phone || '') : '',
+        part: it.part || ''
       });
+      added++;
+    });
+    plSave(); renderPlanBuf();
+    U.toast(added + '건을 대기 목록에 담았습니다 — 확인 후 올리기를 누르세요', 3500);
+  }
+
+  function bindPlanner() {
+    const on = (id, fn) => { const el = $(id); if (el) el.addEventListener('click', fn); };
+    on('#plan-back', () => Nav.showPlan(false));
+    on('#plan-dong', planPickDong);
+    on('#plan-sup', planPickSup);
+    on('#plan-add', planAdd);
+    on('#plan-up-all', uploadPlanAll);
+    on('#plan-ocr', planScan);
   }
 
   /* 내보내기 성공 뒤 「사진」 체크 표시 제안(사용자 지시) — 보낸 작업을 목록에서 표시로 구분한다.
@@ -6986,6 +7199,7 @@
   function bind() {
     $('#tk-back').addEventListener('click', tryClose);
     bindBang();
+    bindPlanner();
     const hp = $('#home-plan');
     if (hp) hp.addEventListener('click', openPlanner);
     $('#tk-delete').addEventListener('click', removeTask);
@@ -10773,6 +10987,11 @@
       if (!on) { try { document.activeElement && document.activeElement.blur(); } catch (e) {} }
     },
     isAuditOpen: function () { return !U.$('#view-audit').classList.contains('hidden'); },
+    showPlan: function (on) {
+      U.$('#view-plan').classList.toggle('hidden', !on);
+      if (!on) { try { document.activeElement && document.activeElement.blur(); } catch (e) {} }
+    },
+    isPlanOpen: function () { return !U.$('#view-plan').classList.contains('hidden'); },
     setLightboxCloser: function (fn) { lightboxCloser = fn; },
     /* 앱 전체는 확대를 막아야 키패드 오조작이 없지만, 사진을 볼 때는 확대가 필요하다
        (균열·표면 확인이 이 앱의 목적). 라이트박스에서만 잠깐 풀어준다. */
@@ -10800,6 +11019,7 @@
       if (lightboxCloser) lightboxCloser(); else U.$('#lightbox').classList.add('hidden');
       return true;
     }
+    if (Nav.isPlanOpen()) { Nav.showPlan(false); return true; }   // 대기 목록은 저장돼 있어 그냥 닫는다
     if (Nav.isAuditOpen()) { AuditUI.close(); return true; }
     if (Nav.isAIOpen()) { AIUI.close(); return true; }
     if (Nav.isSupOpen()) { Nav.showSup(false); return true; }

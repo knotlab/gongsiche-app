@@ -701,6 +701,51 @@
   <input type="file" id="bang-file-pick" accept="image/*" multiple hidden>
 </section>
 
+<!-- ═══════════ 공시체 플래너 (전용 화면 — 대기 목록 + 계획표 OCR) ═══════════ -->
+<section class="view hidden editor" id="view-plan" data-view="plan">
+  <header class="topbar">
+    <button class="icon-btn" id="plan-back" aria-label="뒤로">
+      <svg class="ic" aria-hidden="true"><use href="#ic-back"/></svg>
+    </button>
+    <h1>플래너</h1>
+    <!-- 타설계획표 사진 → 대기 목록 (OCR). 플러그인 없으면 숨긴다 -->
+    <button class="icon-btn hidden" id="plan-ocr" aria-label="타설계획표 사진으로 담기">
+      <svg class="ic" aria-hidden="true"><use href="#ic-scan"/></svg>
+    </button>
+  </header>
+  <div class="ed-scroll">
+    <label class="field">
+      <span class="field-label">타설일</span>
+      <input type="date" id="plan-cast">
+    </label>
+    <div class="field">
+      <span class="field-label">동수</span>
+      <button class="pick-box" id="plan-dong"><span id="plan-dong-txt">동 선택</span></button>
+    </div>
+    <div class="field">
+      <span class="field-label">담당 감리</span>
+      <button class="pick-box" id="plan-sup"><span id="plan-sup-txt">감리 선택</span></button>
+    </div>
+    <label class="field">
+      <span class="field-label">부위 메모 <span class="lbl-sub">선택</span></span>
+      <input type="text" id="plan-part" maxlength="60"
+             autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+    </label>
+    <button class="btn btn-calc" id="plan-add">
+      <svg class="ic" aria-hidden="true"><use href="#ic-plus"/></svg>대기 목록에 담기
+    </button>
+
+    <div class="field">
+      <span class="field-label">대기 목록 <b id="plan-buf-n">0</b>건
+        <span class="lbl-sub">올리기를 누른 것만 등록됩니다</span></span>
+      <div id="plan-buf"></div>
+    </div>
+  </div>
+  <div class="ed-actions">
+    <button class="btn btn-primary" id="plan-up-all" disabled>전체 올리기</button>
+  </div>
+</section>
+
 <!-- ═══════════ AI 검수 결과 (beta) ═══════════ -->
 <section class="view hidden editor" id="view-audit" data-view="audit">
   <header class="topbar">
