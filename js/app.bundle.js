@@ -5564,6 +5564,27 @@
     else if (how === 'copied') U.toast('「' + g.label + '」를 복사했습니다');
     else if (copied) U.toast('사진을 보낸 뒤 붙여넣기\n「' + g.label + '」', 4000);
     else U.toast('공유할 앱에서 카카오톡을 선택하세요');
+
+    // 보냈으면 「사진」 체크 표시를 제안한다(사용자 지시) — 보낸 것/안 보낸 것을 목록에서 가른다
+    if (how === 'capacitor' || how === 'webshare') askPhotoMark(g.items);
+  }
+
+  /* 보낸 작업들에 photoMark 표시 제안 — 레코드는 새로 읽어 체크만 바꾼다(낡은 사본 덮어쓰기 방지) */
+  function askPhotoMark(items) {
+    const list = [], seen = Object.create(null);
+    (items || []).forEach((t) => { if (t && t.id && !t.photoMark && !seen[t.id]) { seen[t.id] = 1; list.push(t); } });
+    if (!list.length) return;
+    U.confirmSheet('보낸 ' + list.length + '건에 「사진」 체크를 표시할까요?\n(목록에 「사진」 배지가 붙습니다)', '표시',
+      async () => {
+        for (const t of list) {
+          try {
+            const f = await Store.getTask(t.id);
+            if (f) { f.photoMark = true; await Store.putTask(f); t.photoMark = true; }
+          } catch (e) {}
+        }
+        refresh();
+        U.toast('사진 체크를 표시했습니다');
+      });
   }
 
   /* ---------------- 목록 필터 (사용자 지시: 작업 탭에서 보이는 것 자체를 거른다) ----------------
@@ -5629,6 +5650,12 @@
         label: '종류 · ' + s.name,
         onPick: () => setFilter({ label: s.name, test: (t) => t.specKey === s.key })
       });
+    });
+    // 사진 체크(photoMark) 안 된 것만 — 아직 안 보낸 것을 골라 전체선택·전송하는 용도(사용자 지시)
+    items.push({ sep: true });
+    items.push({
+      label: '사진 체크 안 된 것만',
+      onPick: () => setFilter({ label: '사진 체크 안 됨', test: (t) => !t.photoMark })
     });
     // 블럭별 — 이 날짜 작업들 중 블럭 판정되는 게 있을 때만(공구 목록과 같은 패턴)
     const blocks = [];
@@ -5880,6 +5907,108 @@
   function refreshLists() {
     try { Home.refresh(); } catch (e) {}
     try { if (Nav.current() === 'tasks') Tasks.refresh(); } catch (e) {}
+  }
+
+  /* ---------------- 공시체 플래너 (사용자 요청 신기능) ----------------
+     타설일 하나 넣으면 수직·수평·필러·28일 네 작업을 규칙(휴일 이월 포함)대로 한 번에 등록한다.
+     각 작업의 목록 날짜(day)=시험일 — OCR 일정표 등록과 같은 모양. 이미 있는 건 건너뛴다. */
+  function openPlanner() {
+    const mk = (d) => U.dayKey(d.getTime());
+    const today = new Date();
+    const opt = (label, day, cls) => ({ label: label + ' (' + Spec.md(day) + ')', cls: cls || '',
+                                        onPick: () => planDong(day) });
+    const items = [
+      opt('오늘 타설', mk(today), 'strong'),
+      opt('어제 타설', mk(Spec.addDays(today, -1))),
+      opt('그제 타설', mk(Spec.addDays(today, -2)))
+    ];
+    items.push({ label: '직접 입력', sub: 'YYYY-MM-DD', onPick: () => {
+      const v = prompt('타설일 (YYYY-MM-DD)', mk(today));
+      if (v === null) return;
+      const t = v.trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(t) || isNaN(new Date(t + 'T00:00:00'))) {
+        U.toast('YYYY-MM-DD 형식으로 입력하세요'); return;
+      }
+      planDong(t);
+    } });
+    U.sheet('플래너 — 타설일이 언제인가요?', items);
+  }
+
+  function planDong(castDay) {
+    const items = Contacts.dongs().map((d) => ({
+      label: d, sub: Contacts.byDong(d).map((c) => Contacts.label(c)).join(', '),
+      onPick: () => planSup(castDay, d)
+    }));
+    items.unshift({ label: '직접 입력', sub: '명부에 없는 동', onPick: () => {
+      const v = prompt('동 이름 (예: 220동)');
+      if (v === null || !v.trim()) return;
+      planSup(castDay, v.trim());
+    } });
+    U.sheet('어느 동인가요?', items);
+  }
+
+  function planSup(castDay, dong) {
+    const sups = Contacts.byDong(dong);
+    if (sups.length === 1) { planConfirm(castDay, dong, sups[0]); return; }
+    if (!sups.length) { planConfirm(castDay, dong, null); return; }
+    U.sheet('담당 감리가 누구인가요?', sups.map((c) => ({
+      label: Contacts.label(c), sub: Contacts.where(c),
+      onPick: () => planConfirm(castDay, dong, c)
+    })).concat([{ label: '지정 안 함', onPick: () => planConfirm(castDay, dong, null) }]));
+  }
+
+  async function planConfirm(castDay, dong, sup) {
+    const cast = new Date(castDay + 'T00:00:00');
+    const plan = Spec.SPECS.map((s) => ({
+      spec: s, testDay: U.dayKey(Spec.testDayOf(cast, s.age).getTime())
+    }));
+    // 이미 있는 것(동·분류·타설일 동일)은 건너뛴다 — OCR 등록과 같은 규칙(현재 주구 안에서만)
+    let existing = [];
+    try { existing = (await Store.allTasks()).filter((t) => Task.juguOf(t) === U.jugu()); } catch (e) {}
+    const dkey = (s) => String(s || '').replace(/[\s()（）]/g, '');
+    const fresh = plan.filter((p) => !existing.some((t) =>
+      (dkey(t.dong) || dkey(Task.dongOf(t))) === dkey(dong) &&
+      t.specKey === p.spec.key && (t.castDay || '') === castDay));
+    if (!fresh.length) { U.toast('그 동·타설일 작업이 이미 전부 등록돼 있습니다'); return; }
+    const lines = fresh.map((p) => p.spec.name + ' · 시험 ' + Spec.md(p.testDay)).join('\n');
+    U.confirmSheet(
+      dong + ' · ' + Spec.md(castDay) + ' 타설' + (sup ? ' · ' + Contacts.label(sup) : '') + '\n' + lines +
+      (fresh.length < plan.length ? '\n(이미 있는 ' + (plan.length - fresh.length) + '건은 건너뜁니다)' : ''),
+      fresh.length + '건 등록', async () => {
+        let ok = 0;
+        for (const p of fresh) {
+          try {
+            await Store.putTask({
+              day: p.testDay, testDay: p.testDay, specKey: p.spec.key, castDay: castDay,
+              dong: dong, jugu: U.jugu(),
+              supervisor: sup ? Contacts.label(sup) : '', supPhone: sup ? (sup.phone || '') : '',
+              part: '', photos: [], sets: []
+            });
+            ok++;
+          } catch (e) { console.error('[planner]', e); }
+        }
+        refreshLists();
+        U.toast('작업 ' + ok + '건을 등록했습니다 — 각 시험일 목록에 들어갔습니다', 3500);
+      });
+  }
+
+  /* 내보내기 성공 뒤 「사진」 체크 표시 제안(사용자 지시) — 보낸 작업을 목록에서 표시로 구분한다.
+     레코드는 새로 읽어 photoMark 만 바꾼다 — 낡은 사본으로 덮으면 그 사이 저장이 되돌아간다. */
+  function askPhotoMark(tasks) {
+    const list = [], seen = Object.create(null);
+    (tasks || []).forEach((t) => { if (t && t.id && !t.photoMark && !seen[t.id]) { seen[t.id] = 1; list.push(t); } });
+    if (!list.length) return;
+    U.confirmSheet('보낸 ' + list.length + '건에 「사진」 체크를 표시할까요?\n(목록에 「사진」 배지가 붙습니다)', '표시',
+      async () => {
+        for (const t of list) {
+          try {
+            const f = await Store.getTask(t.id);
+            if (f) { f.photoMark = true; await Store.putTask(f); t.photoMark = true; }
+          } catch (e) {}
+        }
+        refreshLists();
+        U.toast('사진 체크를 표시했습니다');
+      });
   }
 
   /* ---------------- 열기 ---------------- */
@@ -6848,12 +6977,17 @@
     else if (how === 'download-multi') U.toast('파일로 저장합니다 — 브라우저가 여러 장을 막으면 허용을 눌러 주세요', 4000);
     else if (copied) U.toast('사진을 보낸 뒤 대화창에 붙여넣기', 3500);
     else U.toast('공유할 앱에서 카카오톡을 선택하세요');
+
+    // 보냈으면 「사진」 체크 표시를 제안한다(사용자 지시)
+    if (how === 'capacitor' || how === 'webshare') askPhotoMark([rec]);
   }
 
   /* ---------------- 바인딩 ---------------- */
   function bind() {
     $('#tk-back').addEventListener('click', tryClose);
     bindBang();
+    const hp = $('#home-plan');
+    if (hp) hp.addEventListener('click', openPlanner);
     $('#tk-delete').addEventListener('click', removeTask);
     $('#tk-save').addEventListener('click', () => { save(false); });
     $('#tk-export').addEventListener('click', () => { exportTask(); });
