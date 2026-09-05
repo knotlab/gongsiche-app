@@ -1439,36 +1439,51 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
    그래서 진짜 판정은 JS(Calc.fit)가 재보고 .tight-top → .tight → .xtight 를 붙인다.
    미디어쿼리는 첫 그림부터 덜 튀게 하는 밑그림일 뿐 — 같은 변수를 쓰므로 겹쳐도 두 번 줄지 않는다.
 
-   **키패드(--keyh)와 입력 디스플레이(--dispf)는 어느 단계에서도 안 줄인다.**
+   **키패드(--keyh)와 입력 디스플레이(--dispf)는 3단계까지 안 줄인다.**
    찌부러진 키는 누르기 어렵다 — 사용자 지시. 줄일 건 위(통계 카드)뿐이고,
-   그래도 모자라면 칩을 한 단 줄이고, 끝내 안 되면 nofit(화면째 스크롤)로 넘긴다.
+   그래도 모자라면 칩을 한 단 줄인다. 4단계(xxtight)만 키를 48px 로(44px 탭 최소는 지킴) —
+   세로가 짧은 폰(아이폰 SE 급)에서 nofit(화면째 스크롤)로 가면 값을 넣을 때마다 화면이 튀어
+   그게 더 나쁘다(아이폰 실기기). 끝내 안 되면(가로·분할) nofit.
      1단계(tight-top) 통계 카드만
      2단계(tight)     통계 카드 최대 압축
-     3단계(xtight)    칩까지 한 단 (키패드는 그대로) */
-#view-calc.tight-top,#view-calc.tight,#view-calc.xtight{
+     3단계(xtight)    칩까지 한 단 (키패드는 그대로)
+     4단계(xxtight)   키 48px + 칩 2줄 */
+#view-calc.tight-top,#view-calc.tight,#view-calc.xtight,#view-calc.xxtight{
   --avgf:31px; --statpad:5px; --statrow:22px;
 }
 /* 통계 카드 안의 「기본값」 버튼만 낮춘다.
    등록값 머리의 버튼들은 현장에서 장갑 끼고 누르는 곳이라 그대로 둔다. */
 #view-calc.tight-top .stat-card .mini-btn,
 #view-calc.tight .stat-card .mini-btn,
-#view-calc.xtight .stat-card .mini-btn{min-height:32px;padding:6px 10px}
-#view-calc.tight-top .link-bar,#view-calc.tight .link-bar,#view-calc.xtight .link-bar{padding-top:7px;padding-bottom:7px}
+#view-calc.xtight .stat-card .mini-btn,
+#view-calc.xxtight .stat-card .mini-btn{min-height:32px;padding:6px 10px}
+#view-calc.tight-top .link-bar,#view-calc.tight .link-bar,#view-calc.xtight .link-bar,#view-calc.xxtight .link-bar{padding-top:7px;padding-bottom:7px}
 
 /* 2단계 — 통계 카드를 끝까지 */
 #view-calc.tight{
   --avgf:29px; --statpad:4px; --statrow:20px;
 }
-#view-calc.tight .stat-main,#view-calc.xtight .stat-main{margin:3px 0;padding:2px 11px}
-#view-calc.tight .calc-flow,#view-calc.xtight .calc-flow{gap:6px}
+#view-calc.tight .stat-main,#view-calc.xtight .stat-main,#view-calc.xxtight .stat-main{margin:3px 0;padding:2px 11px}
+#view-calc.tight .calc-flow,#view-calc.xtight .calc-flow,#view-calc.xxtight .calc-flow{gap:6px}
 
 /* 3단계 — 칩만 한 단. 키패드는 여전히 안 건드린다 */
-#view-calc.xtight{
+#view-calc.xtight,#view-calc.xxtight{
   --avgf:29px; --statpad:4px; --statrow:20px;
   --chiph:36px; --chipgap:4px;
 }
-#view-calc.xtight .chips-wrap{padding:6px 9px 7px;margin:6px 12px auto}
-#view-calc.tight .calc-scroll,#view-calc.xtight .calc-scroll{padding:6px 12px 0}
+#view-calc.xtight .chips-wrap,#view-calc.xxtight .chips-wrap{padding:6px 9px 7px;margin:6px 12px auto}
+#view-calc.tight .calc-scroll,#view-calc.xtight .calc-scroll,#view-calc.xxtight .calc-scroll{padding:6px 12px 0}
+/* 끝 단계에서도 모자라면 통계 카드가 자기 안에서 스크롤한다(키패드 고정).
+   0 까지 쪼그라들면 평균이 안 보이니 한 줄은 남긴다 */
+#view-calc.xtight .calc-scroll{min-height:72px}
+
+/* 4단계 — 키 48px + 칩 2줄(칩은 자기 안에서 스크롤, 높이는 여전히 고정). 세로 짧은 폰 전용 */
+#view-calc.xxtight{--keyh:48px}
+#view-calc.xxtight #chips{
+  min-height:calc(var(--chiph)*2 + var(--chipgap)*2);
+  max-height:calc(var(--chiph)*2 + var(--chipgap)*2);
+}
+#view-calc.xxtight .calc-scroll{min-height:64px}
 
 /* 예전엔 여기에 @media(max-height:800/680){:root{...}} 로 치수를 줄여 뒀었다. 지웠다.
    tier 클래스는 #view-calc(자손)에, 미디어쿼리는 :root(조상)에 선언되므로

@@ -1715,7 +1715,46 @@
   }
 
   /* ---------- OCR 용: 파일 경로만 필요할 때 ----------
-     OcrPlugin 은 네이티브 경로(file://…)를 받는다 — File 로 바꾸지 않는다. */
+     Vision.toJpegB64 가 네이티브 경로(file://…)·웹 blob: URL·Blob/File 을 다 받는다
+     — 여기선 File 로 바꾸지 않고 경로/URL 그대로 돌려준다. */
+
+  /* Camera 플러그인이 없는 환경(PWA·브라우저) 폴백 — 숨은 <input type=file> 로
+     사진을 받아 blob: URL 을 돌려준다. capture 를 주면 후면카메라로 바로 연다.
+     취소는 cancel 이벤트(사파리 16.4+·크롬 113+)로 본다. 이벤트가 없는 구형은 창 포커스가
+     돌아온 뒤 **10초** 안에도 파일이 없으면 취소로 본다 — 짧게 잡으면 아이폰이 사진(HEIC)을
+     변환하는 몇 초 사이에 고른 사진을 취소로 오판해 버린다(반대심문 확인). */
+  function webPickUrl(capture) {
+    return new Promise((resolve) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'image/*';
+      if (capture) input.capture = 'environment';
+      input.style.position = 'fixed';
+      input.style.left = '-9999px';
+      document.body.appendChild(input);
+
+      let done = false;
+      const finish = (v) => {
+        if (done) return;
+        done = true;
+        window.removeEventListener('focus', onFocus);
+        input.remove();
+        resolve(v);
+      };
+      const onFocus = () => {
+        window.removeEventListener('focus', onFocus);
+        setTimeout(() => { if (!(input.files && input.files.length)) finish(null); }, 10000);
+      };
+      input.addEventListener('change', () => {
+        const f = input.files && input.files[0];
+        finish(f ? URL.createObjectURL(f) : null);
+      });
+      input.addEventListener('cancel', () => finish(null));
+      window.addEventListener('focus', onFocus);
+      input.click();
+    });
+  }
+
   async function shootPath() {
     const S = shotPlugin();
     if (S) {
@@ -1729,11 +1768,11 @@
       }
     }
     const Cam = camera();
-    if (!Cam) return null;
+    if (!Cam) return webPickUrl(true);
     try {
       const p = await Cam.getPhoto({ quality: 92, resultType: 'uri',
         source: 'CAMERA', correctOrientation: true, saveToGallery: false });
-      return p.path || null;
+      return p.path || p.webPath || null;
     } catch (e) {
       if (!isCancel(e) && isPermissionDenied(e)) warnPermission();
       return null;
@@ -1742,11 +1781,11 @@
 
   async function pickPath() {
     const Cam = camera();
-    if (!Cam) return null;
+    if (!Cam) return webPickUrl(false);
     try {
       const p = await Cam.getPhoto({ quality: 92, resultType: 'uri',
         source: 'PHOTOS', correctOrientation: true });
-      return p.path || null;
+      return p.path || p.webPath || null;
     } catch (e) { return null; }
   }
 
@@ -2936,416 +2975,554 @@
 })(window);
 
 ;
-/* ===== js/ocr.js ===== */
-/* ============ ocr.js — 온디바이스 OCR (beta) ============
-   엔진: 앱 소유 OcrPlugin(ML Kit 한국어 번들형) — 인터넷 없이 첫 실행부터 된다.
-   여기엔 엔진 파사드와 **순수 파서 둘**만 둔다(화면은 ocrui.js).
-   파서를 순수 함수로 둔 이유: 브라우저에서 좌표 픽스처로 검증하기 위함.
+/* ===== js/vision.js ===== */
+/* ============ vision.js — Gemini 비전 공용 모듈 ============
+   예전엔 OCR(일정표·성적판)이 온디바이스 ML Kit + ONNX 였고, AI 검수(audit.js)만
+   Gemini 를 따로 썼다. 손글씨 인식률이 판당 9칸 중 3~7칸에 그쳐(실측) 사용자 지시로
+   (2026-09-05) OCR 도 Gemini 로 전면 교체했다 — 아이폰 PWA 에서도 판독이 되는 덤도 있다.
+   audit.js 와 ocr.js 가 공유하는 호출부(HTTP 형식·키 관리·이미지 인코딩)를 여기 한 곳에 모은다.
+================================================================ */
+(function (global) {
+  'use strict';
 
-   ① parseSchedule — 시험 일정표(인쇄 표) 사진 → 작업 후보
-      한 행에서 타설일·시험일·동·재령을 뽑는다. 중복은 하나로 접는다.
-   ② parseBoard — 시험 성적판(화이트보드) 사진 → 강도값 후보
-      시험결과 9칸의 소수 값만 뽑고, 평균·보정평균 칸은 위치로 거른다.
+  const K_GKEY = 'gsc.vision.key.v1';
+  /* 기본 키를 앱에 박아 둔다 — 사용자 지시(쓰는 사람이 둘뿐).
+     APK 를 뜯으면 보이는 값이다. 밖으로 돌리게 되면 빼야 한다.
+     앱에서 키를 새로 넣으면 그게 우선한다. */
+  const DEFAULT_GKEY = '';
+  const MODEL = 'gemini-3.1-flash-lite';     // 이미지 받는 것 중 가장 싼 쪽(무료 티어 있음)
+  const API = 'https://generativelanguage.googleapis.com/v1beta/interactions';
+  const TIMEOUT = 45000;
+
+  /* ---------- 비전 키 ---------- */
+  function gkey() {
+    try {
+      const own = (localStorage.getItem(K_GKEY) || '').trim();
+      if (own) return own;
+    } catch (e) {}
+    return DEFAULT_GKEY;
+  }
+  function ownGkey() {
+    try { return (localStorage.getItem(K_GKEY) || '').trim(); } catch (e) { return ''; }
+  }
+  function setGkey(v) {
+    try { localStorage.setItem(K_GKEY, (v || '').trim()); } catch (e) {}
+  }
+  function hasKey() { return !!gkey(); }
+  function online() { return navigator.onLine !== false; }
+
+  /* ---------- HTTP ---------- */
+  function nativeHttp() {
+    const C = global.Capacitor;
+    return (C && C.isNativePlatform && C.isNativePlatform() &&
+            C.Plugins && C.Plugins.CapacitorHttp) ? C.Plugins.CapacitorHttp : null;
+  }
+
+  function brief(v) {
+    const s = (typeof v === 'string') ? v : JSON.stringify(v || '');
+    return s.length > 200 ? s.slice(0, 200) + '…' : s;
+  }
+
+  /* opts.timeout(ms) — 기본 45초(검수). OCR 은 더 짧게 쓴다 */
+  async function call(prompt, images, opts) {
+    const k = gkey();
+    if (!k) throw new Error('NOVKEY');
+    const timeout = (opts && opts.timeout) || TIMEOUT;
+    const input = [{ type: 'text', text: prompt }];
+    (images || []).forEach((im) => {
+      input.push({ type: 'image', data: im.b64, mime_type: im.mime || 'image/jpeg' });
+    });
+    const body = { model: MODEL, input: input };
+    const headers = { 'Content-Type': 'application/json', 'x-goog-api-key': k };
+
+    const http = nativeHttp();
+    if (http) {
+      const res = await http.request({
+        url: API, method: 'POST', headers: headers, data: body,
+        connectTimeout: timeout, readTimeout: timeout
+      });
+      if (res.status < 200 || res.status >= 300) {
+        throw new Error('HTTP ' + res.status + ' ' + brief(res.data));
+      }
+      return pickText((typeof res.data === 'string') ? JSON.parse(res.data) : res.data);
+    }
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), timeout);
+    try {
+      const res = await fetch(API, {
+        method: 'POST', headers: headers, body: JSON.stringify(body), signal: ctl.signal
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + brief(await res.text()));
+      return pickText(await res.json());
+    } finally { clearTimeout(timer); }
+  }
+
+  async function callJSON(prompt, images, opts) {
+    const text = await call(prompt, images, opts);
+    let s = String(text || '').trim();
+    s = s.replace(/```json/gi, '```').replace(/```/g, '').trim();
+    const oa = s.indexOf('{'), ob = s.lastIndexOf('}');
+    const aa = s.indexOf('['), ab = s.lastIndexOf(']');
+    let a = -1, b = -1;
+    if (oa >= 0 && (aa < 0 || oa <= aa)) { a = oa; b = ob; }
+    else if (aa >= 0) { a = aa; b = ab; }
+    if (a >= 0 && b > a) s = s.slice(a, b + 1);
+    try { return JSON.parse(s); }
+    catch (e) { throw new Error('응답을 해석하지 못했습니다: ' + brief(s)); }
+  }
+
+  /* 응답 형식이 바뀔 수 있어 여러 모양을 받아 준다 */
+  function pickText(d) {
+    if (!d) throw new Error('빈 응답');
+    if (typeof d.text === 'string' && d.text.trim()) return d.text.trim();
+    if (typeof d.output_text === 'string' && d.output_text.trim()) return d.output_text.trim();
+    const walk = (arr) => {
+      let s = '';
+      (arr || []).forEach((o) => {
+        if (typeof o === 'string') s += o;
+        else if (o && typeof o.text === 'string') s += o.text;
+        else if (o && o.type === 'thought') { /* 사고 단계는 본문이 아니다 — 건너뛴다 */ }
+        else if (o && Array.isArray(o.content)) s += walk(o.content);
+        else if (o && Array.isArray(o.parts)) s += walk(o.parts);
+        else if (o && Array.isArray(o.steps)) s += walk(o.steps);
+      });
+      return s;
+    };
+    // 실측한 /v1beta/interactions 응답: { steps:[{type:'thought'},{content:[{text:'…'}]}] }
+    let s = walk(d.steps || d.output || d.outputs || d.content);
+    if (s && s.trim()) return s.trim();
+    const c = d.candidates && d.candidates[0];       // 구형 generateContent 모양
+    const parts = c && c.content && c.content.parts;
+    if (parts && parts.length) {
+      s = parts.map((p) => p.text || '').join('');
+      if (s.trim()) return s.trim();
+    }
+    throw new Error('응답을 해석하지 못했습니다: ' + brief(d));
+  }
+
+  /* ---------- 이미지 인코딩 ---------- */
+  function blobToB64(blob) {
+    return new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => {
+        const s = String(r.result || '');
+        const i = s.indexOf(',');
+        res(i >= 0 ? s.slice(i + 1) : s);
+      };
+      r.onerror = () => rej(new Error('사진을 읽지 못했습니다'));
+      r.readAsDataURL(blob);
+    });
+  }
+
+  function loadBitmap(blob) {
+    if (global.createImageBitmap) {
+      // EXIF 회전을 적용해 달라고 명시(from-image) — 세로로 찍은 사진이 눕혀져 가면 손글씨 인식률이 떨어진다.
+      // 옵션을 모르는 구형은 TypeError → 기본 호출(대개 자동 회전) → <img> 폴백(CSS 기본이 회전 적용)
+      return global.createImageBitmap(blob, { imageOrientation: 'from-image' })
+        .catch(() => global.createImageBitmap(blob))
+        .catch(() => loadImageEl(blob));
+    }
+    return loadImageEl(blob);
+  }
+  function loadImageEl(blob) {
+    return new Promise((res, rej) => {
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => { URL.revokeObjectURL(url); res(img); };
+      img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('사진을 열지 못했습니다')); };
+      img.src = url;
+    });
+  }
+
+  async function toJpegB64(src, maxSide, quality) {
+    maxSide = maxSide || 2048;
+    quality = quality || 0.85;
+    let blob;
+    if (src instanceof Blob) {
+      blob = src;
+    } else {
+      const C = global.Capacitor;
+      const url = (C && C.isNativePlatform && C.isNativePlatform() && C.convertFileSrc) ?
+        C.convertFileSrc(src) : src;
+      const res = await fetch(url);
+      blob = await res.blob();
+      // webPickUrl 이 만든 blob: URL 은 여기서 다 읽었으니 회수한다 — 안 하면 스캔마다 원본 사진이 메모리에 남는다
+      if (/^blob:/.test(src)) { try { URL.revokeObjectURL(src); } catch (e) {} }
+    }
+    const bmp = await loadBitmap(blob);
+    const w = bmp.width || bmp.naturalWidth, h = bmp.height || bmp.naturalHeight;
+    let ow = w, oh = h;
+    const long = Math.max(w, h);
+    if (long > maxSide) {
+      const scale = maxSide / long;
+      ow = Math.round(w * scale);
+      oh = Math.round(h * scale);
+    }
+    const cv = document.createElement('canvas');
+    cv.width = ow; cv.height = oh;
+    const ctx = cv.getContext('2d');
+    ctx.drawImage(bmp, 0, 0, ow, oh);
+    if (bmp.close) bmp.close();
+    const dataUrl = cv.toDataURL('image/jpeg', quality);
+    const i = dataUrl.indexOf(',');
+    return { b64: dataUrl.slice(i + 1), mime: 'image/jpeg', w: ow, h: oh };
+  }
+
+  /* ---------- 오류 사람말 ---------- */
+  function explain(e) {
+    const m = String((e && e.message) || e || '');
+    if (m === 'NOVKEY') return 'Gemini 키가 없습니다 — 설정에서 넣어 주세요';
+    if (m === 'BUSY') return '아직 앞 사진을 읽는 중입니다 — 잠시만';
+    if (m === 'OFFLINE' || !online()) return '인터넷 연결이 필요합니다';
+    if (/400/.test(m) && /image/i.test(m)) return '사진을 받지 못했습니다(형식)';
+    if (/401|403|API key|PERMISSION/i.test(m)) return '키가 거부됐습니다 — 키를 확인하세요';
+    if (/429|RESOURCE_EXHAUSTED|quota/i.test(m)) return '요청이 몰렸습니다 — 잠시 뒤 다시';
+    if (/5\d\d/.test(m)) return 'Gemini 서버 오류 — 잠시 뒤 다시';
+    // fetch 는 AbortError, CapacitorHttp 는 SocketTimeout/timed out 류 — 신호만 잡힌 지하가 대개 이 경로다
+    if (/abort|time ?out|timed ?out/i.test(m)) return '응답이 없습니다 — 인터넷 연결을 확인하고 다시 시도하세요';
+    if (/Failed to fetch|NetworkError/i.test(m)) return '인터넷 연결이 필요합니다';
+    return m;
+  }
+
+  global.Vision = {
+    MODEL: MODEL, API: API,
+    gkey: gkey, ownGkey: ownGkey, setGkey: setGkey, hasKey: hasKey, online: online,
+    call: call, callJSON: callJSON, pickText: pickText,
+    blobToB64: blobToB64, toJpegB64: toJpegB64,
+    explain: explain
+  };
+})(window);
+
+;
+/* ===== js/ocr.js ===== */
+/* ============ ocr.js — 사진 판독 (Gemini Vision) ============
+   엔진은 vision.js 의 `Vision`(Gemini) — 완전 오프라인 온디바이스 OCR(ML Kit·ONNX 숫자모델)은
+   사용자 지시(2026-09-05)로 폐기했다. 이제 세 흐름(일정표·성적판·계획표) 모두 사진을
+   구조화 JSON 으로 바로 읽고, 앱 규칙(재령→분류, 동 표기, 평균 열 제외 등)은
+   여기서 **순수 함수로 후처리**한다 — 브라우저 픽스처로 검증하기 위함이다.
+
+   ① readSchedule — 시험 일정표(표) 사진 → 작업 후보
+   ② readBoard    — 시험 성적판(화이트보드) 사진 → 강도값 후보
+   ③ readPlan     — 타설계획표 사진 → 플래너 대기 목록 후보
+
+   아이폰 PWA 를 포함해 Vision 만 있으면 어느 플랫폼에서든 된다 — 버튼은 항상 보인다.
 ========================================================= */
 (function (global) {
   'use strict';
 
-  /* ---------------- 엔진 ---------------- */
-  function plugin() {
-    const C = global.Capacitor;
-    return (C && C.isNativePlatform && C.isNativePlatform() &&
-            C.Plugins && C.Plugins.Ocr) ? C.Plugins.Ocr : null;
-  }
+  function available() { return !!global.Vision; }
 
-  function available() { return !!plugin(); }
-
-  /* path(file://…) → { lines:[{text,x,y,w,h}], width, height } */
-  async function read(path) {
-    const P = plugin();
-    if (!P) throw new Error('NOOCR');
-    const r = await P.read({ path: path });
-    return {
-      lines: ((r && r.lines) || []).filter((l) => l && l.text),
-      width: (r && r.width) || 0,
-      height: (r && r.height) || 0
-    };
-  }
-
-  /* ---------------- 공통: 줄 → 행 묶기 ----------------
-     ML Kit 은 표 한 행을 여러 줄 조각으로 쪼개 온다.
-     세로 중심이 비슷한 조각끼리 한 행으로 본다. */
-  function clusterRows(lines) {
-    const ls = lines.filter((l) => l.text && l.h > 0);
-    if (!ls.length) return [];
-    const hs = ls.map((l) => l.h).sort((a, b) => a - b);
-    const medH = hs[Math.floor(hs.length / 2)] || 10;
-    const tol = medH * 0.7;
-
-    const sorted = ls.slice().sort((a, b) => (a.y + a.h / 2) - (b.y + b.h / 2));
-    const rows = [];
-    sorted.forEach((l) => {
-      const cy = l.y + l.h / 2;
-      const last = rows[rows.length - 1];
-      if (last && Math.abs(cy - last.cy) <= tol) {
-        last.items.push(l);
-        last.cy = (last.cy * (last.items.length - 1) + cy) / last.items.length;
-      } else {
-        rows.push({ cy: cy, items: [l] });
-      }
+  /* 사진 판독엔 Gemini 키가 있어야 한다. 없으면 한 번만 물어 저장한다.
+     시트는 비동기라 이번 호출은 항상 false — 사용자가 키를 넣고 다시 누르면 true. */
+  function ensureKey() {
+    if (Vision.hasKey()) return Promise.resolve(true);
+    U.confirmSheet('사진 판독에는 Gemini 키가 필요합니다\n한 번만 넣으면 기억합니다', '키 넣기', () => {
+      const v = prompt('Gemini API 키');
+      if (v && v.trim()) Vision.setGkey(v);
     });
-    // 행 안에서는 왼→오른
-    rows.forEach((r) => r.items.sort((a, b) => a.x - b.x));
-    return rows.map((r) => r.items);
+    return Promise.resolve(false);
   }
+
+  /* ---------------- 프롬프트 ---------------- */
+  const PROMPTS = {
+    schedule: [
+      '콘크리트 공시체 시험 일정표(표) 사진이다. 표의 각 행에서 정보를 뽑아라.',
+      '',
+      '행마다 다음을 담아라:',
+      '- dong: 동수. 여러 동이면 전부 적어라(예: "209동, 210동"). "215동 특화동"처럼',
+      '  특화동 표기, "213동B"처럼 A/B 접미가 있으면 그대로 보존해라.',
+      '  숫자동이 아니라 "A9" 같은 블록명이면 그것을 적어라.',
+      '- special: 그 행이 특화동(구역)이면 true, 아니면 false.',
+      '- cast: 타설일(YYYY-MM-DD). 연도가 안 보이면 올해 연도를 붙여라.',
+      '- test: 시험일(YYYY-MM-DD). 없으면 null.',
+      '- age: 재령(일 수 — 1·3·10·28 중 하나). 재령 칸이 없는 표면 null.',
+      '- kind: 그 행이 "탈형" 행이면 "탈형", 아니면 "타설" 또는 "시험".',
+      '- note: 그 밖에 참고할 만한 문구(없으면 빈 문자열).',
+      '',
+      '표 밖의 글자는 무시해라. 아래 JSON 형태로만 답하라.',
+      '설명 문장·마크다운 코드블록 금지. 모르는 값은 null 로 둬라(추측해서 채우지 마라).',
+      '',
+      '{"rows":[{"dong":"209동, 210동","special":false,"cast":"2026-08-15",' +
+      '"test":"2026-08-16","age":1,"kind":"타설","note":""}]}'
+    ].join('\n'),
+
+    board: [
+      '콘크리트 압축강도 시험 성적판(화이트보드, 손글씨) 사진이다.',
+      '',
+      '- values: 시험결과 칸에 적힌 강도값(소수 둘째자리, 3~99.99 사이, 3~9개)을',
+      '  판에 적힌 순서(위→아래, 왼→오른)대로 담아라.',
+      '- 「평균」 칸의 값은 avg 에, 「보정평균」 칸의 값은 corrAvg 에만 적어라 — values 에는 넣지 마라.',
+      '- 시험기(압축시험기) 계기판에 뜬 디지털 숫자(예: 160.10)는 하중 표시기 값이지',
+      '  강도값이 아니다 — 절대 읽지 마라. 화이트보드에 손으로 적힌 값만 읽어라.',
+      '- cast: 타설일자(YYYY-MM-DD), test: 시험일자(YYYY-MM-DD). 안 보이면 null.',
+      '- 사진이 여러 장이면 판이 가장 크고 또렷하게 나온 사진 기준으로 읽어라.',
+      '',
+      '아래 JSON 형태로만 답하라. 설명 문장·마크다운 코드블록 금지. 모르는 값은 null.',
+      '',
+      '{"values":[24.53,25.11],"avg":24.82,"corrAvg":23.79,"cast":"2026-08-15","test":"2026-08-16"}'
+    ].join('\n'),
+
+    plan: [
+      '콘크리트 공시체 타설계획표 사진이다. 표 안에 「담당감리」가 적힌 행마다 정보를 뽑아라.',
+      '',
+      '- sup: 담당감리 이름(한글 2~4자, "상무"·"이사" 같은 직급은 빼라).',
+      '- dong: 그 행의 동수 — 적힌 그대로. 숫자동 뒤 A/B 글자, "특화동"·"(특화동)" 표기,',
+      '  "209,210동"처럼 여러 동이 나열된 것도 그대로 담아라.',
+      '  "A9"·"B2" 같은 블록명도 동으로 취급해라.',
+      '- part: 부위 — 제목칸에서 동 표기를 뺀 나머지(예: "2PH1 벽체", "15F 벽체", "필로티").',
+      '',
+      '규격·펌프카·반입반출 같은 다른 칸은 무시해라. 표 밖 글자도 무시해라.',
+      '아래 JSON 형태로만 답하라. 설명 문장·마크다운 코드블록 금지. 모르는 값은 null.',
+      '',
+      '{"rows":[{"sup":"최태식","dong":"215동 특화동","part":"15F 벽체"}]}'
+    ].join('\n')
+  };
 
   /* ---------------- ① 일정표 → 작업 후보 ---------------- */
   const AGE2SPEC = { 1: 'vert', 3: 'horiz', 10: 'filler', 28: 'd28' };
 
   function pad2(n) { return (n < 10 ? '0' : '') + n; }
 
-  function datesIn(text) {
-    // 2026-07-09 · 2026.7.9 · 2026/07/09 · 2026년 7월 9일
-    const out = [];
-    const re = /(20\d{2})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})/g;
-    let m;
-    while ((m = re.exec(text))) {
-      const mo = +m[2], d = +m[3];
-      if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) {
-        out.push(m[1] + '-' + pad2(mo) + '-' + pad2(d));
-      }
-    }
-    return out;
+  /* "YYYY-MM-DD" 로 맞춘다. 모델이 "2026.08.15"·"2026/8/5" 로 줘도 받고, "MM-DD" 만 오면
+     올해를 붙인다. 그 밖은 null(스킵). */
+  function fixDate(v) {
+    if (typeof v !== 'string') return null;
+    const s = v.trim().replace(/[./]/g, '-').replace(/\s+/g, '');
+    let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (m) return m[1] + '-' + pad2(+m[2]) + '-' + pad2(+m[3]);
+    m = s.match(/^(\d{1,2})-(\d{1,2})$/);
+    if (m) return new Date().getFullYear() + '-' + pad2(+m[1]) + '-' + pad2(+m[2]);
+    return null;
   }
 
-  /* lines → { items:[{dong,specKey,age,castDay,testDay,derived,offAge}], rows } */
-  function parseSchedule(lines) {
-    const rows = clusterRows(lines);
+  /* ---------------- 동 표기 추출/정규화 (일정표·계획표 공용) ----------------
+     텍스트에서 동(들)을 뽑고 나머지를 rest 로 돌려준다. 부위 텍스트가 섞여
+     있어도(계획표) 걷어낼 수 있어야 해서, "정규화"가 아니라 "추출"이 핵심이다. */
+  function extractDong(raw) {
+    let s = String(raw || '').replace(/\s+/g, ' ').trim();
+    s = s.replace(/\(\s*특화동\s*\)/g, ' 특화동');       // "(특화동)"→" 특화동"
+    // "209동, 210동"(동이 번호마다 반복) → "209, 210동"(끝에 한 번만) — 아래 그룹 정규식과
+    // 맞추기 위한 전처리. "213,214동B"(번호만 나열, 동은 끝에 한 번)는 이미 이 형태다.
+    s = s.replace(/(\d{2,3})\s*동(?=\s*[,，·]\s*\d)/g, '$1');
+
+    // 숫자동(다중 가능 — 쉼표·가운뎃점 나열) + 선택적 A/B 접미(뒤에 영숫자·한글 없을 때만) + 선택적 「특화동」
+    const m = s.match(/(\d{2,3}(?:\s*[,，·]\s*\d{2,3})*)\s*동(?:\s*([A-Ba-b])(?![0-9A-Za-z가-힣]))?(?:\s*특화동)?/);
+    if (m) {
+      const nums = m[1].split(/[,，·]/).map((x) => x.trim()).filter(Boolean);
+      const suf = m[2] ? m[2].toUpperCase() : '';
+      const special = / 특화동/.test(m[0]);
+      const list = nums.map((n) => n + '동' + suf);
+      const rest = (s.slice(0, m.index) + s.slice(m.index + m[0].length)).trim();
+      return { list: list, special: special, rest: rest };
+    }
+    // 블록명(A9·B2·A-9 등) — 숫자동이 아닌 단지
+    const bm = s.match(/(?:^|[^A-Za-z0-9가-힣])([ABab]-?\d{1,2})(?![0-9A-Za-z])/);
+    if (bm) {
+      const idx = s.indexOf(bm[1], bm.index);
+      const block = bm[1].toUpperCase().replace('-', '');
+      const rest = (s.slice(0, idx) + s.slice(idx + bm[1].length)).trim();
+      return { list: [block], special: false, rest: rest };
+    }
+    return { list: [], special: false, rest: s };
+  }
+
+  function buildDongStr(ex) {
+    if (!ex.list.length) return '';
+    let d = ex.list.join(', ');
+    if (ex.special) d += ' 특화동';
+    return d.replace(/^[\s,.\-·]+|[\s,.\-·]+$/g, '');
+  }
+
+  function normDong(s) { return buildDongStr(extractDong(s)); }
+
+  /* rows(구조화 JSON) → { dong,dongMain,specKey,age,castDay,testDay,derived,offAge,hasSpecial }[] */
+  function scheduleItems(rows) {
+    const out = [];
     const seen = Object.create(null);
-    const items = [];
 
-    rows.forEach((row) => {
-      const text = row.map((l) => l.text).join('  ');
-      const dates = datesIn(text);
-      // 날짜를 지우고 나서 재령을 찾는다 — "…-07-09" 꼬리가 "9일" 로 오독되는 걸 막는다
-      const rest = text.replace(/(20\d{2})\s*[-./년]\s*\d{1,2}\s*[-./월]\s*\d{1,2}\s*일?/g, ' ');
-      // 동은 여러 개일 수 있다 — "218동,208동,219동" (동 칸 하나에 나열).
-      // 연이은 「N동」 무리를 통째로 잡는다. 위치 칸이 같은 동을 되풀이해도 중복 제거로 접힌다.
-      let dong = '', dongMain = '', hasSpecial = false;
-      const dm = rest.match(/(\d{2,3})\s*동(?:\s*[,，·]?\s*\d{2,3}\s*동)*/);
-      if (dm) {
-        const uniq = [];
-        (dm[0].match(/\d{2,3}(?=\s*동)/g) || []).forEach((d) => {
-          if (uniq.indexOf(d) < 0) uniq.push(d);
-        });
-        if (!uniq.length) return;
-        dong = uniq.map((d) => d + '동').join(', ');
-        dongMain = uniq[0] + '동';            // 담당 감리는 첫 동 기준(사용자 지시)
-        // "215동 특화동"은 본동과 다른 구역이다 — 같은 날 215동 본동과 한 작업으로 접히면 안 된다
-        if (uniq.length === 1 && new RegExp(uniq[0] + '\\s*동\\s*특화동').test(rest)) {
-          dong = dongMain + ' 특화동';
-        } else if (uniq.length > 1 && /특화동/.test(rest)) {
-          // 다중동 행에 특화동이 섞였다 — 어느 동인지 확정할 수 없다. 자동 감리 배정을 막고
-          // 미리보기에서 사람이 잡게 표식만 남긴다(본동 감리로 잘못 배정되던 구멍, 반대심문 확인).
-          hasSpecial = true;
-        }
-      } else {
-        // 「A9」 같은 블록명(영문+숫자) — 동 칸이 숫자동이 아닌 단지가 있다(실측 양식)
-        const bm = rest.match(/(?:^|[^A-Za-z0-9가-힣])([A-Z]{1,2}\d{1,3})(?![A-Za-z0-9])/);
-        if (!bm) return;
-        dong = dongMain = bm[1];
+    (rows || []).forEach((row) => {
+      if (!row) return;
+      const kind = String(row.kind || '');
+      const note = String(row.note || '');
+      if (/탈형/.test(kind) || /탈형/.test(note)) return;      // 「탈형(기타)」 행은 만들지 않는다
+
+      let castDay = fixDate(row.cast);
+      if (!castDay) return;
+      let testDay = fixDate(row.test);
+      // 모델이 타설일·시험일 열을 바꿔 읽어도 이른 날이 타설일이다(옛 파서의 날짜 정렬 규칙 보존)
+      if (testDay && testDay < castDay) { const t = castDay; castDay = testDay; testDay = t; }
+
+      let age = null;
+      if (row.age !== null && row.age !== undefined && row.age !== '') {
+        const n = Number(row.age);
+        if (isFinite(n)) age = Math.round(n);
       }
-      if (!dates.length) return;
+      if (age != null && !AGE2SPEC[age]) return;        // 재령이 적혀 있는데 모르는 값
 
-      // 「탈형(기타)」 행은 작업으로 만들지 않는다(사용자 지시 — 무시)
-      if (/탈형/.test(rest)) return;
-
-      const am = rest.match(/(?:^|[^\dF.\-])(\d{1,2})\s*일/);   // "28F바닥" 의 F 뒤는 제외
-      let age = am ? +am[1] : null;
-      let specKey = (age != null) ? AGE2SPEC[age] : null;
-      if (am && !specKey) return;                 // 재령이 적혀 있는데 모르는 값 — 만들지 않는다
-
-      dates.sort();
-      let castDay = dates[0];
-      let testDay = dates[dates.length - 1];
-      let derived = false;
-
-      if (!am) {
-        // 재령 칸이 아예 없는 양식(필러 일정표 실측 — 날짜 두 칸이 둘 다 타설일이라 같다).
-        // 날짜 간격으로만 판정하고, 그 밖의 간격은 만들지 않는다(모르는 건 안 만든다).
+      if (age == null) {
+        // 재령 칸이 없는 양식(필러 실측) — 날짜 간격으로만 판정
+        if (!testDay) return;
         const gap = Math.round((new Date(testDay) - new Date(castDay)) / 86400000);
-        if (gap === 0) age = 10;                       // 같은 날짜 = 필러 양식
-        else if (gap === 10 || gap === 11) age = 10;   // 일요일 이월 +1 허용
-        else if (gap === 28 || gap === 29) age = 28;   // 28일 표에서 재령 칸만 놓친 행
+        if (gap === 0) age = 10;
+        else if (gap === 10 || gap === 11) age = 10;
+        else if (gap === 28 || gap === 29) age = 28;
         else return;
-        specKey = AGE2SPEC[age];
       }
+      const specKey = AGE2SPEC[age];
 
-      if (castDay === testDay) {
-        // 날짜가 하나(또는 같은 날짜 두 번 — 필러 양식)면 타설일로 보고 시험일을 규칙으로 만든다
+      let derived = false;
+      if (!testDay || testDay === castDay) {
         const t = Spec.testDayOf(new Date(castDay + 'T00:00:00'), age);
         testDay = U.dayKey(t.getTime());
         derived = true;
       }
-      // 재령과 날짜 차이가 크게 어긋나면 표기 — 막지는 않는다(미리보기에서 사람이 본다)
       const diff = Math.round((new Date(testDay) - new Date(castDay)) / 86400000);
       const offAge = Math.abs(diff - age) > 3;
 
+      const ex = extractDong(String(row.dong || ''));
+      if (!ex.list.length) return;
+      const dongMain = ex.list[0];                       // 담당 감리는 첫 동 기준(사용자 지시)
+      const special = ex.special || !!row.special;
+      let dong, hasSpecial = false;
+      if (ex.list.length === 1) {
+        dong = special ? (dongMain + ' 특화동') : dongMain;
+      } else {
+        dong = ex.list.join(', ');
+        // 다중동 행에 특화동이 섞이면 어느 동인지 확정할 수 없다 — 자동 배정을 막고
+        // 미리보기에서 사람이 잡게 표식만 남긴다(본동 감리로 잘못 배정되던 구멍).
+        if (special) hasSpecial = true;
+      }
+
       const key = dong + '|' + specKey + '|' + castDay + '|' + testDay;
-      if (seen[key]) return;                      // 같은 것이 여러 줄이면 하나만
+      if (seen[key]) return;                              // 같은 것이 여러 행이면 하나만
       seen[key] = 1;
-      items.push({ dong: dong, dongMain: dongMain, specKey: specKey, age: age,
-                   castDay: castDay, testDay: testDay,
-                   derived: derived, offAge: offAge, hasSpecial: hasSpecial });
+      out.push({ dong: dong, dongMain: dongMain, specKey: specKey, age: age,
+                 castDay: castDay, testDay: testDay,
+                 derived: derived, offAge: offAge, hasSpecial: hasSpecial });
     });
 
-    return { items: items, rows: rows.length };
+    return out;
   }
 
   /* ---------------- ② 성적판 → 강도값 후보 ---------------- */
-  /* lines → { values:[Number], excluded } — 값 순서는 판에 적힌 순서(행 우선)
-     매직 손글씨 실측(갤럭시 A55, 실제 성적판)에서 나온 오독을 되살린다:
-       "42,1|" → 42.11   (세로획을 | 나 l 로 읽음 → 1 로 교정)
-       "4403"  → 44.03   (소수점 유실 — 4자리 통짜는 XX.YY 로 본다)
-       "42 69" → 42.69   (소수점이 공백으로)
-     복원은 그 줄이 통째로 숫자일 때만 한다 — "2024 년…" 같은 날짜 줄은 안 건드린다. */
-  function parseBoard(lines, imgW) {
-    // 평균 라벨 왼쪽부터 오른쪽 열 전체(평균·보정평균 칸)는 강도값이 아니다.
-    // 여유는 **라벨 폭 기준**으로 잡는다 — 이미지 폭 기준이면 판이 프레임에 작게
-    // 나온 사진에서 여유가 판보다 커져 3열 실값까지 잘려 나간다(실측).
-    // 실측: 「평균」이 「평군」으로 읽히기도 한다 — 두 글자 다 받는다.
-    const avgLine = lines.find((l) => /평\s*[균군]/.test(l.text));
-    let cutoff = Infinity;
-    if (avgLine) cutoff = avgLine.x - (avgLine.w || 30) * 0.5;
+  /* 모델이 목록 키를 살짝 다르게 줘도 받는다(rows/items/…, 최상위 배열).
+     못 찾으면 원본을 콘솔에 남긴다 — 조용히 「못 찾음」으로 위장하면 진단이 안 된다(반대심문 지적) */
+  function pickList(raw, keys) {
+    if (Array.isArray(raw)) return raw;
+    if (raw && typeof raw === 'object') {
+      for (const k of keys) if (Array.isArray(raw[k])) return raw[k];
+    }
+    console.warn('[ocr] 목록을 찾지 못한 응답:', JSON.stringify(raw === undefined ? null : raw).slice(0, 300));
+    return [];
+  }
 
-    const cands = [];
-    let excluded = 0;
-    const push = (v, l) => {
-      if (!(v >= 3 && v <= 99.99)) { excluded++; return; }        // 0.97(보정계수) 등
-      if (/평\s*[균군]/.test(l.text)) { excluded++; return; }          // 평균 줄에 붙은 값
-      const cx = l.x + (l.w || 0) / 2;
-      if (cx >= cutoff) { excluded++; return; }                    // 평균 열(보정평균)
-      cands.push({ v: v, x: l.x, y: l.y, h: l.h || 10, w: l.w || 0 });
-    };
+  /* 숫자 관용 변환 — "23.79"·"23.79 N/mm²" 도 받는다. 소수 둘째자리로 */
+  function num2(v) {
+    if (v === null || v === undefined || v === '') return null;
+    const n = Number(String(v).replace(/[^\d.\-]/g, ''));
+    return isFinite(n) ? Math.round(n * 100) / 100 : null;
+  }
 
-    // 날짜(타설일/시험일)가 강도값으로 새는 걸 막는다 — "2026.08.16"→"26.08",
-    // "0709"→"07.09" 로 오인식되던 실측 누출(반대심문 확인).
-    const DATE_SUB = /(20\d{2})\s*[.\-/년]\s*\d{1,2}\s*[.\-/월]?\s*\d{1,2}\s*일?/g;
-    const DATE_HINT = /20\d{2}\s*[.\-/년]|타\s*설|시\s*험|일\s*자|월\s*일/;
-    lines.forEach((l) => {
-      const dateLine = DATE_HINT.test(l.text);
-      // 손글씨 1 의 흔한 오독(|·l→1) + 연도 붙은 날짜 구간 제거
-      const txt = l.text.replace(DATE_SUB, ' ').replace(/[|l]/g, '1');
-      const re = /(\d{1,2})\s*[.,]\s*(\d{2})(?!\d)/g;
-      let m, hit = false;
-      while ((m = re.exec(txt))) { hit = true; push(parseFloat(m[1] + '.' + m[2]), l); }
-      if (hit) return;
-      if (dateLine) return;                              // 날짜 줄에선 통짜 복원을 하지 않는다
-      // 소수점이 사라진 줄 — 통째로 숫자일 때만 되살린다
-      const whole = txt.trim();
-      let w4 = whole.match(/^(\d{2})(\d{2})$/);          // "4403"
-      if (!w4) w4 = whole.match(/^(\d{1,2})\s+(\d{2})$/); // "42 69"
-      // 앞자리가 0 으로 시작하는 4자리("0709")는 강도값이 아니라 MMDD 날짜다 — 뺀다
-      if (w4 && w4[1].length === 2 && w4[1][0] === '0') { excluded++; return; }
-      if (w4) push(parseFloat(w4[1] + '.' + w4[2]), l);
-    });
-
-    // 판에 적힌 순서로 — 행(위→아래) 우선, 행 안에서 왼→오른
-    const rows = clusterRows(cands.map((c) => ({ text: String(c.v), x: c.x, y: c.y, w: c.w, h: c.h, v: c.v })));
+  /* raw(모델 JSON) → { values, excluded, avg, corrAvg, castDay, testDay } */
+  function boardValues(raw) {
+    const src = pickList(raw, ['values', 'strengths', 'items']);
     const values = [];
-    rows.forEach((row) => row.forEach((l) => values.push(l.v)));
-
-    return { values: values, excluded: excluded };
+    let excluded = 0;
+    src.forEach((v) => {
+      const n = num2((v && typeof v === 'object') ? (v.value != null ? v.value : v.v) : v);
+      if (n != null && n >= 3 && n <= 99.99) values.push(n);
+      else excluded++;
+    });
+    const avg = num2(raw && raw.avg);
+    const corrAvg = num2(raw && raw.corrAvg);
+    // 평균·보정평균이 values 에 섞여 오면 코드로 걷어낸다 — 옛 파서의 「평균 열 제외」 방어벽을
+    // 프롬프트 준수에만 맡기지 않는다. 우연히 같은 실측값을 지키려 하나만 뺀다.
+    [avg, corrAvg].forEach((a) => {
+      if (a == null) return;
+      const i = values.findIndex((v) => Math.abs(v - a) < 0.005);
+      if (i >= 0) { values.splice(i, 1); excluded++; }
+    });
+    const castDay = fixDate(raw && raw.cast);
+    const testDay = fixDate(raw && raw.test);
+    return { values: values, excluded: excluded, avg: avg, corrAvg: corrAvg, castDay: castDay, testDay: testDay };
   }
 
   /* ---------------- ③ 타설계획표 → 플래너 대기 목록 ----------------
-     표 형식(실측 스크린샷): 공구 블록마다 「담당감리 <이름>」 행과 분홍 제목칸
-     「209동 2PH1 벽체」가 **같은 행**에 있다. 행을 Y 로 묶고 그 행에서
-     감리 이름·동(다중 "209,210동" · 블록 "A9")·부위(나머지 텍스트)를 뽑는다.
-     타설일은 표에 없다 — 플래너 화면의 타설일 입력을 따른다. */
-  function parsePlan(lines) {
-    const rows = clusterRows(lines);
+     모델이 dong·part 칸을 늘 깔끔하게 나누진 못한다(경계가 애매한 인쇄물이 많다) —
+     그래서 두 필드를 다시 합친 뒤 동 표기만 정규식으로 재추출한다. 어느 쪽에 얼마나
+     섞여 왔든 같은 결과가 나온다(픽스처로 검증). */
+  function planItems(rows) {
     const items = [];
     const seen = Object.create(null);
-    rows.forEach((row) => {
-      const text = row.map((l) => l.text).join('  ');
-      if (!/담당\s*감리/.test(text)) return;
-      let name = '';
-      const nm = text.match(/담당\s*감리\s*([가-힣]{2,4})/);
-      if (nm) name = nm[1];
-      else {
-        // 라벨과 이름이 다른 인식 조각으로 쪼개진 경우 — 행 안의 독립 한글 이름 토큰
-        for (const l of row) {
-          if (/담당|감리|반입|반출|규격|펌프/.test(l.text)) continue;
-          const m2 = l.text.trim().match(/^([가-힣]{2,4})$/);
-          if (m2) { name = m2[1]; break; }
-        }
-      }
-      // 동 — "209동" · "209,210동"(숫자 나열 뒤 동 하나) 우선, 없으면 블록(A9·B2·B-3)
-      let dong = '', part = '';
-      for (const l of row) {
-        const dm = l.text.match(/(\d{2,3}(?:\s*[,，]\s*\d{2,3})*)\s*동/);
-        if (dm) {
-          const nums = dm[1].split(/[,，]/).map((s) => s.trim()).filter(Boolean);
-          dong = nums.map((n) => n + '동').join(', ');
-          part = l.text.replace(dm[0], '').trim();
-          break;
-        }
-      }
-      if (!dong) {
-        for (const l of row) {
-          if (/담당\s*감리/.test(l.text)) continue;
-          // PH1·B4F·25F 같은 부위 표기는 블록이 아니다 — A·B 계열 + 뒤에 영숫자 없음만 인정
-          const bm = l.text.match(/(?:^|[^A-Za-z0-9가-힣])([AB]-?\d{1,2})(?![0-9A-Za-z])/);
-          if (bm) {
-            dong = bm[1].replace('-', '');
-            part = l.text.replace(bm[0], ' ').trim();
-            break;
-          }
-        }
-      }
+
+    (rows || []).forEach((row) => {
+      if (!row) return;
+      const combined = ((row.dong || '') + ' ' + (row.part || '')).replace(/\s+/g, ' ').trim();
+      const ex = extractDong(combined);
+      const dong = buildDongStr(ex);
       if (!dong) return;
-      part = part.replace(/^[\s·,，-]+|[\s·,，-]+$/g, '').slice(0, 40);
-      const key = dong + '|' + name;
+      const part = ex.rest.replace(/^[\s·,，\-]+|[\s·,，\-]+$/g, '').slice(0, 40);
+      const sup = String(row.sup || '').trim();
+
+      const key = dong + '|' + sup;
       if (seen[key]) return;
       seen[key] = 1;
-      items.push({ dong: dong, sup: name, part: part });
+      items.push({ dong: dong, sup: sup, part: part });
     });
-    return { items: items, rows: rows.length };
+
+    return items;
   }
 
-  /* 잘라·키운 이미지(base64)를 읽는다 — 2패스용 */
-  async function readData(b64) {
-    const P = plugin();
-    if (!P) throw new Error('NOOCR');
-    const r = await P.readData({ base64: b64 });
-    return {
-      lines: ((r && r.lines) || []).filter((l) => l && l.text),
-      width: (r && r.width) || 0,
-      height: (r && r.height) || 0
-    };
+  /* ---------------- 읽기 ----------------
+     한 번에 하나만 — 연타로 두 요청이 겹치면 토스트·확인 시트(싱글턴)가 서로 덮어 다른 사진의
+     결과를 확정할 수 있다(반대심문 지적). 겹치면 BUSY 로 거절한다.
+     타임아웃은 30초 — 실측 4~5초라 넉넉하고, 신호만 잡힌 지하(인터넷 없음)에서 45초씩 기다리게
+     두지 않는다. */
+  const OCR_TIMEOUT = 30000;
+  let busy = false;
+  async function guarded(fn) {
+    if (busy) throw new Error('BUSY');
+    busy = true;
+    try { return await fn(); } finally { busy = false; }
   }
 
-  /* 네이티브 경로의 사진을 캔버스로 불러온다 (WebView 는 file:// 직접 못 읽는다) */
-  async function loadBitmap(path) {
-    const C = global.Capacitor;
-    const url = (C && C.convertFileSrc) ? C.convertFileSrc(path) : path;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    return createImageBitmap(await res.blob());
-  }
-
-  /* 업로드용 JPEG base64 (Gemini 경로) — 긴 변 maxSide 로 줄인다 */
-  async function pathToJpegB64(path, maxSide) {
-    const bm = await loadBitmap(path);
-    const scale = Math.min(1, (maxSide || 1800) / Math.max(bm.width, bm.height));
-    const w = Math.max(1, Math.round(bm.width * scale));
-    const h = Math.max(1, Math.round(bm.height * scale));
-    const cv = document.createElement('canvas');
-    cv.width = w; cv.height = h;
-    cv.getContext('2d').drawImage(bm, 0, 0, w, h);
-    bm.close && bm.close();
-    const u = cv.toDataURL('image/jpeg', 0.85);
-    return u.slice(u.indexOf(',') + 1);
-  }
-
-  /* ---------------- 성적판 2패스 ----------------
-     1패스로 숫자들이 모여 있는 영역을 찾고, 그 영역만 잘라 키우고
-     흑백·대비를 올려 다시 읽는다. 판이 프레임에 작게 나온 사진에서
-     손글씨 인식률이 올라간다(실측 기반). 값이 더 많이 나온 패스를 쓴다. */
-  async function readBoardSmart(path) {
-    const pass1 = await read(path);
-    const r1 = parseBoard(pass1.lines, pass1.width);
-
-    // 숫자 영역 추정: 숫자꼴 줄 + 평균 라벨
-    const anchors = pass1.lines.filter((l) => {
-      const t = l.text.trim();
-      if (/평\s*[균군]/.test(t)) return true;
-      return /^[\d\s.,|lIT]+$/.test(t) && /\d{2}/.test(t);
+  function readSchedule(src) {
+    return guarded(async () => {
+      if (!Vision.online()) throw new Error('OFFLINE');
+      const im = await Vision.toJpegB64(src, 2048);
+      const raw = await Vision.callJSON(PROMPTS.schedule, [im], { timeout: OCR_TIMEOUT });
+      const rows = pickList(raw, ['rows', 'items', 'data']);
+      return { items: scheduleItems(rows), rows: rows.length };
     });
-    if (anchors.length < 3) return { values: r1.values, excluded: r1.excluded, pass: 1 };
-
-    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    const hs = [];
-    anchors.forEach((l) => {
-      x0 = Math.min(x0, l.x); y0 = Math.min(y0, l.y);
-      x1 = Math.max(x1, l.x + (l.w || 0)); y1 = Math.max(y1, l.y + (l.h || 0));
-      hs.push(l.h || 20);
-    });
-    hs.sort((a, b) => a - b);
-    const m = (hs[Math.floor(hs.length / 2)] || 20) * 1.5;
-    x0 = Math.max(0, x0 - m); y0 = Math.max(0, y0 - m);
-    x1 = Math.min(pass1.width || x1, x1 + m); y1 = Math.min(pass1.height || y1, y1 + m);
-    const cw = x1 - x0, ch = y1 - y0;
-    if (cw < 50 || ch < 50) return { values: r1.values, excluded: r1.excluded, pass: 1 };
-
-    try {
-      const bm = await loadBitmap(path);
-      const scale = Math.min(3, Math.max(1.5, 2400 / Math.max(cw, ch)));
-      const cv = document.createElement('canvas');
-      cv.width = Math.min(4096, Math.round(cw * scale));
-      cv.height = Math.min(4096, Math.round(ch * scale));
-      const ctx = cv.getContext('2d');
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'high';
-      try { ctx.filter = 'grayscale(1) contrast(1.7)'; } catch (e) {}
-      ctx.drawImage(bm, x0, y0, cw, ch, 0, 0, cv.width, cv.height);
-      bm.close && bm.close();
-      const u = cv.toDataURL('image/jpeg', 0.92);
-      const pass2 = await readData(u.slice(u.indexOf(',') + 1));
-      const r2 = parseBoard(pass2.lines, pass2.width || cv.width);
-      // 더 많이 읽은 쪽을 쓴다(같으면 2패스 — 확대본이 오독이 적다)
-      if (r2.values.length >= r1.values.length) {
-        return { values: r2.values, excluded: r2.excluded, pass: 2 };
-      }
-    } catch (e) { console.warn('[ocr pass2]', e); }
-    return { values: r1.values, excluded: r1.excluded, pass: 1 };
   }
 
-  /* ---------------- 성적판 최종 경로: ML Kit 박스 + 숫자 전용 모델 ----------------
-     ML Kit 은 칸 위치를 정확히 잡지만 매직 숫자를 오독한다.
-     → 박스만 받아서 각 칸을 PP-OCRv5 인식 모델(readDigits, 온디바이스)로 다시 읽는다.
-     읽은 문자열을 같은 좌표의 가짜 줄로 만들어 parseBoard 에 태우면
-     평균 열 제외·복원 규칙이 그대로 적용된다. 실패하면 2패스(readBoardSmart)로 물러선다. */
-  async function readBoard(path) {
-    const P = plugin();
-    if (!P) throw new Error('NOOCR');
-    let pass1;
-    try { pass1 = await read(path); }
-    catch (e) { return readBoardSmart(path); }
-
-    // 숫자 칸 후보 + 평균 라벨(제외 기준으로 필요)
-    const numeric = pass1.lines.filter((l) => {
-      const t = l.text.trim();
-      return /^[\d\s.,|lIT]+$/.test(t) && /\d/.test(t);
+  function readBoard(src) {
+    return guarded(async () => {
+      if (!Vision.online()) throw new Error('OFFLINE');
+      const im = await Vision.toJpegB64(src, 2048);
+      const raw = await Vision.callJSON(PROMPTS.board, [im], { timeout: OCR_TIMEOUT });
+      const out = boardValues(raw);
+      out.pass = 'gemini';
+      return out;
     });
-    const avg = pass1.lines.filter((l) => /평\s*[균군]/.test(l.text));
+  }
 
-    if (typeof P.readDigits === 'function' || P.readDigits) {
-      try {
-        if (numeric.length) {
-          const r = await P.readDigits({
-            path: path,
-            boxes: numeric.map((l) => ({ x: Math.round(l.x), y: Math.round(l.y),
-                                         w: Math.round(l.w), h: Math.round(l.h) }))
-          });
-          const texts = (r && r.texts) || [];
-          const synth = numeric.map((l, i) => ({
-            text: String(texts[i] || ''), x: l.x, y: l.y, w: l.w, h: l.h
-          })).filter((l) => l.text);
-          const out = parseBoard(synth.concat(avg), pass1.width);
-          if (out.values.length) return { values: out.values, excluded: out.excluded, pass: 'digits' };
-        }
-      } catch (e) { console.warn('[readDigits]', e); }
-    }
-    // 숫자 모델이 빈손이면 기존 2패스
-    return readBoardSmart(path);
+  function readPlan(src) {
+    return guarded(async () => {
+      if (!Vision.online()) throw new Error('OFFLINE');
+      const im = await Vision.toJpegB64(src, 2048);
+      const raw = await Vision.callJSON(PROMPTS.plan, [im], { timeout: OCR_TIMEOUT });
+      const rows = pickList(raw, ['rows', 'items', 'data']);
+      return { items: planItems(rows), rows: rows.length };
+    });
   }
 
   global.OCR = {
-    available: available, read: read, readData: readData,
-    readBoard: readBoard, readBoardSmart: readBoardSmart, pathToJpegB64: pathToJpegB64,
-    parseSchedule: parseSchedule, parseBoard: parseBoard, parsePlan: parsePlan,
-    _clusterRows: clusterRows
+    available: available, ensureKey: ensureKey,
+    readSchedule: readSchedule, readBoard: readBoard, readPlan: readPlan,
+    scheduleItems: scheduleItems, boardValues: boardValues, planItems: planItems,
+    normDong: normDong,
+    _prompts: PROMPTS
   };
 })(window);
 
@@ -4535,9 +4712,14 @@
       wrap.appendChild(chip);
       if (i === justAdded) newChip = chip;
     });
-    // 새 칩이 접힌 곳에 있으면 최소한으로만 스크롤 (#chips 는 스크롤 컨테이너가 아니다)
-    if (newChip && newChip.scrollIntoView) {
-      try { newChip.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (e) {}
+    // 새 칩이 접힌 곳에 있으면 #chips 안에서만 스크롤한다. scrollIntoView 는 쓰지 않는다 —
+    // 조상(화면 전체·문서)까지 밀어 아이폰 PWA 에서 키패드가 통째로 튀는 원인이 된다(사용자 실기기).
+    if (newChip && wrap.scrollHeight > wrap.clientHeight) {
+      try {
+        const cr = newChip.getBoundingClientRect(), wr = wrap.getBoundingClientRect();
+        if (cr.bottom > wr.bottom) wrap.scrollTop += cr.bottom - wr.bottom;
+        else if (cr.top < wr.top) wrap.scrollTop -= wr.top - cr.top;
+      } catch (e) {}
     }
     justAdded = -1;
   }
@@ -4661,19 +4843,25 @@
        tight-top : 통계 카드만 양보
        tight     : 키패드·칩도 한 단
        xtight    : 끝까지
+       xxtight   : 그래도 모자라면 키 48px·칩 2줄 — 세로가 짧은 폰(아이폰 SE 급).
+                   화면째 스크롤(nofit)은 값을 넣을 때마다 튀어 더 나쁘다(아이폰 실기기)
      한 단 올릴 때마다 다시 재고, 들어가면 거기서 멈춘다. */
-  const TIERS = ['', 'tight-top', 'tight', 'xtight'];
+  const TIERS = ['', 'tight-top', 'tight', 'xtight', 'xxtight'];
   let fitting = false;
+
+  // 키패드가 뷰 밖으로 밀려나지 않았는가 (탭바 뒤로 들어가면 아랫줄이 통째로 잘린다)
+  function keypadFits(view) {
+    const zone = view.querySelector('.keypad-zone');
+    if (!zone) return true;
+    return zone.getBoundingClientRect().bottom <= view.getBoundingClientRect().bottom + 1;
+  }
 
   function fits(view) {
     const scroll = view.querySelector('.calc-scroll');
-    const zone = view.querySelector('.keypad-zone');
-    if (!scroll || !zone) return true;
+    if (!scroll) return true;
     // 통계 카드가 잘리지 않는가 (스크롤이 안 생겼는가)
     if (scroll.scrollHeight > scroll.clientHeight + 1) return false;
-    // 키패드가 뷰 밖으로 밀려나지 않았는가 (탭바 뒤로 들어가면 아랫줄이 통째로 잘린다)
-    if (zone.getBoundingClientRect().bottom > view.getBoundingClientRect().bottom + 1) return false;
-    return true;
+    return keypadFits(view);
   }
 
   function fit() {
@@ -4685,12 +4873,15 @@
     try {
       view.classList.remove('nofit');
       for (let i = 0; i < TIERS.length; i++) {
-        view.classList.remove('tight-top', 'tight', 'xtight');
+        view.classList.remove('tight-top', 'tight', 'xtight', 'xxtight');
         if (TIERS[i]) view.classList.add(TIERS[i]);
         if (fits(view)) return;          // 들어갔다 → 이 단계로 확정
       }
-      // 끝까지 가도 안 들어간다(가로·분할 화면). 키패드·칩은 안 줄이기로 했으니
-      // 남은 수는 화면째 스크롤뿐이다 — 잘라서 못 누르게 두는 것보다 낫다.
+      // 끝까지 가도 안 들어간다. 키패드는 들어가고 통계 카드만 넘치는 거면(세로가 짧은 폰 —
+      // 아이폰 SE 급) 카드 안에서만 스크롤하게 두고 키패드는 그 자리에 고정한다.
+      // 화면째 스크롤(nofit)은 키패드까지 잘리는 가로·분할 화면에서만 — 화면째 스크롤은
+      // 값을 넣을 때마다 화면이 튀어 아이폰에서 못 쓴다(사용자 실기기).
+      if (keypadFits(view)) return;
       view.classList.add('nofit');
     } finally { fitting = false; }
   }
@@ -5577,7 +5768,7 @@
      묶는 기준은 분류마다 다르다 (Task.exportGroup 참고).
        수직·수평·필러 = 타설일   → "7/27 수평"
        수중·봉함     = 시험일   → "8/1 28일강도" / "7/31 봉함"  */
-  async function sendGroup(g, copyText) {
+  async function sendGroup(g, copyText, axis) {
     U.toast('사진 준비 중…', 60000);
     let blobs = [], missing = 0;
     try {
@@ -5621,8 +5812,9 @@
     else if (copied) U.toast('사진을 보낸 뒤 붙여넣기\n「' + g.label + '」', 4000);
     else U.toast('공유할 앱에서 카카오톡을 선택하세요');
 
-    // 보냈으면 「사진」 체크 표시를 제안한다(사용자 지시) — 보낸 것/안 보낸 것을 목록에서 가른다
-    if (how === 'capacitor' || how === 'webshare') askPhotoMark(g.items);
+    // 보냈으면 「사진」 체크 표시를 제안한다(사용자 지시) — 보낸 것/안 보낸 것을 목록에서 가른다.
+    // 감리별 전송에서만 — 날짜별 묶음은 사진 체크와 무관하다(사용자 지시)
+    if (axis === 'sup' && (how === 'capacitor' || how === 'webshare')) askPhotoMark(g.items);
   }
 
   /* 보낸 작업들에 photoMark 표시 제안 — 레코드는 새로 읽어 체크만 바꾼다(낡은 사본 덮어쓰기 방지) */
@@ -5879,7 +6071,7 @@
         sub: who + (bySup ? (' · ' + g.items.length + '건') : '') +
              (over ? ' · 카카오톡은 보통 한 번에 30장까지입니다'
                    : ' · 보낸 뒤 문구 붙여넣기'),
-        onPick: () => sendGroup(g, true)
+        onPick: () => sendGroup(g, true, axis)
       });
     });
     items.push({ sep: true });
@@ -5968,7 +6160,7 @@
   /* ---------------- 공시체 플래너 (전용 화면 — 사용자 지시) ----------------
      타설일·동·감리를 전용 화면(#view-plan)에서 입력해 **대기 목록(버퍼)**에 담고,
      「올리기」를 누른 것만 수직·수평·필러·28일 4건으로 등록한다(휴일 이월 규칙, day=시험일).
-     타설계획표 사진(OCR.parsePlan — 담당감리·동·부위가 같은 행)으로도 목록을 채운다.
+     타설계획표 사진(OCR.readPlan — Gemini Vision, 담당감리·동·부위가 같은 행)으로도 목록을 채운다.
      버퍼는 localStorage 에 남아 재시작해도 산다. */
   const K_PLANBUF = 'gsc.plan.buffer.v1';
   /* 항목별 분류 체크박스(사용자 지시) — 기본 전부 켬, 끈 분류는 등록하지 않는다 */
@@ -6185,7 +6377,8 @@
   }
 
   /* 타설계획표 사진 → 대기 목록 (전용 OCR — 사용자 지시) */
-  function planScan() {
+  async function planScan() {
+    if (!(await OCR.ensureKey())) return;   // 사진을 찍기 전에 키를 확인 — 찍은 뒤 물으면 그 사진은 버려진다
     U.sheet('타설계획표 사진', [
       { label: '촬영', onPick: async () => planScanPath(await Native.shootPath()) },
       { label: '앨범에서 고르기', onPick: async () => planScanPath(await Native.pickPath()) }
@@ -6194,12 +6387,11 @@
 
   async function planScanPath(path) {
     if (!path) return;
-    U.toast('계획표를 읽는 중…', 60000);
-    let doc;
-    try { doc = await OCR.read(path); }
-    catch (e) { console.warn('[plan ocr]', e); U.toast('사진을 읽지 못했습니다'); return; }
+    U.toast('계획표를 읽는 중… (Gemini)', 60000);
+    let parsed;
+    try { parsed = await OCR.readPlan(path); }
+    catch (e) { console.warn('[plan ocr]', e); U.toast(Vision.explain(e), 3500); return; }
     U.toast('읽기 완료', 700);
-    const parsed = OCR.parsePlan(doc.lines);
     if (!parsed.items.length) {
       U.toast('계획표에서 담당감리·동을 찾지 못했습니다\n표가 크게 나오게 찍어 보세요', 3500);
       return;
@@ -7340,31 +7532,17 @@
 (function (global) {
   'use strict';
 
-  const K_GKEY = 'gsc.vision.key.v1';
-  /* 기본 키를 앱에 박아 둔다 — 사용자 지시(쓰는 사람이 둘뿐).
-     APK 를 뜯으면 보이는 값이다. 밖으로 돌리게 되면 빼야 한다.
-     앱에서 키를 새로 넣으면 그게 우선한다. */
-  const DEFAULT_GKEY = '';
-  const G_MODEL = 'gemini-3.1-flash-lite';     // 이미지 받는 것 중 가장 싼 쪽(무료 티어 있음)
-  const G_API = 'https://generativelanguage.googleapis.com/v1beta/interactions';
-  const TIMEOUT = 45000;
   const MAX_PHOTOS = 3;   // 마지막 N장을 본다 — 또렷하게 다시 찍은 판이 대개 뒤에 붙는다(반대심문 확인)
 
-  /* ---------- 비전 키 ---------- */
-  function gkey() {
-    try {
-      const own = (localStorage.getItem(K_GKEY) || '').trim();
-      if (own) return own;
-    } catch (e) {}
-    return DEFAULT_GKEY;
-  }
-  function ownGkey() {
-    try { return (localStorage.getItem(K_GKEY) || '').trim(); } catch (e) { return ''; }
-  }
-  function setGkey(v) {
-    try { localStorage.setItem(K_GKEY, (v || '').trim()); } catch (e) {}
-  }
-  function hasVision() { return !!gkey(); }
+  /* ---------- 비전 키 · HTTP 호출 (vision.js 위임) ---------- */
+  const gkey = () => Vision.gkey();
+  const ownGkey = () => Vision.ownGkey();
+  const setGkey = (v) => Vision.setGkey(v);
+  const hasVision = () => Vision.hasKey();
+  const callVision = (p, imgs) => Vision.call(p, imgs);
+  const pickText = (d) => Vision.pickText(d);
+  const blobToB64 = (b) => Vision.blobToB64(b);
+  const explain = (e) => Vision.explain(e);
 
   /* ---------- 1) 규칙 검사 ----------
      level: 'bad'(고쳐야 함) / 'warn'(확인 필요) / 'info'(참고) */
@@ -7390,25 +7568,6 @@
   }
 
   /* ---------- 2) 사진 판독 ---------- */
-  function nativeHttp() {
-    const C = global.Capacitor;
-    return (C && C.isNativePlatform && C.isNativePlatform() &&
-            C.Plugins && C.Plugins.CapacitorHttp) ? C.Plugins.CapacitorHttp : null;
-  }
-
-  function blobToB64(blob) {
-    return new Promise((res, rej) => {
-      const r = new FileReader();
-      r.onload = () => {
-        const s = String(r.result || '');
-        const i = s.indexOf(',');
-        res(i >= 0 ? s.slice(i + 1) : s);
-      };
-      r.onerror = () => rej(new Error('사진을 읽지 못했습니다'));
-      r.readAsDataURL(blob);
-    });
-  }
-
   async function readPhotos(t) {
     // 앞이 아니라 **뒤에서** N장 — 흐릿하게 먼저 찍고 또렷하게 다시 찍은 판은 배열 끝에 붙는다.
     // 앞 2장만 보내면 나중에 찍은 좋은 사진을 영영 못 본다(반대심문 확인).
@@ -7460,72 +7619,6 @@
     ].join('\n');
   }
 
-  async function callVision(prompt, images) {
-    const k = gkey();
-    if (!k) throw new Error('NOVKEY');
-    const input = [{ type: 'text', text: prompt }];
-    images.forEach((im) => {
-      input.push({ type: 'image', data: im.b64, mime_type: im.mime || 'image/jpeg' });
-    });
-    const body = { model: G_MODEL, input: input };
-    const headers = { 'Content-Type': 'application/json', 'x-goog-api-key': k };
-
-    const http = nativeHttp();
-    if (http) {
-      const res = await http.request({
-        url: G_API, method: 'POST', headers: headers, data: body,
-        connectTimeout: TIMEOUT, readTimeout: TIMEOUT
-      });
-      if (res.status < 200 || res.status >= 300) {
-        throw new Error('HTTP ' + res.status + ' ' + brief(res.data));
-      }
-      return pickText((typeof res.data === 'string') ? JSON.parse(res.data) : res.data);
-    }
-    const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), TIMEOUT);
-    try {
-      const res = await fetch(G_API, {
-        method: 'POST', headers: headers, body: JSON.stringify(body), signal: ctl.signal
-      });
-      if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + brief(await res.text()));
-      return pickText(await res.json());
-    } finally { clearTimeout(timer); }
-  }
-
-  function brief(v) {
-    const s = (typeof v === 'string') ? v : JSON.stringify(v || '');
-    return s.length > 200 ? s.slice(0, 200) + '…' : s;
-  }
-
-  /* 응답 형식이 바뀔 수 있어 여러 모양을 받아 준다 */
-  function pickText(d) {
-    if (!d) throw new Error('빈 응답');
-    if (typeof d.text === 'string' && d.text.trim()) return d.text.trim();
-    if (typeof d.output_text === 'string' && d.output_text.trim()) return d.output_text.trim();
-    const walk = (arr) => {
-      let s = '';
-      (arr || []).forEach((o) => {
-        if (typeof o === 'string') s += o;
-        else if (o && typeof o.text === 'string') s += o.text;
-        else if (o && o.type === 'thought') { /* 사고 단계는 본문이 아니다 — 건너뛴다 */ }
-        else if (o && Array.isArray(o.content)) s += walk(o.content);
-        else if (o && Array.isArray(o.parts)) s += walk(o.parts);
-        else if (o && Array.isArray(o.steps)) s += walk(o.steps);
-      });
-      return s;
-    };
-    // 실측한 /v1beta/interactions 응답: { steps:[{type:'thought'},{content:[{text:'…'}]}] }
-    let s = walk(d.steps || d.output || d.outputs || d.content);
-    if (s && s.trim()) return s.trim();
-    const c = d.candidates && d.candidates[0];       // 구형 generateContent 모양
-    const parts = c && c.content && c.content.parts;
-    if (parts && parts.length) {
-      s = parts.map((p) => p.text || '').join('');
-      if (s.trim()) return s.trim();
-    }
-    throw new Error('응답을 해석하지 못했습니다: ' + brief(d));
-  }
-
   function parseJson(text) {
     let s = String(text || '').trim();
     const a = s.indexOf('{'), b = s.lastIndexOf('}');
@@ -7533,10 +7626,9 @@
     try { return JSON.parse(s); } catch (e) { return null; }
   }
 
-  /* ---------- 성적판 값만 읽기 (계산기 판넬 OCR 의 온라인 경로) ----------
-     온디바이스 ML Kit 이 매직 손글씨에 약해서(9칸 중 3~7칸 실측),
-     인터넷이 될 땐 이쪽을 먼저 쓴다. 원칙은 검수와 동일 — 모델은 숫자만 읽고
-     판정·필터링은 코드가 한다. */
+  /* ---------- 성적판 값만 읽기 (검수 전용 자산) ----------
+     계산기 판넬 OCR 은 이제 ocr.js readBoard(Gemini) 가 맡는다(2026-09-05) — 이 함수는
+     검수 흐름에서만 쓴다. 원칙은 같다 — 모델은 숫자만 읽고 판정·필터링은 코드가 한다. */
   async function readBoardValues(b64) {
     const prompt = [
       '콘크리트 시험 성적판(화이트보드) 사진이다.',
@@ -7719,23 +7811,11 @@
     return 'ok';
   }
 
-  function explain(e) {
-    const m = String((e && e.message) || e || '');
-    if (m === 'NOVKEY') return '사진 판독용 키가 없습니다.';
-    if (/400/.test(m) && /image/i.test(m)) return '이 모델이 사진을 받지 않습니다.';
-    if (/401|403|API key|PERMISSION/i.test(m)) return '판독용 API 키가 올바르지 않습니다.';
-    if (/429|RESOURCE_EXHAUSTED|quota/i.test(m)) return '판독 요청 한도를 넘었습니다. 잠시 뒤 다시.';
-    if (/5\d\d/.test(m)) return '판독 서버 오류입니다.';
-    if (/abort/i.test(m)) return '판독이 너무 늦어 끊었습니다.';
-    if (/Failed to fetch|NetworkError/i.test(m)) return '인터넷이 없어 사진 판독을 건너뜁니다.';
-    return m;
-  }
-
   global.Audit = {
     run: run, rules: rules, worst: worst, explain: explain, compare: compare,
     hasVision: hasVision, gkey: gkey, setGkey: setGkey, ownGkey: ownGkey,
     readBoardValues: readBoardValues,
-    MODEL: G_MODEL, API: G_API,
+    MODEL: Vision.MODEL, API: Vision.API,
     _visionPrompt: visionPrompt, _callVision: callVision,
     _pickText: pickText, _parseJson: parseJson, _sameList: sameList,
     _summarize: summarize, _same2: same2, _num: num
@@ -8540,7 +8620,8 @@
    ① 작업 탭 스캔 버튼: 일정표 사진 → 작업 자동 등록 (중복은 건너뜀)
    ② 계산 탭 스캔 버튼: 성적판 사진 → 강도값 입력
    둘 다 **등록 전에 읽은 내용을 보여주고 사람이 확정**한다 — OCR 은 권고일 뿐이다.
-   플러그인이 없는 환경(웹·미지원 폰)에선 버튼 자체를 숨긴다.
+   엔진은 Gemini Vision(vision.js) — 아이폰 PWA 포함 어느 플랫폼에서든 되므로
+   버튼은 항상 보인다(OCR.available() 은 Vision 모듈 존재 여부만 본다).
 ========================================================= */
 (function (global) {
   'use strict';
@@ -8555,24 +8636,22 @@
     ]);
   }
 
-  async function readImage(path) {
-    U.toast('사진에서 글자를 읽는 중…', 60000);
-    try {
-      return await OCR.read(path);
-    } finally {
-      U.toast('읽기 완료', 700);   // 긴 토스트는 반드시 교체 — 실패면 뒤이어 에러 토스트가 덮는다
-    }
-  }
-
   /* ---------------- ① 일정표 → 작업 ---------------- */
   async function fromSchedule() {
+    if (!(await OCR.ensureKey())) return;   // 사진을 찍기 **전에** — 찍은 뒤 키를 물으면 그 사진은 버려진다
     askSource('일정표 사진 (beta)', async (path) => {
       if (!path) return;
-      let doc;
-      try { doc = await readImage(path); }
-      catch (e) { console.warn('[ocr]', e); U.toast('사진을 읽지 못했습니다'); return; }
+      U.toast('읽는 중… (Gemini)', 60000);
+      let parsed;
+      try {
+        parsed = await OCR.readSchedule(path);
+      } catch (e) {
+        console.warn('[ocr]', e);
+        U.toast(Vision.explain(e), 3500);
+        return;
+      }
+      U.toast('읽기 완료', 700);   // 긴 토스트는 반드시 교체 — 실패면 뒤이어 에러 토스트가 덮는다
 
-      const parsed = OCR.parseSchedule(doc.lines);
       if (!parsed.items.length) {
         U.toast('표에서 타설일·동·재령을 찾지 못했습니다\n사진을 더 크게 찍어 보세요', 3500);
         return;
@@ -8658,20 +8737,19 @@
   }
 
   /* ---------------- ② 성적판 → 강도값 ----------------
-     **완전 오프라인**(사용자 지시 — 인터넷 독립, 무거워도 됨).
-     지금은 ML Kit 2패스(영역 확대+대비 보정). 손글씨 숫자 전용 인식기가
-     준비되면 readBoardSmart 안에서 갈아 끼운다 — 화면 흐름은 안 바뀐다. */
+     Gemini Vision 이 판을 읽는다 — 인터넷이 필요하다(사용자 지시 2026-09-05, 온디바이스 폐기). */
   async function fromBoard() {
+    if (!(await OCR.ensureKey())) return;   // 사진을 찍기 전에
     askSource('성적판 사진 (beta)', async (path) => {
       if (!path) return;
-      U.toast('사진에서 값을 읽는 중…', 60000);
+      U.toast('읽는 중… (Gemini)', 60000);
       let values = null;
       try {
         const r = await OCR.readBoard(path);
         values = r.values;
       } catch (e) {
         console.warn('[board ocr]', e);
-        U.toast('사진을 읽지 못했습니다');
+        U.toast(Vision.explain(e), 3500);
         return;
       }
       U.toast('읽기 완료', 700);
