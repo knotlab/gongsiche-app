@@ -5529,12 +5529,21 @@
 
   async function load() {
     // 날짜를 빠르게 넘기면 먼저 시작한 조회가 나중에 끝나 새 날짜 목록을 덮어쓴다.
-    // 조회 시작 시점의 날짜를 붙들고, 그 사이 바뀌었으면 결과를 버린다.
+    // 조회 시작 시점의 날짜(또는 동별 보기 대상)를 붙들고, 그 사이 바뀌었으면 결과를 버린다.
     const want = U.dayKey(base.getTime());
+    const dm = dongMode;
     let rows = [], brows = [], fail = null;
-    try { rows = await Store.tasksOf(want); } catch (e) { console.error(e); fail = e || true; }
-    try { brows = await Store.bangsOf(want); } catch (e) { console.warn('[bangs]', e); }
-    if (want !== U.dayKey(base.getTime())) return;      // 지나간 조회 — 버린다
+    if (dm) {
+      // 동별 모아보기(사용자 지시) — 날짜와 상관없이 그 동의 전체 내역
+      try { rows = (await Store.allTasks()).filter((t) => dongKeyOf(t) === dm.key); }
+      catch (e) { console.error(e); fail = e || true; }
+      try { brows = (await Store.allBangs()).filter((b) => dkey(b.dong) === dm.key); } catch (e) {}
+      if (dongMode !== dm) return;                        // 그 사이 다른 동·날짜로 바뀜
+    } else {
+      try { rows = await Store.tasksOf(want); } catch (e) { console.error(e); fail = e || true; }
+      try { brows = await Store.bangsOf(want); } catch (e) { console.warn('[bangs]', e); }
+      if (want !== U.dayKey(base.getTime()) || dongMode) return;      // 지나간 조회 — 버린다
+    }
     loadFail = fail;
     // 주구 분리(사용자 지시) — 현재 주구 작업만. 반대편은 홈 설정에서 세그를 바꿔야 보인다
     all = rows.filter((t) => Task.juguOf(t) === U.jugu());
@@ -5545,15 +5554,25 @@
   }
 
   function renderNav() {
-    const d = base;
-    const w = ['일', '월', '화', '수', '목', '금', '토'][d.getDay()];
     const el = U.$('#tasks-day');
     el.innerHTML = '';
+    const arrows = [U.$('#tasks-prev'), U.$('#tasks-next')];
+    if (dongMode) {
+      // 동별 보기 — 날짜 자리에 동 이름. 화살표는 뜻이 없으니 숨기고, 라벨을 누르면 날짜로 돌아간다
+      el.appendChild(U.el('span', 'day-text', dongMode.dong));
+      el.appendChild(U.el('span', 'day-badge', '전체 내역'));
+      arrows.forEach((a) => { if (a) a.classList.add('hidden'); });
+      return;
+    }
+    arrows.forEach((a) => { if (a) a.classList.remove('hidden'); });
+    const d = base;
+    const w = ['일', '월', '화', '수', '목', '금', '토'][d.getDay()];
     el.appendChild(U.el('span', 'day-text', (d.getMonth() + 1) + '월 ' + d.getDate() + '일 (' + w + ')'));
     if (isToday()) el.appendChild(U.el('span', 'day-badge', '오늘'));
   }
 
   function goDay(delta) {
+    if (dongMode) { setDong(null); return; }               // 동별 보기에서 날짜를 누르면 날짜 보기로
     base = delta === 0 ? Spec.atMidnight(new Date()) : Spec.addDays(base, delta);
     sel = Object.create(null);
     U.buzz(6);
@@ -5563,6 +5582,7 @@
   function visible() {
     let rows = all;
     if (listFilter) rows = rows.filter((t) => listFilter.test(t));
+    if (kindF) rows = rows.filter((t) => kindF.test(t));      // 칩(종류·사진 미체크)과 범위는 동시에 건다
     const q = searchQ.trim().toLowerCase();
     if (!q) return rows;
     return rows.filter((t) => {
@@ -5581,6 +5601,7 @@
 
   async function refresh() {
     renderNav();
+    renderChips();
     await load();
     await render();
   }
@@ -5603,10 +5624,11 @@
         // userMsg 는 store.js 가 만든 고정 문구다(사용자 입력 아님)
         ? ((loadFail.userMsg || '목록을 불러오지 못했습니다.') + '<br>위 날짜를 탭하면 다시 시도합니다.')
         : (all.length
-          ? (listFilter
-            ? '필터 「' + listFilter.label + '」에 맞는 작업이 없습니다.'
+          ? (filterLabel()
+            ? '필터 「' + filterLabel() + '」에 맞는 작업이 없습니다.'
             : '조건에 맞는 작업이 없습니다.')
-          : '이 날짜에 작업이 없습니다.<br>오른쪽 위 <b>+</b> 로 등록하세요.');
+          : (dongMode ? '이 동의 작업이 없습니다.'
+                      : '이 날짜에 작업이 없습니다.<br>오른쪽 위 <b>+</b> 로 등록하세요.'));
       list.appendChild(emptyNode);
       appendBangs(list);               // 작업이 없어도 그날 방통시험은 보인다
       updateBar();
@@ -5616,6 +5638,11 @@
     // 수행은 감리별로 몰아서 하고, 끝난 작업은 아래로
     const supKey = (t) => (t.supervisor || '￿감리 미지정');
     const sorted = rows.slice().sort((a, b) => {
+      if (dongMode) {
+        // 동별 보기는 날짜로 묶는다 — 최근 날짜부터
+        if (a.day !== b.day) return a.day < b.day ? 1 : -1;
+        return (a.order - b.order) || (a.createdAt - b.createdAt);
+      }
       const da = Task.isDone(a) ? 1 : 0, db = Task.isDone(b) ? 1 : 0;
       if (da !== db) return da - db;
       const sa = supKey(a), sb = supKey(b);
@@ -5643,7 +5670,7 @@
     let lastHead = null;
     for (const t of sorted) {
       const done = Task.isDone(t);
-      const head = done ? ' done' : supKey(t);
+      const head = dongMode ? ('d' + t.day) : (done ? ' done' : supKey(t));
       if (head !== lastHead) {
         lastHead = head;
         nodes.push(supHeader(t, done));
@@ -5689,9 +5716,18 @@
 
   /* 감리(또는 완료) 구간 머리 — 누르면 그 구간 전체 선택 */
   function groupOf(t, done) {
+    if (dongMode) return visible().filter((x) => x.day === t.day);     // 동별 보기 = 날짜 구간
     const supKey = (x) => (x.supervisor || '￿감리 미지정');
     return visible().filter((x) => (Task.isDone(x) === done) &&
       (done || supKey(x) === supKey(t)));
+  }
+
+  /* 'YYYY-MM-DD' → '9월 5일 (금)' — 동별 보기의 날짜 구간 머리 */
+  function dayText(day) {
+    const d = new Date(String(day) + 'T00:00:00');
+    if (isNaN(d)) return String(day || '');
+    const w = ['일', '월', '화', '수', '목', '금', '토'][d.getDay()];
+    return (d.getMonth() + 1) + '월 ' + d.getDate() + '일 (' + w + ')';
   }
   function groupAllOn(t, done) {
     const rs = groupOf(t, done);
@@ -5731,7 +5767,7 @@
     const box = U.el('span', 'chk' + (on ? ' on' : ''));
     if (on) box.appendChild(U.icon('check'));
     h.appendChild(box);
-    h.appendChild(U.el('b', '', done ? '완료' : (t.supervisor || '감리 미지정')));
+    h.appendChild(U.el('b', '', dongMode ? dayText(t.day) : (done ? '완료' : (t.supervisor || '감리 미지정'))));
     h.appendChild(U.el('span', '', groupOf(t, done).length + '건'));
     h.addEventListener('click', () => {
       // 지금 화면 상태를 다시 본다 — 만들 때의 on 을 쓰면 두 번째 탭이 안 먹는다
@@ -5918,7 +5954,73 @@
 
   /* ---------------- 목록 필터 (사용자 지시: 작업 탭에서 보이는 것 자체를 거른다) ----------------
      전송 시트가 아니라 목록에 건다 — 걸어 두면 목록·전체선택·전송·검수가 전부 그 범위만 본다. */
-  let listFilter = null;      // { label, test(t) } — 세션 동안 유지, '전체'로 해제
+  let listFilter = null;      // 범위 필터(블럭·공구·감리) { label, test(t) } — 세션 동안 유지, '전체'로 해제
+  let kindF = null;           // 칩 필터(종류·사진 미체크) { key, label, test } — 범위와 동시에 건다
+  let dongMode = null;        // 동별 모아보기 { dong, key } — 날짜 대신 그 동의 전체 내역(사용자 지시)
+  const dkey = (s) => String(s || '').replace(/[\s()（）]/g, '');
+  const dongKeyOf = (t) => dkey((t && t.dong) || Task.dongOf(t));
+  function filterLabel() {
+    return [listFilter && listFilter.label, kindF && kindF.label].filter(Boolean).join(' · ');
+  }
+
+  /* ---------- 종류 칩 — 시트 안 뒤지지 않고 한 번에(사용자 지시: 필터 사용성) ---------- */
+  const KINDS = [{ key: 'all', label: '전체', test: null }]
+    .concat(Spec.SPECS.map((s) => ({ key: s.key, label: s.name, test: (t) => t.specKey === s.key })))
+    .concat([{ key: 'nomark', label: '사진 미체크', test: (t) => !t.photoMark }]);
+
+  function renderChips() {
+    const box = U.$('#tasks-chips');
+    if (!box) return;
+    box.innerHTML = '';
+    if (dongMode) {
+      const c = U.el('button', 'fchip dong');
+      c.appendChild(document.createTextNode(dongMode.dong + ' 전체 내역'));
+      c.appendChild(U.el('b', '', '×'));
+      c.setAttribute('aria-label', '동별 보기 끝');
+      c.addEventListener('click', () => setDong(null));
+      box.appendChild(c);
+    }
+    KINDS.forEach((k) => {
+      const on = k.test ? !!(kindF && kindF.key === k.key) : !kindF;
+      const c = U.el('button', 'fchip' + (on ? ' on' : ''), k.label);
+      c.addEventListener('click', () => {
+        kindF = (k.test && !on) ? k : null;          // 켜진 칩을 다시 누르면 전체
+        renderChips(); render();
+      });
+      box.appendChild(c);
+    });
+  }
+
+  /* ---------- 동별 모아보기 ---------- */
+  function setDong(m) {
+    dongMode = m ? { dong: m.dong, key: m.key } : null;
+    sel = Object.create(null);
+    U.buzz(6);
+    refresh();
+  }
+
+  async function pickDong() {
+    let rows = [];
+    try { rows = (await Store.allTasks()).filter((t) => Task.juguOf(t) === U.jugu()); } catch (e) { console.error(e); }
+    const map = Object.create(null);
+    rows.forEach((t) => {
+      const k = dongKeyOf(t);
+      if (!k) return;
+      const m = map[k] || (map[k] = { key: k, dong: String((t.dong || Task.dongOf(t) || '')).trim(), n: 0, last: '' });
+      m.n++;
+      if (t.day > m.last) m.last = t.day;
+    });
+    const list = Object.keys(map).map((k) => map[k])
+      .sort((a, b) => a.dong.localeCompare(b.dong, 'ko', { numeric: true }));
+    if (!list.length) { U.toast('등록된 작업이 없습니다'); return; }
+    const items = list.map((m) => ({
+      label: m.dong, sub: m.n + '건 · 최근 ' + dayText(m.last),
+      cls: (dongMode && dongMode.key === m.key) ? 'strong' : '',
+      onPick: () => setDong(m)
+    }));
+    if (dongMode) items.unshift({ label: '동별 보기 끝 — 날짜로 돌아가기', cls: 'danger', onPick: () => setDong(null) });
+    U.sheet('동별로 모아보기', items);
+  }
 
   // "3공구장"(공구장)도 그 공구다 — 별도 필터로 두지 않고 "3공구"로 합친다(사용자 지시)
   function normTeam(tm) {
@@ -5968,23 +6070,17 @@
 
   function pickFilter() {
     const items = [];
+    // 동별 모아보기 — 날짜와 상관없이 그 동의 전체 내역(사용자 지시)
     items.push({
-      label: '전체 (필터 없음)', cls: listFilter ? '' : 'strong',
+      label: dongMode ? ('동별 보기 중: ' + dongMode.dong + ' — 다른 동 고르기') : '동별로 모아보기',
+      sub: '날짜와 상관없이 그 동의 전체 내역', cls: 'strong',
+      onPick: pickDong
+    });
+    items.push({ sep: true });
+    items.push({
+      label: '범위 없음 (전체)', cls: listFilter ? '' : 'strong',
+      sub: '종류(수직·수평·필러·28일)와 사진 미체크는 검색창 아래 칩으로',
       onPick: () => setFilter(null)
-    });
-    items.push({ sep: true });
-    // 종류별
-    Spec.SPECS.forEach((s) => {
-      items.push({
-        label: '종류 · ' + s.name,
-        onPick: () => setFilter({ label: s.name, test: (t) => t.specKey === s.key })
-      });
-    });
-    // 사진 체크(photoMark) 안 된 것만 — 아직 안 보낸 것을 골라 전체선택·전송하는 용도(사용자 지시)
-    items.push({ sep: true });
-    items.push({
-      label: '사진 체크 안 된 것만',
-      onPick: () => setFilter({ label: '사진 체크 안 됨', test: (t) => !t.photoMark })
     });
     // 블럭별 — 이 날짜 작업들 중 블럭 판정되는 게 있을 때만(공구 목록과 같은 패턴)
     const blocks = [];
@@ -6019,7 +6115,7 @@
         onPick: () => setFilter({ label: s, test: (t) => (t.supervisor || '').trim() === s })
       });
     });
-    U.sheet('무엇만 볼까요?', items);
+    U.sheet('범위 필터', items);
   }
 
   /* ---------------- 파일(압축) 내보내기 ----------------
@@ -6211,7 +6307,7 @@
     s.addEventListener('input', () => { if (!composing) apply(); });
   }
 
-  function init() { bind(); }
+  function init() { bind(); renderChips(); }
 
   global.Tasks = { init: init, refresh: refresh };
 })(window);

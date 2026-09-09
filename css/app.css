@@ -1504,3 +1504,17 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
 @media (min-width:560px){
   .view,.tabbar{max-width:520px;margin:0 auto;left:0;right:0}
 }
+
+/* ---------- 작업 탭 필터 칩 (2026-09-09, 사용자 지시: 필터 사용성) ----------
+   종류는 시트 안 뒤지지 말고 한 번에 누른다. 가로 스크롤, 스크롤바는 숨김.
+   동별 보기 칩(.dong)은 강조색 연한 배경 — 누르면 동별 보기가 끝난다. */
+.fchips{flex:0 0 auto;display:flex;gap:6px;overflow-x:auto;overflow-y:hidden;padding:0 12px 8px;
+  scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.fchips::-webkit-scrollbar{display:none}
+.fchip{flex:0 0 auto;position:relative;min-height:36px;padding:0 13px;border-radius:999px;
+  border:1px solid var(--line);background:var(--surface);color:var(--text-2);
+  font-size:13px;font-weight:700;white-space:nowrap}
+.fchip::after{content:'';position:absolute;inset:-4px 0}   /* 히트영역 세로만 44px */
+.fchip.on{background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
+.fchip.dong{background:var(--accent-soft);color:var(--accent);border-color:transparent}
+.fchip.dong b{margin-left:6px;font-weight:900}

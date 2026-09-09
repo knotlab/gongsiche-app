@@ -442,9 +442,11 @@
     <input type="text" id="tasks-search" inputmode="search" enterkeyhint="search"
            placeholder="메모 · 감리 · 분류 검색"
            autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
-    <!-- 목록 필터 — 종류·공구·감리로 보이는 작업을 거른다(사용자 지시) -->
+    <!-- 목록 필터 — 범위(블럭·공구·감리)와 동별 모아보기(사용자 지시) -->
     <button class="mini-btn" id="tasks-filter">필터</button>
   </div>
+  <!-- 한 번에 누르는 종류 칩(전체·수직·수평·필러·28일·사진 미체크) + 동별 보기 칩 — tasks.js renderChips -->
+  <div class="fchips" id="tasks-chips"></div>
 
   <div class="bat-list" id="tasks-list">
     <p class="empty-msg" id="tasks-empty">
