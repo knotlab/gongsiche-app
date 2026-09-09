@@ -295,6 +295,11 @@
         <span class="opt-label">홈 화면에 앱 설치</span>
         <span class="opt-value">크롬</span>
       </button>
+      <!-- 설치형(APK) 전용 — 깃허브 판(PWA 배포본)을 받아 웹 번들만 갈아끼운다(updater.js). 네이티브면 보인다 -->
+      <button class="opt-row opt-btn hidden" id="opt-update-row">
+        <span class="opt-label">앱 업데이트</span>
+        <span class="opt-value" id="opt-update-val">확인</span>
+      </button>
     </div>
 
   </div>
@@ -837,12 +842,12 @@
 <input type="file" id="file-pick" accept="image/*" multiple hidden>
 
 <script src="js/app.bundle.js"></script>
-<script>
+<!--sw--><script>
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', function () {
     navigator.serviceWorker.register('./sw.js').catch(function () {});
   });
 }
-</script>
+</script><!--/sw-->
 </body>
 </html>

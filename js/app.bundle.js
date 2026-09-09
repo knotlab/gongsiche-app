@@ -2222,6 +2222,178 @@
 })(window);
 
 ;
+/* ===== js/updater.js ===== */
+/* ============ updater.js — APK 웹 번들 OTA 업데이트 (안드로이드 설치형 전용) ============
+   "APK 도 깃허브 판을 따라가게"(사용자 지시 2026-09-09). 깃허브 페이지(PWA 배포본)의 version.json 을 보고
+   새 판이면 파일을 앱 데이터 폴더(DATA/web/<ver>/)에 내려받은 뒤, Capacitor 코어 WebView 플러그인의
+   setServerBasePath 로 그 폴더를 서버 루트로 바꿔 다시 연다(네이티브 코드 추가 없음).
+
+   안전판:
+   - 적용 직후엔 pending 표식만 두고 영속(persistServerBasePath)은 **새 번들이 실제로 떠서 boot() 까지 온 뒤**에.
+     새 번들이 못 뜨면(JS 깨짐) 다음 실행은 원래 assets 로 뜨고, 그때 pending 이 남아 있으니 받은 판을 버린다.
+   - 새 APK 를 설치하면 Capacitor 가 영속 경로를 스스로 지운다(isNewBinary). 여기서도 APK 가 더 새로우면 OTA 를 버린다.
+   - 네이티브 플러그인은 OTA 로 못 바꾼다 — 웹(www)만. 새 플러그인이 필요한 판은 APK 로 배포해야 한다.
+================================================================================ */
+(function (global) {
+  'use strict';
+
+  const BASE = 'https://knotlab.github.io/gongsiche-app/';
+  const K_PATH = 'gsc.ota.path', K_VER = 'gsc.ota.ver', K_AT = 'gsc.ota.at',
+        K_PENDING = 'gsc.ota.pending', K_CHECK = 'gsc.ota.check';
+  const CHECK_EVERY = 6 * 3600 * 1000;
+
+  const C = () => global.Capacitor;
+  function P(name) { const c = C(); return c && c.Plugins && c.Plugins[name]; }
+  function native() {
+    const c = C();
+    return !!(c && c.isNativePlatform && c.isNativePlatform() &&
+              P('WebView') && P('Filesystem') && P('CapacitorHttp') && P('Preferences'));
+  }
+  async function pget(k) { try { return (await P('Preferences').get({ key: k })).value || ''; } catch (e) { return ''; } }
+  async function pset(k, v) { try { await P('Preferences').set({ key: k, value: String(v || '') }); } catch (e) {} }
+
+  const b64ToUtf8 = (b) => decodeURIComponent(escape(atob(b)));
+  const utf8ToB64 = (s) => btoa(unescape(encodeURIComponent(s)));
+
+  /* 지금 떠 있는 번들의 version.json (APK 는 bundle.js 가, OTA 판은 build-pwa 가 만든다) */
+  async function local() {
+    try { const r = await fetch('./version.json?t=' + Date.now(), { cache: 'no-store' }); if (!r.ok) return null; return await r.json(); }
+    catch (e) { return null; }
+  }
+  /* 깃허브 판 — CapacitorHttp(네이티브)라 CORS 에 안 걸린다 */
+  async function remote() {
+    const r = await P('CapacitorHttp').request({
+      url: BASE + 'version.json?t=' + Date.now(), method: 'GET', connectTimeout: 8000, readTimeout: 8000
+    });
+    if (r.status !== 200) throw new Error('HTTP ' + r.status);
+    return (typeof r.data === 'string') ? JSON.parse(r.data) : r.data;
+  }
+  function newer(rem, loc) {
+    if (!rem || !rem.version || !Array.isArray(rem.files)) return false;
+    if (!loc) return true;
+    if (rem.commit && loc.commit && rem.commit === loc.commit) return false;
+    return (rem.at || 0) > (loc.at || 0);
+  }
+
+  /* 파일 내려받기 → DATA/web/<ver>/ — 서비스워커(sw.js)와 PDF 는 빼고, index.html 의 SW 등록 블록은 잘라낸다 */
+  async function download(rem, onProgress) {
+    const FS = P('Filesystem'), H = P('CapacitorHttp');
+    const dir = 'web/' + rem.version;
+    const files = rem.files.filter((f) => f !== 'sw.js' && f !== 'version.json' && !/\.pdf$/i.test(f));
+    if (files.indexOf('index.html') < 0 || !files.some((f) => /app\.bundle\.js$/.test(f))) throw new Error('파일 목록이 이상합니다');
+    try { await FS.rmdir({ path: dir, directory: 'DATA', recursive: true }); } catch (e) {}
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      const r = await H.request({ url: BASE + f + '?v=' + rem.version, method: 'GET', responseType: 'blob',
+                                  connectTimeout: 15000, readTimeout: 30000 });
+      if (r.status !== 200 || typeof r.data !== 'string') throw new Error(f + ' — HTTP ' + r.status);
+      let b64 = r.data;
+      if (f === 'index.html') {
+        const html = b64ToUtf8(b64).replace(/<!--sw-->[\s\S]*?<!--\/sw-->/, '');
+        if (html.indexOf('app.bundle.js') < 0) throw new Error('index.html 이 이상합니다');
+        b64 = utf8ToB64(html);
+      }
+      await FS.writeFile({ path: dir + '/' + f, data: b64, directory: 'DATA', recursive: true });
+      if (onProgress) onProgress(i + 1, files.length);
+    }
+    await FS.writeFile({ path: dir + '/version.json', data: utf8ToB64(JSON.stringify(rem)), directory: 'DATA', recursive: true });
+    const u = await FS.getUri({ path: dir, directory: 'DATA' });
+    return String((u && u.uri) || '').replace(/^file:\/\//, '');
+  }
+
+  async function dropOta(ver) {
+    await pset(K_PATH, ''); await pset(K_VER, ''); await pset(K_AT, ''); await pset(K_PENDING, '');
+    if (ver) { try { await P('Filesystem').rmdir({ path: 'web/' + ver, directory: 'DATA', recursive: true }); } catch (e) {} }
+  }
+  async function cleanOthers(keep) {
+    try {
+      const r = await P('Filesystem').readdir({ path: 'web', directory: 'DATA' });
+      for (const f of (r.files || [])) {
+        const name = f.name || f;
+        if (name && name !== keep) { try { await P('Filesystem').rmdir({ path: 'web/' + name, directory: 'DATA', recursive: true }); } catch (e) {} }
+      }
+    } catch (e) {}
+  }
+
+  /* 부팅 첫머리에서 부른다. true 를 돌려주면 곧 다른 번들로 다시 열리니 초기화를 멈춘다. */
+  async function boot() {
+    if (!native()) return false;
+    const loc = await local();
+    const p = await pget(K_PATH), ver = await pget(K_VER), at = +(await pget(K_AT)) || 0, pending = await pget(K_PENDING);
+    if (loc && ver && loc.version === ver) {
+      // OTA 번들 안에서 떠 있다 = 살아 있음. 이제 영속시켜 다음 실행부터 바로 이 판으로.
+      if (pending) await pset(K_PENDING, '');
+      try { await P('WebView').persistServerBasePath(); } catch (e) {}
+      cleanOthers(ver);
+      return false;
+    }
+    if (!p || !ver) return false;                      // OTA 없음 — 그냥 assets 판
+    if (pending) {                                     // 지난번 받은 판이 못 떴다 → 버린다
+      await dropOta(ver);
+      setTimeout(() => { try { U.toast('받아 둔 업데이트가 열리지 않아 원래 판으로 돌아왔습니다', 4000); } catch (e) {} }, 1500);
+      return false;
+    }
+    if (loc && (loc.at || 0) >= at) {                  // 새 APK 가 더 새롭다(또는 같다) → OTA 는 필요 없다
+      await dropOta(ver);
+      return false;
+    }
+    // 확정된 OTA 가 있는데 assets 로 떴다(영속이 풀린 경우) → 그 판으로 전환
+    try { await P('WebView').setServerBasePath({ path: p }); return true; }
+    catch (e) { await dropOta(ver); return false; }
+  }
+
+  async function run(rem) {
+    U.toast('업데이트 받는 중…', 120000);
+    try {
+      const path = await download(rem, (i, n) => U.toast('업데이트 받는 중… ' + i + '/' + n, 120000));
+      await pset(K_PATH, path); await pset(K_VER, rem.version); await pset(K_AT, rem.at || 0); await pset(K_PENDING, '1');
+      U.toast('적용 중… 앱이 다시 열립니다', 5000);
+      await P('WebView').setServerBasePath({ path: path });
+    } catch (e) {
+      console.error('[ota]', e);
+      U.toast('업데이트 실패 — ' + ((e && e.message) || e), 4000);
+    }
+  }
+
+  let checking = false;
+  async function check(manual) {
+    if (!native()) { if (manual) U.toast('설치형(APK) 앱에서만 됩니다'); return; }
+    if (navigator.onLine === false) { if (manual) U.toast('인터넷 연결이 필요합니다'); return; }
+    if (checking) return;
+    checking = true;
+    try {
+      let rem, loc;
+      try { rem = await remote(); loc = await local(); }
+      catch (e) { if (manual) U.toast('업데이트 서버에 닿지 못했습니다'); return; }
+      await pset(K_CHECK, Date.now());
+      refreshRow(loc);
+      if (!newer(rem, loc)) { if (manual) U.toast('최신 판입니다' + (loc && loc.commit ? ' (' + loc.commit + ')' : '')); return; }
+      const go = () => run(rem);
+      const what = (rem.commit || rem.version) + ' · ' + U.dayLabel(rem.at || Date.now());
+      if (manual) U.confirmSheet('새 판이 있습니다\n' + what + '\n지금 받아 적용할까요? (앱이 다시 열립니다)', '업데이트', go);
+      else U.toast('앱 새 판이 있습니다 — ' + (rem.commit || ''), 8000, { label: '업데이트', onClick: go });
+    } finally { checking = false; }
+  }
+
+  function refreshRow(loc) {
+    const v = U.$('#opt-update-val');
+    if (v) v.textContent = (loc && loc.commit) ? ('현재 ' + loc.commit) : '확인';
+  }
+
+  async function init() {
+    if (!native()) return;
+    const row = U.$('#opt-update-row');
+    if (row) { row.classList.remove('hidden'); row.addEventListener('click', () => check(true)); }
+    refreshRow(await local());
+    // 하루 몇 번만 조용히 확인 — 새 판이 있으면 토스트로 알리고, 누르면 받는다
+    const last = +(await pget(K_CHECK)) || 0;
+    if (Date.now() - last > CHECK_EVERY) setTimeout(() => check(false), 4000);
+  }
+
+  global.Updater = { boot: boot, check: check, init: init, _newer: newer };
+})(window);
+
+;
 /* ===== js/share.js ===== */
 /* ============ share.js — 내보내기 브리지 ============
    우선순위
@@ -11156,7 +11328,7 @@
     const c = Task.counts(tasks);
     U.$('#task-count').textContent = c.done + '/' + c.all;
     if (!tasks.length && !bangs.length) { list.appendChild(emptyNode); return; }
-    if (!tasks.length) { appendBangRows(list, bangs); return; }   // 작업이 없어도 방통은 보인다
+    if (!tasks.length) return;      // 방통시험은 오늘 작업에 안 싣는다(사용자 지시 2026-09-09) — 작업 탭·방통 화면에서 본다
 
     /* 만들 땐 하나씩이지만 수행은 감리별로 몰아서 한다 → 감리별로 묶고,
        끝난 작업은 맨 아래로 내린다. */
@@ -11211,7 +11383,6 @@
       list.appendChild(row);
     });
 
-    appendBangRows(list, bangs);
   }
 
   /* 그날의 방통시험 — 작업 아래 별도 구간(사용자 지시). 탭하면 방통 화면에서 수정 */
@@ -11440,7 +11611,9 @@
     document.addEventListener('gesturestart', (e) => { if (!zoomable) e.preventDefault(); });
   }
 
-  function boot() {
+  async function boot() {
+    // OTA(설치형) — 확정된 새 웹 번들이 있으면 그쪽으로 다시 열린다. 그럼 여기서 멈춘다(곧 리로드).
+    if (global.Updater) { try { if (await Updater.boot()) return; } catch (e) { console.warn('[ota]', e); } }
     bindShell();
     Calc.init();
     Tasks.init();
@@ -11449,6 +11622,7 @@
     AuditUI.init();
     OCRUI.init();
     if (global.Sync) Sync.init();     // 관리자 서버 백업 (beta)
+    if (global.Updater) Updater.init();   // APK 웹 번들 OTA(설치형에서만 줄이 보인다)
     if (global.Bangtong) Bangtong.init();
     Home.init();
     Nav.go('home');
