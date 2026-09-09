@@ -1484,13 +1484,16 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
    0 까지 쪼그라들면 평균이 안 보이니 한 줄은 남긴다 */
 #view-calc.xtight .calc-scroll{min-height:72px}
 
-/* 4단계 — 키 48px + 칩 2줄(칩은 자기 안에서 스크롤, 높이는 여전히 고정). 세로 짧은 폰 전용 */
+/* 4단계 — 키 48px. 칩은 여전히 3줄(9개)이 통째로 보인다 — 줄 수를 줄여 안에서 스크롤시키면
+   "위에 스크롤 생긴다"(사용자 지시: 스크롤 절대 금지). 그래도 모자라면 Calc.fit 이 --chiph(30px 까지)와
+   --keyh(44px 까지)를 1px 씩 줄여 **한 화면에 들어갈 때까지** 맞춘다(인라인 변수). */
 #view-calc.xxtight{--keyh:48px}
-#view-calc.xxtight #chips{
-  min-height:calc(var(--chiph)*2 + var(--chipgap)*2);
-  max-height:calc(var(--chiph)*2 + var(--chipgap)*2);
-}
 #view-calc.xxtight .calc-scroll{min-height:64px}
+#view-calc.xxtight .chips-head{min-height:36px;margin-bottom:4px}
+#view-calc.xxtight .stat-main{margin:2px 0;padding:2px 11px}
+#view-calc.xxtight .flow-item{padding:3px 8px}
+#view-calc.xxtight .flow-val{font-size:16px}
+#view-calc.xxtight .chip{padding:3px 4px 3px 7px}      /* 칩 높이가 26px 까지 내려가도 글자가 안 잘린다 */
 
 /* 예전엔 여기에 @media(max-height:800/680){:root{...}} 로 치수를 줄여 뒀었다. 지웠다.
    tier 클래스는 #view-calc(자손)에, 미디어쿼리는 :root(조상)에 선언되므로

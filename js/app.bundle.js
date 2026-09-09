@@ -4874,9 +4874,31 @@
   function fits(view) {
     const scroll = view.querySelector('.calc-scroll');
     if (!scroll) return true;
-    // 통계 카드가 잘리지 않는가 (스크롤이 안 생겼는가)
-    if (scroll.scrollHeight > scroll.clientHeight + 1) return false;
+    // 통계 카드가 잘리지 않는가 (스크롤이 1px 도 안 생겼는가 — PC 크롬은 1px 넘쳐도 스크롤바를 그린다)
+    if (scroll.scrollHeight > scroll.clientHeight) return false;
+    // 등록값 칸도 안에서 스크롤이 생기면 안 된다(사용자 지시 — 위쪽 스크롤 금지)
+    const chips = view.querySelector('#chips');
+    if (chips && chips.scrollHeight > chips.clientHeight) return false;
     return upperFits(view);
+  }
+
+  /* 단계를 다 써도 안 들어가면 치수 변수를 1px 씩 깎아 **스크롤 없이** 들어갈 때까지 맞춘다.
+     순서: 칩 높이(→30) → 키 높이(→44, 탭 최소) → 보정평균 글자(→22) → 통계 카드 여백(→2) → 통계 줄(→18).
+     화면이 열릴 때만 도는 계산이라 수십 번 재도 된다. [변수, 하한] */
+  const SHRINK = [['--chiph', 26], ['--chipgap', 2], ['--keyh', 44], ['--avgf', 22], ['--statpad', 2], ['--statrow', 18]];
+  function shrinkVar(view, name, from, min) {
+    let v = from;
+    while (v > min && !fits(view)) {
+      v -= 1;
+      view.style.setProperty(name, v + 'px');
+      setZoneH(view);
+    }
+    return fits(view);
+  }
+  function cssPx(view, name, fallback) {
+    const s = getComputedStyle(view).getPropertyValue(name);
+    const n = parseFloat(s);
+    return isFinite(n) ? n : fallback;
   }
 
   let lastFitH = 0;
@@ -4893,16 +4915,21 @@
     try {
       lastFitH = h;
       view.classList.remove('nofit');
+      SHRINK.forEach((s) => view.style.removeProperty(s[0]));
       for (let i = 0; i < TIERS.length; i++) {
         view.classList.remove('tight-top', 'tight', 'xtight', 'xxtight');
         if (TIERS[i]) view.classList.add(TIERS[i]);
         setZoneH(view);
         if (fits(view)) return;          // 들어갔다 → 이 단계로 확정
       }
-      // 끝까지 가도 안 들어간다. 통계 카드만 넘치고 등록값 카드는 키패드 위에 있으면(세로가
-      // 짧은 폰) 카드 안에서만 스크롤하게 두고 키패드는 바닥에 그대로 둔다.
-      // 화면째 스크롤(nofit)은 등록값까지 키패드 뒤로 숨는 가로·분할 화면에서만 —
-      // 화면째 스크롤은 값을 넣을 때마다 화면이 튀어 폰에서 못 쓴다(사용자 실기기).
+      // 끝까지 가도 안 들어간다 → 치수를 순서대로 깎아 **스크롤 없이** 들어가게 한다
+      for (let i = 0; i < SHRINK.length; i++) {
+        const s = SHRINK[i];
+        if (shrinkVar(view, s[0], cssPx(view, s[0], s[1]), s[1])) return;
+      }
+      // 그래도 안 들어간다. 등록값 카드가 키패드 위에 있으면(극단적으로 짧은 세로) 통계 카드만
+      // 안에서 스크롤하게 두고 키패드는 바닥에 그대로 둔다. 화면째 스크롤(nofit)은 등록값까지
+      // 키패드 뒤로 숨는 가로·분할 화면에서만 — 값을 넣을 때마다 화면이 튀어 폰에서 못 쓴다.
       if (upperFits(view)) return;
       view.classList.add('nofit');
       setZoneH(view);
