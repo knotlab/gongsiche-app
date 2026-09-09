@@ -954,9 +954,16 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
    예전엔 여기서 조용히 포기해 키패드 아랫줄이 view 밖으로 나갔고,
    .view 가 overflow:hidden 이라 스크롤로도 닿을 수 없었다.
    못 누르게 잘라 두느니 화면째 스크롤시킨다. */
-#view-calc.nofit{overflow-y:auto;-webkit-overflow-scrolling:touch}
+#view-calc.nofit{overflow-y:auto;-webkit-overflow-scrolling:touch;padding-bottom:0}
 #view-calc.nofit .calc-scroll{flex:0 0 auto;overflow:visible}
-#view-calc.nofit .keypad-zone{flex:0 0 auto}
+#view-calc.nofit .keypad-zone{flex:0 0 auto;position:static}
+
+/* 키패드는 화면 바닥에 **절대 위치** — 위쪽(통계·등록값·토스트·무엇이든)이 어떻게 변해도
+   못 밀린다(안드로이드·아이폰 실기기 "치면 화면 넘어감" 대응, 2026-09-09).
+   위쪽 flex 열은 padding-bottom(--zoneh = Calc.fit 이 잰 키패드 높이)만큼 자리를 비운다.
+   fit 이 돌기 전엔 토큰으로 어림한 값(디스플레이 62 + 키 4줄 + 간격·여백 45). */
+#view-calc{--zoneh:calc(var(--keyh)*4 + 107px);padding-bottom:var(--zoneh)}
+#view-calc .keypad-zone{position:absolute;left:0;right:0;bottom:0}
 
 /* ---------- 계산 세트 (작업 편집기) ---------- */
 .set-list{display:flex;flex-direction:column;gap:6px;margin:2px 0 8px}

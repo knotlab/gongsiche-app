@@ -4628,12 +4628,15 @@
   /* 밖에서 값 여러 개를 한 번에 등록 — OCR 이 읽어 온 값을 넣는 용도.
      입력 규칙(범위·자릿수)은 손입력과 똑같이 검사한다. 못 믿을 값은 버린다. */
   function addValues(vals) {
-    let ok = 0;
+    let ok = 0, dropped = 0;
     (vals || []).forEach((v) => {
       const e = normalizeEntry({ v: Number(v) });
-      if (e) { entries.push(e); ok++; }
+      if (!e) return;
+      if (entries.length >= cap()) { dropped++; return; }     // 분류별 상한 — 넘치는 건 안 넣는다
+      entries.push(e); ok++;
     });
     if (ok) { justAdded = entries.length - 1; save(); render(); }
+    if (dropped) U.toast(capMsg() + ' — ' + dropped + '개는 넣지 않았습니다', 3500);
     return ok;
   }
 
@@ -4831,7 +4834,10 @@
     U.$('#stat-corr').textContent = s.n ? U.fix2(s.corr) : '–';
   }
 
-  function render() { renderDisplay(); renderChips(); renderStats(); fit(); }
+  // 값을 넣을 때마다 fit() 을 다시 돌리지 않는다 — 경계에 걸린 기기에선 매 입력마다 단계가
+  // 오락가락해 키패드·칩 크기가 튄다(안드로이드·아이폰 실기기 "치면 화면 넘어감").
+  // 단계는 화면이 열릴 때·높이가 바뀔 때·연결바가 생기고 사라질 때만 정한다.
+  function render() { renderDisplay(); renderChips(); renderStats(); }
 
   /* ---------- 화면에 맞추기 ----------
      미디어쿼리는 화면 전체 높이만 본다. 계산 본문이 실제로 쓸 수 있는 높이는
@@ -4849,11 +4855,20 @@
   const TIERS = ['', 'tight-top', 'tight', 'xtight', 'xxtight'];
   let fitting = false;
 
-  // 키패드가 뷰 밖으로 밀려나지 않았는가 (탭바 뒤로 들어가면 아랫줄이 통째로 잘린다)
-  function keypadFits(view) {
+  /* 키패드(.keypad-zone)는 화면 바닥에 **절대 위치**다(app.css) — 위쪽이 무슨 짓을 해도 못 밀린다.
+     대신 위쪽(통계 카드·등록값)이 키패드 위 공간에 들어가는지를 잰다. --zoneh 는 키패드 실측 높이. */
+  function setZoneH(view) {
     const zone = view.querySelector('.keypad-zone');
-    if (!zone) return true;
-    return zone.getBoundingClientRect().bottom <= view.getBoundingClientRect().bottom + 1;
+    if (zone) view.style.setProperty('--zoneh', zone.offsetHeight + 'px');
+  }
+
+  // 등록값 카드 아랫선이 키패드 위에 머무는가 (넘으면 키패드 뒤로 숨어 안 보인다)
+  function upperFits(view) {
+    const wrap = view.querySelector('.chips-wrap');
+    const zone = view.querySelector('.keypad-zone');
+    if (!wrap || !zone) return true;
+    const limit = view.getBoundingClientRect().bottom - zone.offsetHeight;
+    return wrap.getBoundingClientRect().bottom <= limit + 1;
   }
 
   function fits(view) {
@@ -4861,28 +4876,36 @@
     if (!scroll) return true;
     // 통계 카드가 잘리지 않는가 (스크롤이 안 생겼는가)
     if (scroll.scrollHeight > scroll.clientHeight + 1) return false;
-    return keypadFits(view);
+    return upperFits(view);
   }
 
-  function fit() {
+  let lastFitH = 0;
+  /* onlyIfChanged: resize 류 이벤트에서 부를 때 — 화면 높이가 그대로면 아무것도 안 한다.
+     (iOS 는 스크롤·주소창 변화로도 resize 를 쏜다. 그때마다 단계를 다시 재면 경계에서 튄다) */
+  function fit(onlyIfChanged) {
     const view = U.$('#view-calc');
     if (!view || fitting) return;
     // 숨어 있으면 높이가 전부 0이라 재봐야 헛수고다. 보일 때 다시 부른다.
     if (view.classList.contains('hidden') || !view.clientHeight) return;
+    const h = view.clientHeight;
+    if (onlyIfChanged && h === lastFitH) return;
     fitting = true;
     try {
+      lastFitH = h;
       view.classList.remove('nofit');
       for (let i = 0; i < TIERS.length; i++) {
         view.classList.remove('tight-top', 'tight', 'xtight', 'xxtight');
         if (TIERS[i]) view.classList.add(TIERS[i]);
+        setZoneH(view);
         if (fits(view)) return;          // 들어갔다 → 이 단계로 확정
       }
-      // 끝까지 가도 안 들어간다. 키패드는 들어가고 통계 카드만 넘치는 거면(세로가 짧은 폰 —
-      // 아이폰 SE 급) 카드 안에서만 스크롤하게 두고 키패드는 그 자리에 고정한다.
-      // 화면째 스크롤(nofit)은 키패드까지 잘리는 가로·분할 화면에서만 — 화면째 스크롤은
-      // 값을 넣을 때마다 화면이 튀어 아이폰에서 못 쓴다(사용자 실기기).
-      if (keypadFits(view)) return;
+      // 끝까지 가도 안 들어간다. 통계 카드만 넘치고 등록값 카드는 키패드 위에 있으면(세로가
+      // 짧은 폰) 카드 안에서만 스크롤하게 두고 키패드는 바닥에 그대로 둔다.
+      // 화면째 스크롤(nofit)은 등록값까지 키패드 뒤로 숨는 가로·분할 화면에서만 —
+      // 화면째 스크롤은 값을 넣을 때마다 화면이 튀어 폰에서 못 쓴다(사용자 실기기).
+      if (upperFits(view)) return;
       view.classList.add('nofit');
+      setZoneH(view);
     } finally { fitting = false; }
   }
 
@@ -4891,6 +4914,9 @@
     // 자동등록 모드에서 입력칸이 이미 꽉 차 있으면(⌫ 로 되돌린 값 등) 먼저 등록하고 새 값을 시작한다.
     // 이걸 안 하면 24.53 되돌린 뒤 숫자를 누를 때 245.3x 로 자라 10배 오입력이 된다.
     if (autoReg && digits.length >= MAX_AUTO) register();
+
+    // 분류별 상한(수직·수평·필러 3개 / 28일 9개) — 다 찼으면 새 값을 시작하지 못한다
+    if (!digits.length && entries.length >= cap()) { U.toast(capMsg()); U.buzz(10); return; }
 
     if (digits.length >= MAX_FREE) {
       U.toast('최대 ' + MAX_FREE + '자리까지 입력됩니다');
@@ -4931,6 +4957,11 @@
 
   function register() {
     if (!digits.length) { U.toast('숫자를 먼저 입력하세요'); return; }
+    if (entries.length >= cap()) {
+      U.toast(capMsg());
+      digits = ''; renderDisplay(); saveDigits();
+      return;
+    }
     const v = digitsToValue(digits);
     if (!isFinite(v) || v <= 0) {
       // '00' 두 번 누르면 0.00 이 조용히 등록돼 평균을 통째로 오염시킨다
@@ -4958,6 +4989,7 @@
      직접 입력한 **마지막 값은 항상 맨 끝자리**(9번)로 옮긴다(사용자 지시).
      퍼짐은 슬라이더(#fill-spread, 모듈 전역 `spread`)가 곧 값이다 — 판에 적힌 값처럼 흩어진다. */
   function fillRandom(target) {
+    target = Math.min(target, cap());              // 분류별 상한(수직·수평·필러 3개 / 28일 9개)
     const n = entries.length;
     if (!n) { U.toast('기준이 될 값을 먼저 입력하세요'); return; }
     if (n >= target) {
@@ -5073,6 +5105,20 @@
   let linkedId = null;
   let linkedSet = null;      // 어느 계산 세트에 넣을 것인가
   let linkedSub = null;      // 28일 작업이면 수중/봉함 중 어느 칸인가
+  let linkedSpec = null;     // 연결된 작업의 분류 — 등록 개수 상한을 정한다(사용자 지시)
+
+  /* 수직·수평·필러는 공시체 3개 평균, 28일(수중·봉함)은 9개 평균 — 그 이상은 못 치게 막는다.
+     연결 안 된 자유 계산기는 9개(칩 3줄). */
+  function capFor(specKey) { return (!specKey || specKey === 'd28') ? 9 : 3; }
+  function cap() { return capFor(linkedSpec); }
+  function capMsg() {
+    const s = linkedSpec && Spec.byKey(linkedSpec);
+    return (s ? s.name + ' — ' : '') + cap() + '개까지입니다';
+  }
+  function syncFillBtn() {
+    const b = U.$('#btn-fill9');
+    if (b) b.textContent = cap() + '개 채우기';
+  }
 
   function sameVals(a, b) {
     if (a.length !== b.length) return false;
@@ -5086,7 +5132,7 @@
     if (btn) btn.classList.toggle('hidden', !(linkedId && linkedSub === 'seal'));
   }
 
-  function linkTo(taskId, setId, label, values, f, subKey) {
+  function linkTo(taskId, setId, label, values, f, subKey, specKey) {
     const incoming = (values || []).slice();
     // 어디에도 저장되지 않은 입력 버퍼를 말없이 덮지 않는다 — 공시체는 이미 깨서 재측정이 안 된다.
     // 되돌리기 토스트를 준다(clearAll 과 같은 안전장치, 반대심문 확인).
@@ -5106,6 +5152,7 @@
     linkedId = taskId || null;
     linkedSet = setId || null;
     linkedSub = subKey || null;
+    linkedSpec = specKey || null;
     entries = incoming;
     factor = (typeof f === 'number' && isFinite(f) && f > 0) ? f : DEFAULT_FACTOR;
     digits = '';
@@ -5115,7 +5162,7 @@
     bar.classList.toggle('hidden', !linkedId);
     const fin = U.$('#factor');
     if (fin) fin.value = factorText(factor);
-    syncFillSealBtn();
+    syncFillSealBtn(); syncFillBtn();
     fit();   // 연결바(약 59px)가 생기면 남는 높이가 그만큼 줄어든다
   }
 
@@ -5123,8 +5170,9 @@
     linkedId = null;
     linkedSet = null;
     linkedSub = null;
+    linkedSpec = null;
     U.$('#calc-link').classList.add('hidden');
-    syncFillSealBtn();
+    syncFillSealBtn(); syncFillBtn();
     fit();   // 연결바가 사라져 높이가 도로 늘었다
   }
 
@@ -5231,6 +5279,11 @@
 
   async function putInto(t, subKey) {
     const n = entries.length;
+    const lim = capFor(t.specKey);
+    if (n > lim) {
+      U.toast(((Spec.byKey(t.specKey) || {}).name || '이 분류') + ' — ' + lim + '개까지인데 값이 ' + n + '개입니다', 3500);
+      return;
+    }
     // writeSet 이 28일(sub 칸)과 일반 작업을 모두 안다 — 직접 t.sets 를 만지면 d28 에서 증발한다
     writeSet(t, entries.slice(), factor, null, subKey || '');
     try { await Store.putTask(t); }
@@ -5247,7 +5300,7 @@
   /* ---------- 바인딩 ---------- */
   function bind() {
     // 회전·소프트키보드·창크기 변화 → 남는 높이가 달라지므로 다시 맞춘다
-    const refit = () => fit();
+    const refit = () => fit(true);   // 높이가 실제로 바뀐 때만 — iOS 는 스크롤로도 resize 를 쏜다
     window.addEventListener('resize', refit);
     window.addEventListener('orientationchange', refit);
     if (window.visualViewport) window.visualViewport.addEventListener('resize', refit);
@@ -5829,9 +5882,10 @@
             const f = await Store.getTask(t.id);
             if (f) { f.photoMark = true; await Store.putTask(f); t.photoMark = true; }
           } catch (e) {}
+          delete sel[t.id];        // 보내고 체크한 작업은 선택에서 뺀다(사용자 지시) — 다음 전송에 안 섞인다
         }
         refresh();
-        U.toast('사진 체크를 표시했습니다');
+        U.toast('사진 체크를 표시했습니다 — 선택에서 뺐습니다');
       });
   }
 
@@ -6147,6 +6201,31 @@
   let tk = null;           // 편집 중인 작업
   let saving = null;       // 저장 재진입 가드
   let dirty = false;
+
+  /* ---------------- 자동저장 (사용자 지시 — 저장 버튼을 일일이 안 눌러도 되게) ----------------
+     바뀌는 순간마다 markDirty() → 0.9초 뒤 무음 저장. 타이머가 울릴 때 편집 대상이 그대로이고
+     아직 dirty 이며 "내용이 있는" 작업일 때만 저장한다(빈 새 작업까지 만들지 않는다 — 동·메모·
+     사진·강도값·방통값 중 하나는 있어야 한다). 이미 저장된(id 있는) 작업은 늘 저장. */
+  const AUTOSAVE_MS = 900;
+  let autoT = null;
+  function markDirty() { dirty = true; autosaveSoon(); }
+  function autosaveSoon() {
+    clearTimeout(autoT);
+    const owner = tk;
+    autoT = setTimeout(() => {
+      if (!owner || tk !== owner || !dirty || !hasSubstance()) return;
+      save(true);
+    }, AUTOSAVE_MS);
+  }
+  function hasSubstance() {
+    if (!tk) return false;
+    if (tk.id) return true;
+    if ((tk.dong || "").trim() || (tk.part || "").trim()) return true;
+    if (photoIdsOf(tk).length) return true;
+    try { if (Task.filledSets(tk).length) return true; } catch (e) {}
+    if (bangX) { const v = bangVals(); if (v.w || v.s1 || v.s2) return true; }
+    return false;
+  }
 
   const $ = U.$;
 
@@ -6514,7 +6593,7 @@
         // 분류를 바꾸면 타설일 기본값도 따라간다 (직접 고친 값은 덮어쓴다)
         tk.castDay = Task.defaultCast(s.key, Task.testDayOf(tk));
         $('#tk-cast').value = tk.castDay;
-        dirty = true;
+        markDirty();
         renderSpecs(); renderAge(); renderReport();
         renderSubTabs(); renderValues(); renderPhotos();
         syncBangUI();
@@ -6650,7 +6729,7 @@
     migrateAcrossSub(tk.specKey, 'bang');   // d28 에서 오면 사진을 평탄화(hasSubs('bang')=false)
     tk.specKey = 'bang';
     bangX = { w: '', s1: '', s2: '', fl: '', id: null, active: 'w' };
-    dirty = true;
+    markDirty();
     renderSpecs(); renderSubTabs(); renderValues(); renderPhotos(); renderReport();
     syncBangUI();
   }
@@ -6705,7 +6784,7 @@
       if (s.length > max) return;
     }
     bangX[bangX.active] = s;
-    dirty = true;
+    markDirty();
     renderBangFields(); renderBangResult();
     U.buzz(4);
   }
@@ -6796,7 +6875,7 @@
   function pickDong(dong) {
     if (!tk) return;
     tk.dong = dong || '';
-    dirty = true;
+    markDirty();
     renderDong();
     renderReport();
     clearHints();
@@ -6861,7 +6940,7 @@
     if (!tk) return;
     tk.supervisor = c ? Contacts.label(c) : '';
     tk.supPhone = c ? c.phone : '';
-    dirty = true;
+    markDirty();
     renderSup();
     // 고르고 나면 추천 칩은 할 일을 다 했다
     const sh = $('#tk-sup-hint');
@@ -6878,7 +6957,7 @@
     }
     chips($('#tk-dong-hint'), ds.length ? '담당 동' : '',
       ds.map((d) => ({ label: d, onPick: () => {
-        tk.dong = d; dirty = true; renderDong(); renderReport();
+        tk.dong = d; markDirty(); renderDong(); renderReport();
         $('#tk-dong-hint').classList.add('hidden');
       } })));
   }
@@ -6916,7 +6995,7 @@
         const phone = prompt('전화번호 (선택 — 비워도 됩니다)', tk.supPhone || '');
         tk.supervisor = name.trim();
         tk.supPhone = (phone === null) ? '' : phone.trim();
-        dirty = true;
+        markDirty();
         renderSup(); renderReport();
         const sh = $('#tk-sup-hint');
         if (sh) { sh.innerHTML = ''; sh.classList.add('hidden'); }
@@ -6992,7 +7071,7 @@
       name.setAttribute('autocorrect', 'off');
       name.setAttribute('autocapitalize', 'off');
       name.setAttribute('spellcheck', 'false');
-      name.addEventListener('input', () => { set.name = name.value; dirty = true; });
+      name.addEventListener('input', () => { set.name = name.value; markDirty(); });
 
       const st = Task.setStats(set);
       const sum = U.el('div', 'set-sum');
@@ -7031,7 +7110,7 @@
     const go = () => {
       const b2 = bag();
       b2.sets = Store.normalizeSets(b2).filter((s) => s.id !== set.id);
-      dirty = true; renderValues();
+      markDirty(); renderValues();
       U.toast(Task.setName(set, i) + '를 지웠습니다');
     };
     if (!st.n) { go(); return; }          // 빈 세트는 되묻지 않는다
@@ -7046,7 +7125,7 @@
     const fresh = { id: U.uid(), name: '', values: [], factor: Calc.DEFAULT_FACTOR };
     box.sets = sets.concat([fresh]);
     delete box.values; delete box.factor;
-    dirty = true;
+    markDirty();
     renderValues();
     await openCalc(fresh.id);
   }
@@ -7073,7 +7152,7 @@
 
     Nav.showTask(false);
     Nav.go('calc');
-    Calc.linkTo(rec.id, set.id, bits.join(' · '), set.values, set.factor, sub);
+    Calc.linkTo(rec.id, set.id, bits.join(' · '), set.values, set.factor, sub, rec.specKey);
   }
 
   /* 사진 크게 보기 — 원본(파일·OPFS 이전분 포함)을 라이트박스로.
@@ -7145,7 +7224,7 @@
         // 렌더된 그 칸이 아직 현재 칸일 때만 지운다 — 렌더한 box 를 그대로 쓴다(인덱스 어긋남 방지)
         if (!tk || curKey() !== subAt) return;
         U.dropUrl(box.photos[i]);
-        box.photos.splice(i, 1); dirty = true; renderPhotos(); renderSubTabs();
+        box.photos.splice(i, 1); markDirty(); renderPhotos(); renderSubTabs();
       });
       cell.appendChild(del);
       cell.appendChild(U.el('span', 'n', (i + 1) + ''));
@@ -7188,7 +7267,7 @@
           }
         } catch (e) { console.error('[photo]', e); fail++; unpend(id); continue; }
         if (tk !== owner) { aborted = true; unpend(id); Store.deletePhotos([id]).catch(() => {}); break; }
-        box.photos.push(id); dirty = true; ok++;
+        box.photos.push(id); markDirty(); ok++;
         // **장마다** 즉시 작업에 연결해 저장한다 — putPhoto 와 putTask 사이에서 앱이 죽으면
         // 사진이 고아가 되는 창을 한 장 분량으로 줄인다(반대심문 확인). 새 작업도 첫 장에서 생긴다.
         if (tk === owner) await save(true);
@@ -7332,15 +7411,15 @@
     // 버렸다(작업 증발 신고의 실제 원인 — 버그리포트). 규칙을 단순화한다:
     // 바뀐 게 없으면 조용히 닫고, 바뀌었으면 무조건 묻는다.
     if (!dirty) { tk = null; Nav.showTask(false); Store.gc(pendingIds.slice()); return; }
-    U.sheet('저장하지 않은 변경이 있습니다', [
-      { label: '저장하고 나가기', cls: 'strong', onPick: async () => {
-          const r = await save(true);
-          if (r) { tk = null; Nav.showTask(false); U.toast('저장했습니다'); }
-        } },
-      { label: '저장하지 않고 나가기', cls: 'danger', onPick: () => {
-          tk = null; Nav.showTask(false); Store.gc(pendingIds.slice());
-        } }
-    ]);
+    // 자동저장(사용자 지시) — 묻지 않고 저장하고 닫는다. 내용이 하나도 없는 새 작업은 만들지 않는다.
+    if (!hasSubstance()) { tk = null; Nav.showTask(false); Store.gc(pendingIds.slice()); return; }
+    clearTimeout(autoT);
+    const owner = tk;
+    save(true).then((r) => {
+      if (tk !== owner) return;          // 저장 사이 다른 작업을 열었다 — 그 화면은 건드리지 않는다
+      tk = null; Nav.showTask(false);
+      if (!r) U.toast('저장하지 못했습니다 — 다시 열어 확인하세요', 3500);
+    });
   }
 
   /* ---------------- 내보내기 ---------------- */
@@ -7432,30 +7511,30 @@
     $('#tk-save').addEventListener('click', () => { save(false); });
     $('#tk-export').addEventListener('click', () => { exportTask(); });
 
-    $('#tk-part').addEventListener('input', () => { dirty = true; });
+    $('#tk-part').addEventListener('input', () => { markDirty(); });
     // 「사진」 배지 체크 — 표시 전용, 아무 기능에도 영향 없음(사용자 지시)
     const pmBox = $('#tk-photomark');
     if (pmBox) pmBox.addEventListener('change', () => {
       if (!tk) return;
       tk.photoMark = pmBox.checked;
-      dirty = true;
+      markDirty();
     });
     $('#tk-dong-pick').addEventListener('click', openDongPicker);
     $('#tk-sup-pick').addEventListener('click', openSupPicker);
     $('#tk-sup-call').addEventListener('click', callSup);
     $('#sup-back').addEventListener('click', () => Nav.showSup(false));
     $('#tk-cast').addEventListener('change', () => {
-      if (!tk) return; tk.castDay = $('#tk-cast').value; dirty = true; renderAge(); renderReport();
+      if (!tk) return; tk.castDay = $('#tk-cast').value; markDirty(); renderAge(); renderReport();
     });
     $('#tk-day').addEventListener('change', () => {
       if (!tk) return;
       tk.testDay = $('#tk-day').value;      // 시험일만 바뀐다 — 목록은 안 움직인다
-      dirty = true; renderSpecs(); renderAge(); renderReport(); renderWorkDay();
+      markDirty(); renderSpecs(); renderAge(); renderReport(); renderWorkDay();
     });
     $('#tk-workday').addEventListener('change', () => {
       if (!tk) return;
       tk.day = $('#tk-workday').value || tk.day;
-      dirty = true; renderWorkDay();
+      markDirty(); renderWorkDay();
     });
 
     $('#tk-add-set').addEventListener('click', () => { addSet(); });
@@ -7505,7 +7584,7 @@
       { id: U.uid(), name: '', values: (values || []).slice(), factor: fac }
     ]);
     delete box.values; delete box.factor;
-    dirty = true;
+    markDirty();
     renderValues();
   }
 
@@ -10823,6 +10902,27 @@
   function bindSettings() {
     const bakRow = U.$('#opt-bak-row');
     if (bakRow) bakRow.addEventListener('click', openBackupSheet);
+    // 안드로이드 크롬 PWA 설치(사용자 지시 — 안드로이드도 PWA 로). 브라우저가 설치 가능하다고 알리는
+    // beforeinstallprompt 를 붙들어 뒀다가 설정 줄을 누르면 그때 설치창을 띄운다. 이벤트가 안 오면(이미 설치·
+    // 네이티브 앱·아이폰) 줄 자체가 안 보인다.
+    let installEv = null;
+    const instRow = U.$('#opt-install-row');
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      installEv = e;
+      if (instRow) instRow.classList.remove('hidden');
+    });
+    window.addEventListener('appinstalled', () => { installEv = null; if (instRow) instRow.classList.add('hidden'); });
+    if (instRow) instRow.addEventListener('click', async () => {
+      if (!installEv) return;
+      const ev = installEv; installEv = null;
+      try {
+        ev.prompt();
+        const r = await ev.userChoice;
+        if (r && r.outcome === 'accepted') { U.toast('설치했습니다 — 홈 화면에서 여세요', 3000); instRow.classList.add('hidden'); }
+        else installEv = ev;               // 취소했으면 다음에 또 누를 수 있게
+      } catch (e) {}
+    });
     const bakFile = U.$('#bak-file');
     if (bakFile) bakFile.addEventListener('change', (e) => {
       importBackupFile(e.target.files && e.target.files[0]);
