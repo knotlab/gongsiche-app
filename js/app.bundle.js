@@ -6165,6 +6165,13 @@
       if (!used[name]) { used[name] = 1; return name; }
       return name + '_' + (++used[name]);
     };
+    // 최종 파일명도 한 번 더 — 동 이름에 괄호가 든 경우 등 라벨 조합이 우연히 겹쳐도 ZIP 안에서 같은 이름이 두 번 나오지 않게(검수 지적)
+    const usedEntry = Object.create(null);
+    const uniqEntry = (name) => {
+      if (!usedEntry[name]) { usedEntry[name] = 1; return name; }
+      const k = ++usedEntry[name];
+      return name.replace(/(\.[a-z0-9]+)$/i, ' (' + k + ')$1');
+    };
     const sheets = Object.create(null);        // 폴더 → [{ header, vals }] (엑셀 열들)
 
     try {
@@ -6192,6 +6199,12 @@
           // 파일명 소괄호 안은 띄어쓰기를 살린다(safeName 은 밑줄로 바꿔 「A사,_B사」가 된다) — 파일계 금지문자만 뺀다
           const fileLabel = (label) => String(label || '').replace(/[\\/:*?"<>|\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
           const paren = (label) => { const l = fileLabel(label); return l ? '(' + l + ')' : ''; };
+          // 세트 라벨 = 적은 텍스트. 안 적었는데 세트가 여럿이면 「세트 N」(순번) — 안 그러면 열·사진이 서로 구분이 안 된다(검수 지적)
+          const allSets = Store.normalizeSets(pc.box);
+          // normalizeSets 는 부를 때마다 새 객체를 줄 수 있어 identity 비교가 안 된다 — id 로 순번을 찾는다
+          const idxOf = (s) => { let i = allSets.findIndex((x) => x.id && x.id === s.id); if (i < 0) i = allSets.indexOf(s); return i; };
+          const labelOf = (s) => String(s.name || '').trim() || (allSets.length > 1 && idxOf(s) >= 0 ? '세트 ' + (idxOf(s) + 1) : '');
+          const pairLab = (pr) => pr.sets.map(labelOf).filter(Boolean).join(', ');
 
           if (ids.length) {
             let photos = [];
@@ -6199,12 +6212,12 @@
             const byId = {}; photos.forEach((p) => { byId[p.id] = p; });
             let n = 0;                          // 번호는 작업(칸) 안에서 이어 붙는다 — 쌍이 바뀌어도 겹치지 않게
             for (const pr of pairs) {
-              const lab = paren(Task.pairLabel(pr));
+              const lab = paren(pairLab(pr));
               for (const id of pr.photos) {
                 const b = byId[id] ? await Store.fullBlob(byId[id]) : null;
                 if (!b) continue;
                 n++;
-                entries.push({ name: key + lab + '_' + n + '.jpg', data: new Uint8Array(await b.arrayBuffer()) });
+                entries.push({ name: uniqEntry(key + lab + '_' + n + '.jpg'), data: new Uint8Array(await b.arrayBuffer()) });
               }
             }
           }
@@ -6213,10 +6226,10 @@
             // 작업 사이엔 빈 열 하나(사용자 지시: 구분)
             const base = key.slice(pc.folder.length + 1);
             const list = (sheets[pc.folder] = sheets[pc.folder] || []);
-            pairs.forEach((pr) => pr.sets.forEach((s) => {
+            allSets.forEach((s) => {
               if (!(s.values || []).length) return;
-              list.push({ task: key, header: base + paren(String(s.name || '').trim()), vals: s.values.map((v) => v.v) });
-            }));
+              list.push({ task: key, header: base + paren(labelOf(s)), vals: s.values.map((v) => v.v) });
+            });
           }
         }
       }
@@ -7343,9 +7356,11 @@
   }
 
   /* ---------------- 사진 ---------------- */
+  let photoRenderSeq = 0;      // 늦게 끝난 옛 렌더가 새 그림(특히 사진 0장 상태)을 덮지 않게(검수 지적)
   async function renderPhotos() {
     if (!tk) return;
     const owner = tk;
+    const mySeq = ++photoRenderSeq;
     // 수중/봉함 탭도 스냅샷 — await 사이에 탭이 바뀌면 낡은 렌더가 반대편 칸을 덮어 그려
     // 엉뚱한 사진이 지워질 수 있다(openCalc·addFiles 와 같은 계열 레이스, 반대심문 확인).
     const subAt = curKey();
@@ -7376,7 +7391,8 @@
 
     let photos = [];
     try { photos = await Store.getPhotos(box.photos); } catch (e) { console.error(e); }
-    if (tk !== owner || curKey() !== subAt) return;   // 다른 작업/칸으로 갈아탔다 — 덮어 그리지 않는다
+    // 다른 작업/칸으로 갈아탔거나, 그 사이 더 새 렌더가 시작됐다(사진 지움 등) — 덮어 그리지 않는다
+    if (tk !== owner || curKey() !== subAt || mySeq !== photoRenderSeq) return;
     const byId = {};
     photos.forEach((p) => { byId[p.id] = p; });
     grid.innerHTML = '';
@@ -7398,10 +7414,13 @@
       del.setAttribute('aria-label', (i + 1) + '번 사진 삭제');
       del.addEventListener('click', (e) => {
         e.stopPropagation();
-        // 렌더된 그 칸이 아직 현재 칸일 때만 지운다 — 렌더한 box 를 그대로 쓴다(인덱스 어긋남 방지)
+        // 렌더된 그 칸이 아직 현재 칸일 때만 지운다 — 렌더한 box 를 그대로 쓴다.
+        // 인덱스 i 는 그릴 때 값이라 연타(앞 사진을 지운 직후 다시 그리기 전)에 어긋난다 — id 로 지금 자리를 다시 찾는다(검수 지적)
         if (!tk || curKey() !== subAt) return;
-        U.dropUrl(box.photos[i]);
-        box.photos.splice(i, 1); markDirty(); renderPhotos(); renderSubTabs();
+        const at = box.photos.indexOf(pid);
+        if (at < 0) return;
+        U.dropUrl(pid);
+        box.photos.splice(at, 1); markDirty(); renderPhotos(); renderSubTabs();
       });
       cell.appendChild(del);
       cell.appendChild(U.el('span', 'n', (i + 1) + ''));
