@@ -1518,3 +1518,7 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
 .fchip.on{background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
 .fchip.dong{background:var(--accent-soft);color:var(--accent);border-color:transparent}
 .fchip.dong b{margin-left:6px;font-weight:900}
+
+/* 편집기 사진 그리드의 쌍 머리줄 — 「1쌍 · A사」 (2026-09-13, 사진 2장=1쌍 ↔ 세트) */
+.photo-pair-head{grid-column:1/-1;font-size:12px;font-weight:700;color:var(--text-2);margin:2px 0 -3px}
+.photo-pair-head.off{color:var(--danger);opacity:.85}

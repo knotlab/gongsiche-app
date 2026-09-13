@@ -2222,178 +2222,6 @@
 })(window);
 
 ;
-/* ===== js/updater.js ===== */
-/* ============ updater.js — APK 웹 번들 OTA 업데이트 (안드로이드 설치형 전용) ============
-   "APK 도 깃허브 판을 따라가게"(사용자 지시 2026-09-09). 깃허브 페이지(PWA 배포본)의 version.json 을 보고
-   새 판이면 파일을 앱 데이터 폴더(DATA/web/<ver>/)에 내려받은 뒤, Capacitor 코어 WebView 플러그인의
-   setServerBasePath 로 그 폴더를 서버 루트로 바꿔 다시 연다(네이티브 코드 추가 없음).
-
-   안전판:
-   - 적용 직후엔 pending 표식만 두고 영속(persistServerBasePath)은 **새 번들이 실제로 떠서 boot() 까지 온 뒤**에.
-     새 번들이 못 뜨면(JS 깨짐) 다음 실행은 원래 assets 로 뜨고, 그때 pending 이 남아 있으니 받은 판을 버린다.
-   - 새 APK 를 설치하면 Capacitor 가 영속 경로를 스스로 지운다(isNewBinary). 여기서도 APK 가 더 새로우면 OTA 를 버린다.
-   - 네이티브 플러그인은 OTA 로 못 바꾼다 — 웹(www)만. 새 플러그인이 필요한 판은 APK 로 배포해야 한다.
-================================================================================ */
-(function (global) {
-  'use strict';
-
-  const BASE = 'https://knotlab.github.io/gongsiche-app/';
-  const K_PATH = 'gsc.ota.path', K_VER = 'gsc.ota.ver', K_AT = 'gsc.ota.at',
-        K_PENDING = 'gsc.ota.pending', K_CHECK = 'gsc.ota.check';
-  const CHECK_EVERY = 6 * 3600 * 1000;
-
-  const C = () => global.Capacitor;
-  function P(name) { const c = C(); return c && c.Plugins && c.Plugins[name]; }
-  function native() {
-    const c = C();
-    return !!(c && c.isNativePlatform && c.isNativePlatform() &&
-              P('WebView') && P('Filesystem') && P('CapacitorHttp') && P('Preferences'));
-  }
-  async function pget(k) { try { return (await P('Preferences').get({ key: k })).value || ''; } catch (e) { return ''; } }
-  async function pset(k, v) { try { await P('Preferences').set({ key: k, value: String(v || '') }); } catch (e) {} }
-
-  const b64ToUtf8 = (b) => decodeURIComponent(escape(atob(b)));
-  const utf8ToB64 = (s) => btoa(unescape(encodeURIComponent(s)));
-
-  /* 지금 떠 있는 번들의 version.json (APK 는 bundle.js 가, OTA 판은 build-pwa 가 만든다) */
-  async function local() {
-    try { const r = await fetch('./version.json?t=' + Date.now(), { cache: 'no-store' }); if (!r.ok) return null; return await r.json(); }
-    catch (e) { return null; }
-  }
-  /* 깃허브 판 — CapacitorHttp(네이티브)라 CORS 에 안 걸린다 */
-  async function remote() {
-    const r = await P('CapacitorHttp').request({
-      url: BASE + 'version.json?t=' + Date.now(), method: 'GET', connectTimeout: 8000, readTimeout: 8000
-    });
-    if (r.status !== 200) throw new Error('HTTP ' + r.status);
-    return (typeof r.data === 'string') ? JSON.parse(r.data) : r.data;
-  }
-  function newer(rem, loc) {
-    if (!rem || !rem.version || !Array.isArray(rem.files)) return false;
-    if (!loc) return true;
-    if (rem.commit && loc.commit && rem.commit === loc.commit) return false;
-    return (rem.at || 0) > (loc.at || 0);
-  }
-
-  /* 파일 내려받기 → DATA/web/<ver>/ — 서비스워커(sw.js)와 PDF 는 빼고, index.html 의 SW 등록 블록은 잘라낸다 */
-  async function download(rem, onProgress) {
-    const FS = P('Filesystem'), H = P('CapacitorHttp');
-    const dir = 'web/' + rem.version;
-    const files = rem.files.filter((f) => f !== 'sw.js' && f !== 'version.json' && !/\.pdf$/i.test(f));
-    if (files.indexOf('index.html') < 0 || !files.some((f) => /app\.bundle\.js$/.test(f))) throw new Error('파일 목록이 이상합니다');
-    try { await FS.rmdir({ path: dir, directory: 'DATA', recursive: true }); } catch (e) {}
-    for (let i = 0; i < files.length; i++) {
-      const f = files[i];
-      const r = await H.request({ url: BASE + f + '?v=' + rem.version, method: 'GET', responseType: 'blob',
-                                  connectTimeout: 15000, readTimeout: 30000 });
-      if (r.status !== 200 || typeof r.data !== 'string') throw new Error(f + ' — HTTP ' + r.status);
-      let b64 = r.data;
-      if (f === 'index.html') {
-        const html = b64ToUtf8(b64).replace(/<!--sw-->[\s\S]*?<!--\/sw-->/, '');
-        if (html.indexOf('app.bundle.js') < 0) throw new Error('index.html 이 이상합니다');
-        b64 = utf8ToB64(html);
-      }
-      await FS.writeFile({ path: dir + '/' + f, data: b64, directory: 'DATA', recursive: true });
-      if (onProgress) onProgress(i + 1, files.length);
-    }
-    await FS.writeFile({ path: dir + '/version.json', data: utf8ToB64(JSON.stringify(rem)), directory: 'DATA', recursive: true });
-    const u = await FS.getUri({ path: dir, directory: 'DATA' });
-    return String((u && u.uri) || '').replace(/^file:\/\//, '');
-  }
-
-  async function dropOta(ver) {
-    await pset(K_PATH, ''); await pset(K_VER, ''); await pset(K_AT, ''); await pset(K_PENDING, '');
-    if (ver) { try { await P('Filesystem').rmdir({ path: 'web/' + ver, directory: 'DATA', recursive: true }); } catch (e) {} }
-  }
-  async function cleanOthers(keep) {
-    try {
-      const r = await P('Filesystem').readdir({ path: 'web', directory: 'DATA' });
-      for (const f of (r.files || [])) {
-        const name = f.name || f;
-        if (name && name !== keep) { try { await P('Filesystem').rmdir({ path: 'web/' + name, directory: 'DATA', recursive: true }); } catch (e) {} }
-      }
-    } catch (e) {}
-  }
-
-  /* 부팅 첫머리에서 부른다. true 를 돌려주면 곧 다른 번들로 다시 열리니 초기화를 멈춘다. */
-  async function boot() {
-    if (!native()) return false;
-    const loc = await local();
-    const p = await pget(K_PATH), ver = await pget(K_VER), at = +(await pget(K_AT)) || 0, pending = await pget(K_PENDING);
-    if (loc && ver && loc.version === ver) {
-      // OTA 번들 안에서 떠 있다 = 살아 있음. 이제 영속시켜 다음 실행부터 바로 이 판으로.
-      if (pending) await pset(K_PENDING, '');
-      try { await P('WebView').persistServerBasePath(); } catch (e) {}
-      cleanOthers(ver);
-      return false;
-    }
-    if (!p || !ver) return false;                      // OTA 없음 — 그냥 assets 판
-    if (pending) {                                     // 지난번 받은 판이 못 떴다 → 버린다
-      await dropOta(ver);
-      setTimeout(() => { try { U.toast('받아 둔 업데이트가 열리지 않아 원래 판으로 돌아왔습니다', 4000); } catch (e) {} }, 1500);
-      return false;
-    }
-    if (loc && (loc.at || 0) >= at) {                  // 새 APK 가 더 새롭다(또는 같다) → OTA 는 필요 없다
-      await dropOta(ver);
-      return false;
-    }
-    // 확정된 OTA 가 있는데 assets 로 떴다(영속이 풀린 경우) → 그 판으로 전환
-    try { await P('WebView').setServerBasePath({ path: p }); return true; }
-    catch (e) { await dropOta(ver); return false; }
-  }
-
-  async function run(rem) {
-    U.toast('업데이트 받는 중…', 120000);
-    try {
-      const path = await download(rem, (i, n) => U.toast('업데이트 받는 중… ' + i + '/' + n, 120000));
-      await pset(K_PATH, path); await pset(K_VER, rem.version); await pset(K_AT, rem.at || 0); await pset(K_PENDING, '1');
-      U.toast('적용 중… 앱이 다시 열립니다', 5000);
-      await P('WebView').setServerBasePath({ path: path });
-    } catch (e) {
-      console.error('[ota]', e);
-      U.toast('업데이트 실패 — ' + ((e && e.message) || e), 4000);
-    }
-  }
-
-  let checking = false;
-  async function check(manual) {
-    if (!native()) { if (manual) U.toast('설치형(APK) 앱에서만 됩니다'); return; }
-    if (navigator.onLine === false) { if (manual) U.toast('인터넷 연결이 필요합니다'); return; }
-    if (checking) return;
-    checking = true;
-    try {
-      let rem, loc;
-      try { rem = await remote(); loc = await local(); }
-      catch (e) { if (manual) U.toast('업데이트 서버에 닿지 못했습니다'); return; }
-      await pset(K_CHECK, Date.now());
-      refreshRow(loc);
-      if (!newer(rem, loc)) { if (manual) U.toast('최신 판입니다' + (loc && loc.commit ? ' (' + loc.commit + ')' : '')); return; }
-      const go = () => run(rem);
-      const what = (rem.commit || rem.version) + ' · ' + U.dayLabel(rem.at || Date.now());
-      if (manual) U.confirmSheet('새 판이 있습니다\n' + what + '\n지금 받아 적용할까요? (앱이 다시 열립니다)', '업데이트', go);
-      else U.toast('앱 새 판이 있습니다 — ' + (rem.commit || ''), 8000, { label: '업데이트', onClick: go });
-    } finally { checking = false; }
-  }
-
-  function refreshRow(loc) {
-    const v = U.$('#opt-update-val');
-    if (v) v.textContent = (loc && loc.commit) ? ('현재 ' + loc.commit) : '확인';
-  }
-
-  async function init() {
-    if (!native()) return;
-    const row = U.$('#opt-update-row');
-    if (row) { row.classList.remove('hidden'); row.addEventListener('click', () => check(true)); }
-    refreshRow(await local());
-    // 하루 몇 번만 조용히 확인 — 새 판이 있으면 토스트로 알리고, 누르면 받는다
-    const last = +(await pget(K_CHECK)) || 0;
-    if (Date.now() - last > CHECK_EVERY) setTimeout(() => check(false), 4000);
-  }
-
-  global.Updater = { boot: boot, check: check, init: init, _newer: newer };
-})(window);
-
-;
 /* ===== js/share.js ===== */
 /* ============ share.js — 내보내기 브리지 ============
    우선순위
@@ -4470,6 +4298,34 @@
     return out;
   }
 
+  /* ---------- 사진 쌍(2장 = 1쌍) ↔ 계산 세트 (사용자 지시 2026-09-13) ----------
+     저장 구조는 안 바꾼다(기존 내용 유실 금지) — 사진 목록의 **순서**로 쌍을 유도한다.
+       수직·수평·필러 : 첫 쌍이 세트 1~3개를 전부 가진다(판 사진 한 쌍에 회사·LOT 여러 세트)
+       28일(수중·봉함): i번째 쌍 ↔ i번째 세트(쌍마다 세트 하나, 쌍이 여럿)
+     box = { photos, sets } — 일반 작업이면 t 자체, 28일이면 Task.subOf(t, key).
+     specKey 는 규칙 판정용('d28'·'water'·'seal' 이면 쌍마다 세트 하나). */
+  function pairsOf(box, specKey) {
+    const photos = (box && box.photos) || [];
+    const sets = Store.normalizeSets(box || {});
+    const pairs = [];
+    for (let i = 0; i < photos.length; i += 2) pairs.push({ idx: pairs.length, photos: photos.slice(i, i + 2), sets: [] });
+    const perPair = Spec.hasSubs(specKey) || specKey === 'water' || specKey === 'seal';
+    if (perPair) {
+      sets.forEach((s, i) => {
+        if (!pairs[i]) pairs.push({ idx: pairs.length, photos: [], sets: [] });   // 사진이 아직 없는 세트도 센다
+        pairs[i].sets.push(s);
+      });
+    } else if (sets.length) {
+      if (!pairs.length) pairs.push({ idx: 0, photos: [], sets: [] });
+      pairs[0].sets = sets.slice();
+    }
+    return pairs;
+  }
+  /* 쌍 라벨 = 세트에 적은 텍스트들(비면 '') — 파일명 「207동(라벨)_1」·엑셀 열 제목에 쓴다 */
+  function pairLabel(pair) {
+    return ((pair && pair.sets) || []).map((s) => String(s.name || '').trim()).filter(Boolean).join(', ');
+  }
+
   /* 값이 하나라도 들어 있는 세트만 — 빈 세트는 세지 않는다. 28일은 두 칸 통틀어. */
   function filledSets(t) {
     return allSets(t).filter((p) => (p.set.values || []).length).map((p) => p.set);
@@ -4676,7 +4532,7 @@
     hasSubs: hasSubs, subOf: subOf, subPhotos: subPhotos, pieces: pieces,
     pendingSubs: pendingSubs, doneNote: doneNote,
     setsOf: setsOf, allSets: allSets, setName: setName, setStats: setStats,
-    filledSets: filledSets, setsBrief: setsBrief,
+    filledSets: filledSets, setsBrief: setsBrief, pairsOf: pairsOf, pairLabel: pairLabel,
     actualAge: actualAge, label: label, summary: summary,
     autoReportDay: autoReportDay, reportDayOf: reportDayOf, exportLabel: exportLabel,
     wmText: wmText,
@@ -6327,44 +6183,52 @@
         for (const pc of pieces) {
           if (!pc.folder) continue;            // 모르는 분류는 만들지 않는다
           const ids = pc.box.photos || [];
-          const sets = Store.normalizeSets(pc.box);
-          // 한 칸에 세트가 여럿(회사·LOT별)이면 세트 사이에 빈 행 하나 — 세로로 구분(사용자 지시).
-          // null 은 makeXlsx 가 셀을 안 만들어 빈 칸이 된다.
-          const vals = [];
-          sets.forEach((s) => {
-            if (!(s.values || []).length) return;
-            if (vals.length) vals.push(null);
-            s.values.forEach((v) => vals.push(v.v));
-          });
-          if (!ids.length && !vals.length) continue;
+          // 사진 2장 = 1쌍, 쌍 ↔ 세트 (Task.pairsOf — 수직·수평·필러는 첫 쌍에 세트 전부,
+          // 28일·봉함은 쌍마다 세트 하나). 세트에 적은 텍스트가 사진 이름·엑셀 열 제목의 소괄호에 들어간다(사용자 지시).
+          const pairs = Task.pairsOf(pc.box, Task.hasSubs(t) ? 'd28' : t.specKey);
+          const hasVals = pairs.some((p) => p.sets.some((s) => (s.values || []).length));
+          if (!ids.length && !hasVals) continue;
           const key = uniq(pc.folder + '/' + nameBase);
+          // 파일명 소괄호 안은 띄어쓰기를 살린다(safeName 은 밑줄로 바꿔 「A사,_B사」가 된다) — 파일계 금지문자만 뺀다
+          const fileLabel = (label) => String(label || '').replace(/[\\/:*?"<>|\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+          const paren = (label) => { const l = fileLabel(label); return l ? '(' + l + ')' : ''; };
 
           if (ids.length) {
             let photos = [];
             try { photos = await Store.getPhotos(ids); } catch (e) {}
             const byId = {}; photos.forEach((p) => { byId[p.id] = p; });
-            let n = 0;
-            for (const id of ids) {
-              const b = byId[id] ? await Store.fullBlob(byId[id]) : null;
-              if (!b) continue;
-              n++;
-              entries.push({ name: key + '_' + n + '.jpg', data: new Uint8Array(await b.arrayBuffer()) });
+            let n = 0;                          // 번호는 작업(칸) 안에서 이어 붙는다 — 쌍이 바뀌어도 겹치지 않게
+            for (const pr of pairs) {
+              const lab = paren(Task.pairLabel(pr));
+              for (const id of pr.photos) {
+                const b = byId[id] ? await Store.fullBlob(byId[id]) : null;
+                if (!b) continue;
+                n++;
+                entries.push({ name: key + lab + '_' + n + '.jpg', data: new Uint8Array(await b.arrayBuffer()) });
+              }
             }
           }
-          if (vals.length) {
-            // 강도값은 폴더당 엑셀 한 장에 모은다 — 작업 이름이 열 제목(같은 분류 구분)
-            (sheets[pc.folder] = sheets[pc.folder] || [])
-              .push({ header: key.slice(pc.folder.length + 1), vals: vals });
+          if (hasVals) {
+            // 강도값은 폴더당 엑셀 한 장 — **세트마다 열 하나**, 제목 = 동(세트 텍스트). 같은 작업의 세트는 붙여 두고
+            // 작업 사이엔 빈 열 하나(사용자 지시: 구분)
+            const base = key.slice(pc.folder.length + 1);
+            const list = (sheets[pc.folder] = sheets[pc.folder] || []);
+            pairs.forEach((pr) => pr.sets.forEach((s) => {
+              if (!(s.values || []).length) return;
+              list.push({ task: key, header: base + paren(String(s.name || '').trim()), vals: s.values.map((v) => v.v) });
+            }));
           }
         }
       }
 
-      // 폴더별 강도값.xlsx — 열=작업, 행=값(위→아래). 작업 사이엔 빈 열 하나(사용자 지시: 구분)
+      // 폴더별 강도값.xlsx — 열=세트(제목 동(세트명)), 행=값(위→아래). 작업 사이엔 빈 열 하나
       for (const folder of Object.keys(sheets)) {
         const cols = sheets[folder];
         const heads = [], colsArr = [];
-        cols.forEach((c, i) => {
-          if (i) { heads.push(''); colsArr.push([]); }
+        let lastTask = null;
+        cols.forEach((c) => {
+          if (lastTask !== null && c.task !== lastTask) { heads.push(''); colsArr.push([]); }
+          lastTask = c.task;
           heads.push(c.header); colsArr.push(c.vals);
         });
         const xlsx = Share.makeXlsx(heads, colsArr);
@@ -6481,7 +6345,7 @@
 
   function init() { bind(); renderChips(); }
 
-  global.Tasks = { init: init, refresh: refresh };
+  global.Tasks = { init: init, refresh: refresh, _exportDayZip: exportDayZip };
 })(window);
 
 ;
@@ -7115,7 +6979,12 @@
     const on = !!tk && Task.hasSubs(tk);
     wrap.classList.toggle('hidden', !on);
     wrap.innerHTML = '';
-    if (!on) return;
+    if (!on) {
+      // 28일 작업을 봤다가 단일 재령 작업을 열면 「봉함 압축강도」 라벨이 남던 결함 — 되돌린다
+      const lab0 = $('#tk-sets-label');
+      if (lab0) lab0.textContent = '압축강도';
+      return;
+    }
     Spec.SUBS.forEach((s) => {
       const n = Task.subPhotos(tk, s.key).length;
       const b = U.el('button', 'subtab' + (curSub === s.key ? ' on' : ''));
@@ -7491,7 +7360,19 @@
     if (note) { doneEl.textContent = '· ' + note; doneEl.className = 'done-flag off'; }
     else if (Task.isDone(tk)) { doneEl.textContent = '· 완료'; doneEl.className = 'done-flag'; }
     else { doneEl.textContent = ''; doneEl.className = ''; }
-    if (!n) return;
+
+    // 사진 2장 = 1쌍, 쌍 ↔ 계산 세트(Task.pairsOf) — 어느 사진이 어느 세트 것인지 머리줄로 보여 준다(사용자 지시).
+    // 저장 구조는 그대로(순서로 유도). 28일·봉함은 쌍마다 세트 하나라 세트 순서 = 촬영 순서다.
+    const pairs = Task.pairsOf(box, Task.hasSubs(tk) ? 'd28' : tk.specKey);
+    const pairHead = (pr) => {
+      const lab = Task.pairLabel(pr);
+      const names = pr.sets.length && !lab ? pr.sets.map((s, k) => Task.setName(s, k)).join(', ') : lab;
+      const h = U.el('div', 'photo-pair-head', (pr.idx + 1) + '쌍' + (names ? ' · ' + names : ''));
+      if (!pr.photos.length) { h.textContent += ' — 사진 없음'; h.classList.add('off'); }
+      return h;
+    };
+    // 사진이 하나도 없어도 세트가 있으면 「n쌍 · 세트 — 사진 없음」은 보여 준다(어느 세트 사진을 찍어야 하는지)
+    if (!n) { pairs.forEach((pr) => grid.appendChild(pairHead(pr))); return; }
 
     let photos = [];
     try { photos = await Store.getPhotos(box.photos); } catch (e) { console.error(e); }
@@ -7501,6 +7382,7 @@
     grid.innerHTML = '';
 
     box.photos.forEach((pid, i) => {
+      if (i % 2 === 0 && pairs[i / 2]) grid.appendChild(pairHead(pairs[i / 2]));
       const p = byId[pid];
       const cell = U.el('div', 'photo-cell');
       if (p) {
@@ -7525,6 +7407,8 @@
       cell.appendChild(U.el('span', 'n', (i + 1) + ''));
       grid.appendChild(cell);
     });
+    // 28일·봉함: 사진 쌍이 아직 없는 세트도 보여 준다 — 어느 세트 사진을 더 찍어야 하는지 알게
+    pairs.forEach((pr) => { if (!pr.photos.length) grid.appendChild(pairHead(pr)); });
   }
 
   /* 처리 중인(아직 어느 작업에도 저장 안 된) 사진 id.
@@ -11611,9 +11495,7 @@
     document.addEventListener('gesturestart', (e) => { if (!zoomable) e.preventDefault(); });
   }
 
-  async function boot() {
-    // OTA(설치형) — 확정된 새 웹 번들이 있으면 그쪽으로 다시 열린다. 그럼 여기서 멈춘다(곧 리로드).
-    if (global.Updater) { try { if (await Updater.boot()) return; } catch (e) { console.warn('[ota]', e); } }
+  function boot() {
     bindShell();
     Calc.init();
     Tasks.init();
@@ -11622,7 +11504,6 @@
     AuditUI.init();
     OCRUI.init();
     if (global.Sync) Sync.init();     // 관리자 서버 백업 (beta)
-    if (global.Updater) Updater.init();   // APK 웹 번들 OTA(설치형에서만 줄이 보인다)
     if (global.Bangtong) Bangtong.init();
     Home.init();
     Nav.go('home');
