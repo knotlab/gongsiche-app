@@ -7448,7 +7448,8 @@
   /* ---------- 사진 길게 눌러 끌어 순서 바꾸기 (2026-09-13, 사용자 지시) ----------
      사진 순서가 회차(2장=1회차 ↔ 세트)를 정하므로 순서를 손으로 고칠 수 있어야 한다. 예전엔 정렬 기능 자체가 없었다
      ("드래그앤드롭이 안 된다" — 크롬 PWA 문제가 아니라 미구현). 계산기 칩 드래그(calc.bindChipDrag)와 같은 뼈대:
-     200ms 길게 누르면 집힘 → 고스트가 손가락을 따라감 → 다른 셀 위로 가면 그 자리로 옮김 → 놓으면 box.photos 에 커밋.
+     200ms 길게 누르면 집힘 → 고스트가 손가락을 따라감 → 다른 셀 위에 놓으면 **두 장의 자리를 맞바꾼다**(밀어내기 아님 — 사용자 지시)
+     → 놓으면 box.photos 에 커밋. 손가락이 다른 사진으로 옮겨 가면 먼저 원래 자리로 되돌린 뒤 새 상대와 바꾼다(한 번에 두 장만 움직임).
      집힌 뒤엔 touchmove 를 막아야 브라우저가 스크롤로 뺏어(pointercancel) 드래그가 풀리지 않는다(실기기 확인된 함정).
      집히기 전에 8px 넘게 움직이면 스크롤 의도로 보고 놓아준다. 롱프레스 컨텍스트 메뉴(이미지 저장)도 막는다. */
   let dragEndAt = 0, dragEndCell = null;
@@ -7458,6 +7459,12 @@
     if (!grid) return;
     let st = null;
     const cells = () => Array.prototype.slice.call(grid.querySelectorAll('.photo-cell'));
+    // 두 노드의 자리를 맞바꾼다(사이에 회차 머리줄이 끼어 있어도 각자 있던 자리로)
+    const swapNodes = (a, b) => {
+      const pa = a.parentNode, na = a.nextSibling === b ? a : a.nextSibling;
+      b.parentNode.insertBefore(a, b);
+      pa.insertBefore(b, na);
+    };
     const renumber = () => cells().forEach((c, i) => { const n = c.querySelector('.n'); if (n) n.textContent = (i + 1) + ''; });
 
     const stop = (revert) => {
@@ -7512,7 +7519,7 @@
       if (e.pointerType === 'mouse' && e.button !== 0) return;
       if (!tk) return;
       st = { cell: cell, id: e.pointerId, x0: e.clientX, y0: e.clientY, dragging: false, timer: null,
-             owner: tk, sub: curKey(), box: bag() };
+             owner: tk, sub: curKey(), box: bag(), swapped: null };
       st.timer = setTimeout(() => {
         if (!st) return;
         st.dragging = true;
@@ -7543,10 +7550,13 @@
       const under = document.elementFromPoint(e.clientX, e.clientY);
       const over = under && under.closest ? under.closest('.photo-cell') : null;
       if (over && over !== st.cell && over.parentNode === grid && !over.classList.contains('photo-ghost')) {
-        // 격자라 좌우 절반이 아니라 「앞에 있던 걸 뒤로 끌면 그 뒤에, 뒤에 있던 걸 앞으로 끌면 그 앞에」
-        const list = cells();
-        const from = list.indexOf(st.cell), to = list.indexOf(over);
-        grid.insertBefore(st.cell, from < to ? over.nextSibling : over);
+        // 자리 맞바꾸기(사용자 지시: 밀어내기 아님). st.swapped = 지금 자리를 바꾼 상대.
+        // 손가락이 원래 자리(지금은 상대가 앉아 있음)로 돌아오면 되돌리고, 다른 사진이면 되돌린 뒤 그 사진과 바꾼다
+        if (over === st.swapped) { swapNodes(st.cell, st.swapped); st.swapped = null; }
+        else {
+          if (st.swapped && grid.contains(st.swapped)) swapNodes(st.cell, st.swapped);
+          swapNodes(st.cell, over); st.swapped = over;
+        }
         renumber();
       }
     }, { passive: false });
