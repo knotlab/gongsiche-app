@@ -836,11 +836,74 @@
 
 <script src="js/app.bundle.js"></script>
 <!--sw--><script>
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', function () {
-    navigator.serviceWorker.register('./sw.js').catch(function () {});
+/* PWA 갱신 클라이언트 — build-pwa.js 가 index.html 끝(<!--sw--> 블록)에 인라인한다. APK 엔 안 들어간다.
+   문제(2026-09-13 실측): 서비스워커가 새 판을 받아 활성화해도 **열려 있는 화면은 옛 JS 그대로**였다.
+   설치형 앱은 백그라운드에서 복귀만 하지 새로 로드되지 않으니 ①갱신 검사도 안 하고 ②검사해 받아도 새로고침이 없어
+   완전히 닫고 두 번 열어야 새 판이 보였다. 여기서 ①보일 때마다 update() ②새 SW 가 붙으면(controllerchange) 한가할 때
+   새로고침, 편집 중이면 토스트 버튼 + 다음 복귀 때 적용. 첫 설치(controller 가 없던 페이지)는 이미 최신이라 안 건드린다. */
+(function () {
+  if (!('serviceWorker' in navigator)) return;
+  var sw = navigator.serviceWorker;
+  var hadCtl = !!sw.controller;      // SW 가 이미 붙어 있던 페이지 → controllerchange 는 「갱신」
+  var reg = null, pending = false, lastCheck = 0, wantCheck = false;
+
+  /* 한가함 = 편집기·감리·AI·검수·플래너·방통·파우더·바텀시트 어느 것도 안 열려 있음.
+     새로고침은 자동저장(0.9초)이 못 따라잡은 입력을 버릴 수 있어 이때만 한다. */
+  function idle() {
+    try {
+      var N = window.Nav;
+      if (N && (N.isTaskOpen() || N.isSupOpen() || N.isAIOpen() || N.isAuditOpen() || N.isPlanOpen())) return false;
+      if (window.Bangtong && Bangtong.isOpen()) return false;
+      if (window.Powder && Powder.isOpen()) return false;
+      var back = document.getElementById('sheet-back');
+      if (back && !back.classList.contains('hidden')) return false;
+      // 화면엔 안 보이는 진행·연결 상태(검수 지적): 계산기↔작업 세트 연결, 백업 복원 중, OCR 판독 중, 작업탭 다중선택
+      if (window.Calc && Calc.isLinked && Calc.isLinked()) return false;
+      if (window.Store && Store.isRestoring && Store.isRestoring()) return false;
+      if (window.OCR && OCR.isBusy && OCR.isBusy()) return false;
+      if (window.Tasks && Tasks.hasSelection && Tasks.hasSelection()) return false;
+    } catch (e) {}
+    return true;
+  }
+  function reloadNow() {
+    try { sessionStorage.setItem('gsc.pwa.updated', '1'); } catch (e) {}
+    location.reload();
+  }
+  function apply() {
+    if (idle()) { reloadNow(); return; }
+    pending = true;
+    if (window.U && U.toast) U.toast('새 버전이 준비됐습니다', 8000, { label: '새로고침', onClick: reloadNow });
+  }
+  function check() {
+    if (!reg) { wantCheck = true; return; }               // 등록이 끝나기 전에 온 요청은 등록 뒤 한 번 처리
+    if (Date.now() - lastCheck < 60000) return;           // 1분에 한 번이면 충분(sw.js 1KB)
+    lastCheck = Date.now();
+    reg.update().catch(function () {});
+  }
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState !== 'visible') return;
+    if (pending && idle()) { reloadNow(); return; }        // 편집을 끝내고 나갔다 돌아온 때 = 자연스러운 새로고침 시점
+    check();
   });
-}
+  // 화면을 한 번도 배경으로 안 보내는 세션(거치용)도 30분에 한 번은 확인
+  setInterval(function () { if (document.visibilityState === 'visible') check(); }, 30 * 60 * 1000);
+  sw.addEventListener('controllerchange', function () {
+    if (!hadCtl) { hadCtl = true; return; }                // 첫 설치 — 지금 화면이 이미 이 판
+    apply();
+  });
+  window.addEventListener('load', function () {
+    // updateViaCache:'none' — sw.js 를 HTTP 캐시 거치지 않고 매번 서버와 비교
+    sw.register('./sw.js', { updateViaCache: 'none' })
+      .then(function (r) { reg = r; lastCheck = Date.now(); if (wantCheck) { wantCheck = false; lastCheck = 0; check(); } })
+      .catch(function () {});
+    try {
+      if (sessionStorage.getItem('gsc.pwa.updated')) {
+        sessionStorage.removeItem('gsc.pwa.updated');
+        if (window.U && U.toast) U.toast('새 버전으로 업데이트됐습니다');
+      }
+    } catch (e) {}
+  });
+})();
 </script><!--/sw-->
 </body>
 </html>

@@ -920,7 +920,12 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
 .memo-tools{display:flex;gap:6px;margin-top:-8px}
 .photo-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:8px}
 .photo-cell{position:relative;aspect-ratio:1;border-radius:var(--r-md);overflow:hidden;background:var(--surface-2)}
-.photo-cell img{width:100%;height:100%;object-fit:cover;display:block}
+.photo-cell img{width:100%;height:100%;object-fit:cover;display:block;-webkit-user-drag:none;-webkit-touch-callout:none;user-select:none}
+/* 사진 길게 눌러 끌어 순서 바꾸기(taskui.bindPhotoDrag) — 집힌 원본은 흐리게, 고스트가 손가락을 따라간다 */
+.photo-cell.drag-src{opacity:.28}
+#tk-photos.dragging{touch-action:none}
+.photo-ghost{position:fixed;z-index:150;pointer-events:none;margin:0;transform:translate(-50%,-50%) scale(.92);box-shadow:0 10px 26px rgba(16,24,40,.32);opacity:.92}
+.photo-ghost .del,.photo-ghost .n{display:none}
 .photo-cell .del{
   position:absolute;top:4px;right:4px;width:28px;height:28px;border-radius:8px;
   background:rgba(0,0,0,.55);color:#fff;display:grid;place-items:center;
@@ -1519,6 +1524,6 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
 .fchip.dong{background:var(--accent-soft);color:var(--accent);border-color:transparent}
 .fchip.dong b{margin-left:6px;font-weight:900}
 
-/* 편집기 사진 그리드의 쌍 머리줄 — 「1쌍 · A사」 (2026-09-13, 사진 2장=1쌍 ↔ 세트) */
+/* 편집기 사진 그리드의 쌍(회차) 머리줄 — 「1회차 · A사」 (2026-09-13, 사진 2장=1회차 ↔ 세트) */
 .photo-pair-head{grid-column:1/-1;font-size:12px;font-weight:700;color:var(--text-2);margin:2px 0 -3px}
 .photo-pair-head.off{color:var(--danger);opacity:.85}

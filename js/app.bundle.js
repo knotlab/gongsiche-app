@@ -1538,6 +1538,7 @@
   }
 
   global.Store = {
+    isRestoring: () => restoring,     // 복원 진행 중 — PWA 자동 새로고침이 이때는 미룬다(시트는 이미 닫혀 있어 밖에선 모른다)
     open: open,
     putPhoto: putPhoto, getPhoto: getPhoto, getPhotos: getPhotos, deletePhotos: deletePhotos,
     fullBlob: fullBlob,
@@ -3518,6 +3519,7 @@
   }
 
   global.OCR = {
+    isBusy: () => busy,               // 판독 요청 진행 중 — PWA 자동 새로고침이 이때는 미룬다
     available: available, ensureKey: ensureKey,
     readSchedule: readSchedule, readBoard: readBoard, readPlan: readPlan,
     scheduleItems: scheduleItems, boardValues: boardValues, planItems: planItems,
@@ -5510,6 +5512,8 @@
   }
 
   global.Calc = {
+    // 작업 세트에 연결된 채인지 — PWA 자동 새로고침(pwa-client idle)이 이때는 미룬다(연결은 메모리뿐이라 새로고침에 끊긴다)
+    isLinked: () => !!linkedId,
     init: init,
     summaryText: summaryText,
     stats: stats,
@@ -6210,13 +6214,15 @@
             let photos = [];
             try { photos = await Store.getPhotos(ids); } catch (e) {}
             const byId = {}; photos.forEach((p) => { byId[p.id] = p; });
-            let n = 0;                          // 번호는 작업(칸) 안에서 이어 붙는다 — 쌍이 바뀌어도 겹치지 않게
+            // 번호는 쌍마다 1부터(사용자 지시: 1,2 · 1,2 — 1,2,3,4 가 아니라). 소괄호 라벨이 같은 쌍끼리만
+            // 이어 붙인다(라벨 없는 쌍이 둘이면 _1·_2·_3·_4) — 안 그러면 같은 이름이 나와 「 (2)」가 붙는다
+            const cnt = Object.create(null);
             for (const pr of pairs) {
               const lab = paren(pairLab(pr));
               for (const id of pr.photos) {
                 const b = byId[id] ? await Store.fullBlob(byId[id]) : null;
                 if (!b) continue;
-                n++;
+                const n = (cnt[lab] = (cnt[lab] || 0) + 1);
                 entries.push({ name: uniqEntry(key + lab + '_' + n + '.jpg'), data: new Uint8Array(await b.arrayBuffer()) });
               }
             }
@@ -6358,7 +6364,8 @@
 
   function init() { bind(); renderChips(); }
 
-  global.Tasks = { init: init, refresh: refresh, _exportDayZip: exportDayZip };
+  global.Tasks = { init: init, refresh: refresh, _exportDayZip: exportDayZip,
+    hasSelection: () => Object.keys(sel).length > 0 };   // 골라 둔 작업이 있으면 PWA 자동 새로고침을 미룬다(선택은 메모리뿐)
 })(window);
 
 ;
@@ -7365,6 +7372,7 @@
     // 엉뚱한 사진이 지워질 수 있다(openCalc·addFiles 와 같은 계열 레이스, 반대심문 확인).
     const subAt = curKey();
     const grid = $('#tk-photos');
+    if (photoDragCancel) photoDragCancel();          // 그리드를 새로 그리면 집힌 셀이 고아가 된다 — 진행 중인 드래그는 여기서 접는다
     grid.innerHTML = '';
     const box = bag();
     const n = (box.photos || []).length;
@@ -7379,10 +7387,14 @@
     // 사진 2장 = 1쌍, 쌍 ↔ 계산 세트(Task.pairsOf) — 어느 사진이 어느 세트 것인지 머리줄로 보여 준다(사용자 지시).
     // 저장 구조는 그대로(순서로 유도). 28일·봉함은 쌍마다 세트 하나라 세트 순서 = 촬영 순서다.
     const pairs = Task.pairsOf(box, Task.hasSubs(tk) ? 'd28' : tk.specKey);
+    // 머리줄 라벨은 ZIP 파일명(tasks.exportDayZip labelOf)과 같은 규칙 — 적은 이름, 안 적었는데 세트가 여럿이면 「세트 N」(전체 순번, id 로),
+    // 세트가 하나뿐이고 이름도 없으면 아무것도 안 붙인다(검수 지적: 예전엔 여기만 「세트 1」을 붙이고 순번도 회차 안 순번이라 「2회차 · 세트 1」이 났다)
+    const allSets = Store.normalizeSets(box);
+    const gidx = (s) => { let i = allSets.findIndex((x) => x.id && x.id === s.id); if (i < 0) i = allSets.indexOf(s); return i; };
+    const setLabel = (s) => String(s.name || '').trim() || (allSets.length > 1 && gidx(s) >= 0 ? '세트 ' + (gidx(s) + 1) : '');
     const pairHead = (pr) => {
-      const lab = Task.pairLabel(pr);
-      const names = pr.sets.length && !lab ? pr.sets.map((s, k) => Task.setName(s, k)).join(', ') : lab;
-      const h = U.el('div', 'photo-pair-head', (pr.idx + 1) + '쌍' + (names ? ' · ' + names : ''));
+      const names = pr.sets.map(setLabel).filter(Boolean).join(', ');
+      const h = U.el('div', 'photo-pair-head', (pr.idx + 1) + '회차' + (names ? ' · ' + names : ''));   // 「1회차 · A사」(사용자 선택 2026-09-13 — 「쌍」 대신)
       if (!pr.photos.length) { h.textContent += ' — 사진 없음'; h.classList.add('off'); }
       return h;
     };
@@ -7395,14 +7407,17 @@
     if (tk !== owner || curKey() !== subAt || mySeq !== photoRenderSeq) return;
     const byId = {};
     photos.forEach((p) => { byId[p.id] = p; });
+    if (photoDragCancel) photoDragCancel();          // await 사이에 드래그가 시작됐을 수도 있다
     grid.innerHTML = '';
 
     box.photos.forEach((pid, i) => {
       if (i % 2 === 0 && pairs[i / 2]) grid.appendChild(pairHead(pairs[i / 2]));
       const p = byId[pid];
       const cell = U.el('div', 'photo-cell');
+      cell.dataset.pid = pid;                       // 드래그 정렬(bindPhotoDrag)이 커밋할 때 순서를 읽는다
       if (p) {
         const img = new Image();
+        img.draggable = false;                       // 브라우저 자체 이미지 드래그가 포인터 드래그를 가로채지 않게
         img.src = U.thumbUrl(p.id, p.thumb || p.full);
         img.alt = (i + 1) + '번 사진';
         cell.appendChild(img);
@@ -7428,6 +7443,116 @@
     });
     // 28일·봉함: 사진 쌍이 아직 없는 세트도 보여 준다 — 어느 세트 사진을 더 찍어야 하는지 알게
     pairs.forEach((pr) => { if (!pr.photos.length) grid.appendChild(pairHead(pr)); });
+  }
+
+  /* ---------- 사진 길게 눌러 끌어 순서 바꾸기 (2026-09-13, 사용자 지시) ----------
+     사진 순서가 회차(2장=1회차 ↔ 세트)를 정하므로 순서를 손으로 고칠 수 있어야 한다. 예전엔 정렬 기능 자체가 없었다
+     ("드래그앤드롭이 안 된다" — 크롬 PWA 문제가 아니라 미구현). 계산기 칩 드래그(calc.bindChipDrag)와 같은 뼈대:
+     200ms 길게 누르면 집힘 → 고스트가 손가락을 따라감 → 다른 셀 위로 가면 그 자리로 옮김 → 놓으면 box.photos 에 커밋.
+     집힌 뒤엔 touchmove 를 막아야 브라우저가 스크롤로 뺏어(pointercancel) 드래그가 풀리지 않는다(실기기 확인된 함정).
+     집히기 전에 8px 넘게 움직이면 스크롤 의도로 보고 놓아준다. 롱프레스 컨텍스트 메뉴(이미지 저장)도 막는다. */
+  let dragEndAt = 0, dragEndCell = null;
+  let photoDragCancel = null;                        // renderPhotos 가 그리드를 새로 그리기 전에 부른다
+  function bindPhotoDrag() {
+    const grid = $('#tk-photos');
+    if (!grid) return;
+    let st = null;
+    const cells = () => Array.prototype.slice.call(grid.querySelectorAll('.photo-cell'));
+    const renumber = () => cells().forEach((c, i) => { const n = c.querySelector('.n'); if (n) n.textContent = (i + 1) + ''; });
+
+    const stop = (revert) => {
+      if (!st) return;
+      clearTimeout(st.timer);
+      const was = st;
+      st = null;
+      if (!was.dragging) return;
+      if (was.ghost && was.ghost.parentNode) was.ghost.parentNode.removeChild(was.ghost);
+      was.cell.classList.remove('drag-src');
+      grid.classList.remove('dragging');
+      dragEndAt = Date.now(); dragEndCell = was.cell;
+      // 커밋: 렌더된 그 작업·칸이 아직 현재일 때만. 순서만 바뀌었는지(같은 id 집합) 확인하고 box.photos 를 통째로 바꾼다
+      const box = was.box;
+      if (!tk) return;                                 // 편집기가 닫혔다 — 그릴 것도 커밋할 것도 없다
+      if (revert === true || tk !== was.owner || curKey() !== was.sub) { renderPhotos(); return; }
+      const order = cells().map((c) => c.dataset.pid);
+      // 진짜 순열일 때만(길이 같고, 중복 없고, 전부 원래 있던 id) — 아니면 그리드가 밖에서 바뀐 것이니 버린다
+      const same = order.length === box.photos.length && new Set(order).size === order.length && order.every((id) => box.photos.indexOf(id) >= 0);
+      const moved = same && order.some((id, i) => box.photos[i] !== id);
+      if (moved) { box.photos = order; markDirty(); }
+      renderPhotos();                                  // 회차 머리줄·번호를 새 순서로 다시 그린다
+    };
+
+    // 그리드가 새로 그려질 때(사진 추가 완료·탭 전환 등) 진행 중인 드래그를 접는다 — 집힌 셀이 고아가 되면 커밋이 조용히 무산되므로 알린다
+    photoDragCancel = () => {
+      if (!st) return;
+      clearTimeout(st.timer);
+      const was = st; st = null;
+      if (!was.dragging) return;
+      if (was.ghost && was.ghost.parentNode) was.ghost.parentNode.removeChild(was.ghost);
+      was.cell.classList.remove('drag-src');
+      grid.classList.remove('dragging');
+      dragEndAt = Date.now(); dragEndCell = was.cell;
+      U.toast('사진 목록이 바뀌어 순서 변경을 취소했습니다');
+    };
+
+    grid.addEventListener('touchmove', (e) => { if (st && st.dragging) e.preventDefault(); }, { passive: false });
+    grid.addEventListener('contextmenu', (e) => { if (st) e.preventDefault(); });
+    // 드래그 직후 따라오는 click 이 라이트박스를 열지 않게 — **끌었던 그 셀(또는 그리드 자체)만**, 삭제 X 는 막지 않는다(검수 지적: 옆 사진 탭까지 먹었다)
+    grid.addEventListener('click', (e) => {
+      if (Date.now() - dragEndAt >= 400) return;
+      if (e.target.closest && e.target.closest('.del')) return;
+      const c = e.target.closest ? e.target.closest('.photo-cell') : null;
+      if (e.target === grid || (c && c === dragEndCell)) { e.stopPropagation(); e.preventDefault(); }
+    }, true);
+
+    grid.addEventListener('pointerdown', (e) => {
+      if (st) return;                                  // 두 번째 손가락은 무시(첫 손가락의 타이머·상태를 덮어쓰지 않게)
+      const cell = e.target.closest && e.target.closest('.photo-cell');
+      if (!cell || !cell.dataset.pid || (e.target.closest && e.target.closest('.del'))) return;
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      if (!tk) return;
+      st = { cell: cell, id: e.pointerId, x0: e.clientX, y0: e.clientY, dragging: false, timer: null,
+             owner: tk, sub: curKey(), box: bag() };
+      st.timer = setTimeout(() => {
+        if (!st) return;
+        st.dragging = true;
+        U.buzz(14);
+        grid.classList.add('dragging');
+        cell.classList.add('drag-src');
+        const r = cell.getBoundingClientRect();
+        const g = cell.cloneNode(true);
+        g.className = 'photo-cell photo-ghost';
+        g.style.width = r.width + 'px'; g.style.height = r.height + 'px';
+        g.style.left = e.clientX + 'px'; g.style.top = e.clientY + 'px';
+        document.body.appendChild(g);
+        st.ghost = g;
+        try { grid.setPointerCapture(st.id); } catch (err) {}
+      }, 200);
+    });
+
+    grid.addEventListener('pointermove', (e) => {
+      if (!st || e.pointerId !== st.id) return;
+      if (!st.dragging) {
+        if (Math.abs(e.clientX - st.x0) > 8 || Math.abs(e.clientY - st.y0) > 8) { clearTimeout(st.timer); st = null; }
+        return;
+      }
+      e.preventDefault();
+      if (!grid.contains(st.cell)) { photoDragCancel(); return; }   // 그리드가 새로 그려져 집힌 셀이 떨어져 나갔다
+      st.ghost.style.left = e.clientX + 'px';
+      st.ghost.style.top = e.clientY + 'px';
+      const under = document.elementFromPoint(e.clientX, e.clientY);
+      const over = under && under.closest ? under.closest('.photo-cell') : null;
+      if (over && over !== st.cell && over.parentNode === grid && !over.classList.contains('photo-ghost')) {
+        // 격자라 좌우 절반이 아니라 「앞에 있던 걸 뒤로 끌면 그 뒤에, 뒤에 있던 걸 앞으로 끌면 그 앞에」
+        const list = cells();
+        const from = list.indexOf(st.cell), to = list.indexOf(over);
+        grid.insertBefore(st.cell, from < to ? over.nextSibling : over);
+        renumber();
+      }
+    }, { passive: false });
+
+    grid.addEventListener('pointerup', () => stop(false));
+    grid.addEventListener('pointercancel', () => stop(true));
   }
 
   /* 처리 중인(아직 어느 작업에도 저장 안 된) 사진 id.
@@ -7770,7 +7895,7 @@
     window.addEventListener('pagehide', flushEdit);
   }
 
-  function init() { bind(); }
+  function init() { bind(); bindPhotoDrag(); }
 
   /* 계산 탭에서 넘어온 값을 새 세트로 채운다 */
   function setValues(values, factor) {
