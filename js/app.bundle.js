@@ -433,9 +433,24 @@
     return j;
   }
 
+  /* ---------- 모드(공시체·방통·물성) — 홈 상단 세그먼트, 세 탭이 따라가는 표시 필터(2026-09-17 사용자 지시) ----------
+     데이터는 안 옮긴다: 큐브몰드(specKey 'cube')만 방통 모드, 그 외 작업 전부 공시체 모드(Spec.modeOf). */
+  const MODE_KEY = 'gsc.mode.v1';
+  const MODES = { spec: '공시체', bang: '방통', prop: '물성' };
+  function mode() {
+    try { const m = localStorage.getItem(MODE_KEY); return MODES[m] ? m : 'spec'; } catch (e) { return 'spec'; }
+  }
+  function setMode(m) {
+    const v = MODES[m] ? m : 'spec';
+    try { localStorage.setItem(MODE_KEY, v); } catch (e) {}
+    return v;
+  }
+  function modeName(m) { return MODES[m || mode()] || '공시체'; }
+
   global.U = {
     theme: theme, setTheme: setTheme,
     jugu: jugu, setJugu: setJugu,
+    mode: mode, setMode: setMode, modeName: modeName,
     $: $, $$: $$, el: el, icon: icon,
     toast: toast, sheet: sheet, confirmSheet: confirmSheet, buzz: buzz,
     copyText: copyText,
@@ -1018,6 +1033,7 @@
       supervisor: (t.supervisor || '').trim(),
       supPhone: (t.supPhone || '').trim(),
       part: (t.part || '').trim(),
+      planId: String(t.planId || '').trim(),   // 플래너 묶음 번호(2026-09-17) — 없으면 동+타설일 자동 묶음(Task.batchKey)
       jugu: (t.jugu === '1' || t.jugu === '24') ? t.jugu : '',   // 비면 동 번호로 추정(Task.juguOf)
       photoMark: !!t.photoMark,            // 목록의 「사진」 배지 — 표시 전용(완료 판정과 무관)
       // 28일은 두 칸의 사진이 곧 이 작업의 사진이다(gc 가 여기만 본다)
@@ -1261,6 +1277,7 @@
       dong: (b.dong || '').trim(),           // 동 — 작업과 같은 표기(사용자 지시로 추가)
       floor: String(b.floor || '').trim(),   // 층수 메모 (예: "3" → 화면에서 "3층")
       memo: (b.memo || '').trim(),           // 자유 메모(사용자 지시로 추가)
+      planId: String(b.planId || '').trim(), // 방통 플래너 묶음 번호(2026-09-17)
       supervisor: (b.supervisor || '').trim(),
       supPhone: (b.supPhone || '').trim(),
       jugu: (b.jugu === '1' || b.jugu === '24') ? b.jugu : '',
@@ -2856,6 +2873,13 @@
     { key: 'd28',    name: '28일', age: 28, note: '수중·봉함', sub: true }
   ];
 
+  /* 방통 모드의 분류 — 방통(몰탈) 타설 후 28일 큐브몰드 압축강도(2026-09-17 사용자 지시).
+     공시체와 같되 보정계수를 안 곱한다(1.00 고정), 값 3개, 사진 1회차, 수중·봉함 없음.
+     SPECS 에 넣지 않는다 — 공시체 편집기 칩·플래너·필터 칩은 SPECS 만 돈다. 모드별 분류는 forMode 로. */
+  const CUBE = { key: 'cube', name: '큐브몰드', age: 28, note: '방통 후 28일 · 계수 1.00', factor: 1 };
+  function forMode(mode) { return mode === 'bang' ? [CUBE] : (mode === 'prop' ? [] : SPECS); }
+  function modeOf(specKey) { return specKey === CUBE.key ? 'bang' : 'spec'; }
+
   /* 28일 작업 안의 두 칸. 순서가 화면 순서다. */
   const SUBS = [
     { key: 'water', name: '수중', note: '수중양생' },
@@ -2871,6 +2895,7 @@
 
   function byKey(k) {
     for (let i = 0; i < SPECS.length; i++) if (SPECS[i].key === k) return SPECS[i];
+    if (k === CUBE.key) return CUBE;
     for (let i = 0; i < LEGACY.length; i++) if (LEGACY[i].key === k) return LEGACY[i];
     return null;
   }
@@ -2968,6 +2993,7 @@
 
   global.Spec = {
     SPECS: SPECS, SUBS: SUBS, byKey: byKey, subByKey: subByKey, hasSubs: hasSubs,
+    CUBE: CUBE, forMode: forMode, modeOf: modeOf,
     isHoliday: isHoliday, isSunday: isSunday,
     atMidnight: atMidnight, addDays: addDays, sameDay: sameDay,
     shiftToWorkday: shiftToWorkday, testDayOf: testDayOf,
@@ -3271,11 +3297,12 @@
       '  "209,210동"처럼 여러 동이 나열된 것도 그대로 담아라.',
       '  "A9"·"B2" 같은 블록명도 동으로 취급해라.',
       '- part: 부위 — 제목칸에서 동 표기를 뺀 나머지(예: "2PH1 벽체", "15F 벽체", "필로티").',
+      '- date(최상위): 계획표 머리(제목·상단)에 적힌 타설 날짜를 YYYY-MM-DD 로(예 "2026. 9. 17 (수)" → "2026-09-17"). 표 밖이라도 이 날짜만은 읽어라. 없으면 null.',
       '',
       '규격·펌프카·반입반출 같은 다른 칸은 무시해라. 표 밖 글자도 무시해라.',
       '아래 JSON 형태로만 답하라. 설명 문장·마크다운 코드블록 금지. 모르는 값은 null.',
       '',
-      '{"rows":[{"sup":"최태식","dong":"215동 특화동","part":"15F 벽체"}]}'
+      '{"date":"2026-09-17","rows":[{"sup":"최태식","dong":"215동 특화동","part":"15F 벽체"}]}'
     ].join('\n')
   };
 
@@ -3514,7 +3541,9 @@
       const im = await Vision.toJpegB64(src, 2048);
       const raw = await Vision.callJSON(PROMPTS.plan, [im], { timeout: OCR_TIMEOUT });
       const rows = pickList(raw, ['rows', 'items', 'data']);
-      return { items: planItems(rows), rows: rows.length };
+      // 계획표 머리의 타설 날짜(2026-09-17 사용자 지시) — fixDate 가 "2026.09.17"/"2026/9/17"/"MM-DD"(올해)도 받는다
+      const date = (raw && !Array.isArray(raw)) ? fixDate(raw.date) : '';
+      return { items: planItems(rows), rows: rows.length, date: date || '' };
     });
   }
 
@@ -4174,9 +4203,12 @@
   }
 
   /* 목록은 항상 현재 주구 것만 — 반대편 주구 작업은 세그를 바꿔야 보인다 */
+  /* 현재 주구 + 현재 모드의 작업만(모드 = 표시 필터, 2026-09-17). 큐브몰드는 방통 모드, 나머지는 전부 공시체 모드 */
+  function mine(rows) {
+    return (rows || []).filter((t) => juguOf(t) === U.jugu() && Spec.modeOf(t.specKey) === U.mode());
+  }
   function list(day) {
-    return Store.tasksOf(day || today())
-      .then((rows) => rows.filter((t) => juguOf(t) === U.jugu()));
+    return Store.tasksOf(day || today()).then(mine);
   }
   function get(id) { return Store.getTask(id); }
   function save(t) { return Store.putTask(t); }
@@ -4250,13 +4282,13 @@
   /* 새 작업 초안 (아직 저장 전) */
   function draft(dayKey, specKey) {
     const day = dayKey || today();
-    const key = specKey || Spec.SPECS[0].key;
+    const key = specKey || (Spec.forMode(U.mode())[0] || Spec.SPECS[0]).key;   // 방통 모드면 큐브몰드
     return {
       id: null, day: day, testDay: day, specKey: key, dong: '',
       jugu: U.jugu(),                  // 만들 때의 주구가 이 작업의 소속이다
       castDay: defaultCast(key, day),
       supervisor: '', part: '', photos: [], values: [],
-      factor: Calc.DEFAULT_FACTOR
+      factor: (Spec.byKey(key) && Spec.byKey(key).factor) || Calc.DEFAULT_FACTOR
     };
   }
 
@@ -4377,6 +4409,24 @@
     if (!suf) return m[1] + '동';
     if (suf === '특화동') return m[1] + '동 특화동';
     return m[1] + '동' + suf.toUpperCase();
+  }
+
+  /* ---------- 묶음 키(플래너 「올린 묶음」, 2026-09-17) ----------
+     플래너가 한 항목에서 만든 레코드는 같은 planId 를 갖는다. planId 가 없는 예전 작업은 동+타설일로 자동 묶는다
+     (같은 타설의 수직·수평·필러·28일은 동·타설일이 같다). 방통 기록은 day(=타설일) 기준. */
+  const dongKeyOf = (s) => String(s || '').replace(/[\s()（）]/g, '');
+  function batchKey(t) {
+    if (!t) return null;
+    if (t.planId) return t.planId;
+    const d = dongKeyOf(t.dong), c = t.castDay || '';
+    // 감리까지 키에 넣는다 — 같은 동·타설일이라도 감리가 다르면 다른 타설(별개 묶음). 플래너 옛 등록분은 4건이 감리를 공유한다
+    return (d && c) ? ('auto:' + d + '|' + c + '|' + String(t.supervisor || '').trim()) : null;
+  }
+  function batchKeyBang(b) {
+    if (!b) return null;
+    if (b.planId) return b.planId;
+    const d = dongKeyOf(b.dong), c = b.day || '';
+    return (d && c) ? ('auto:' + d + '|' + c + '|' + String(b.supervisor || '').trim()) : null;
   }
 
   /* 규칙이 정해주는 표기 날짜 (재령·검수용으로 계속 쓴다) */
@@ -4528,7 +4578,7 @@
   }
 
   global.Task = {
-    today: today, list: list, get: get, save: save, remove: remove,
+    today: today, list: list, mine: mine, get: get, save: save, remove: remove,
     isDone: isDone, counts: counts, draft: draft, defaultCast: defaultCast,
     testDayOf: testDayOf, dongText: dongText, dongOf: dongOf, juguOf: juguOf,
     hasSubs: hasSubs, subOf: subOf, subPhotos: subPhotos, pieces: pieces,
@@ -4539,6 +4589,7 @@
     autoReportDay: autoReportDay, reportDayOf: reportDayOf, exportLabel: exportLabel,
     wmText: wmText,
     supAxisOff: supAxisOff,
+    batchKey: batchKey, batchKeyBang: batchKeyBang, dongKeyOf: dongKeyOf,
     exportGroup: exportGroup, groupForExport: groupForExport, groupByDay: groupByDay
   };
 })(window);
@@ -4560,6 +4611,7 @@
   const K_ENTRIES = 'gsc.entries.v1';
   const K_AUTO = 'gsc.autoreg.v1';
   const K_FACTOR = 'gsc.factor.v1';
+  const K_FACTOR_BANG = 'gsc.factor.bang.v1';   // 방통 모드(큐브몰드)의 자유 계산기 계수 — 기본 1.00
   const K_DIGITS = 'gsc.digits.v1';
   const K_SPREAD = 'gsc.fill.spread.v1';
   const DEFAULT_FACTOR = 0.97;
@@ -4595,7 +4647,7 @@
     try {
       localStorage.setItem(K_ENTRIES, JSON.stringify(entries));
       localStorage.setItem(K_AUTO, autoReg ? '1' : '0');
-      localStorage.setItem(K_FACTOR, String(factor));
+      if (!linkedId) localStorage.setItem(factorKey(), String(factor));   // 연결 중 계수는 세트 것(writeSet 이 저장) — 자유 계산기 키를 덮지 않는다(감사 지적: 연결 중 모드가 바뀌면 엉뚱한 키에 들어갔다)
       localStorage.setItem(K_DIGITS, digits);
       localStorage.setItem(K_SPREAD, String(spread));
     } catch (e) { /* 저장 실패는 치명적이지 않음 */ }
@@ -4646,8 +4698,8 @@
       }
       const a = localStorage.getItem(K_AUTO);
       if (a !== null) autoReg = a === '1';
-      const f = parseFactor(localStorage.getItem(K_FACTOR));
-      if (!isNaN(f)) factor = f;
+      const f = parseFactor(localStorage.getItem(factorKey()));
+      factor = isNaN(f) ? modeDefault() : f;
       const d = localStorage.getItem(K_DIGITS);
       if (d && /^\d{1,6}$/.test(d)) digits = d;
       const sp = parseFloat(localStorage.getItem(K_SPREAD));
@@ -5166,6 +5218,24 @@
 
   /* 수직·수평·필러는 공시체 3개 평균, 28일(수중·봉함)은 9개 평균 — 그 이상은 못 치게 막는다.
      연결 안 된 자유 계산기는 9개(칩 3줄). */
+  /* ---------- 모드별 계수(2026-09-17) ----------
+     공시체 모드 = 0.97(기존 키), 방통 모드 = 1.00(별도 키). 큐브몰드 세트에 연결되면 1.00 으로 잠근다 — 사용자 지시 "0.97 만 안 곱하면 됨". */
+  const modeDefault = () => (U.mode() === 'bang' ? 1 : DEFAULT_FACTOR);
+  const factorKey = () => (U.mode() === 'bang' ? K_FACTOR_BANG : K_FACTOR);
+  function lockFactor(on) {
+    const fin = U.$('#factor'); if (!fin) return;
+    fin.readOnly = !!on; fin.classList.toggle('locked', !!on);
+    const rb = U.$('#factor-reset'); if (rb) rb.classList.toggle('hidden', !!on);
+  }
+  /* 홈에서 모드를 바꿨다 — 연결 중이 아니면 그 모드의 계수를 다시 읽는다 */
+  function onModeChange() {
+    if (linkedId) return;
+    const f = parseFactor(localStorage.getItem(factorKey()));
+    factor = isNaN(f) ? modeDefault() : f;
+    const fin = U.$('#factor'); if (fin) fin.value = factorText(factor);
+    save(); renderStats();
+  }
+
   function capFor(specKey) { return (!specKey || specKey === 'd28') ? 9 : 3; }
   function cap() { return capFor(linkedSpec); }
   function capMsg() {
@@ -5211,7 +5281,8 @@
     linkedSub = subKey || null;
     linkedSpec = specKey || null;
     entries = incoming;
-    factor = (typeof f === 'number' && isFinite(f) && f > 0) ? f : DEFAULT_FACTOR;
+    factor = (specKey === 'cube') ? 1 : ((typeof f === 'number' && isFinite(f) && f > 0) ? f : DEFAULT_FACTOR);
+    lockFactor(specKey === 'cube');            // 큐브몰드는 1.00 고정
     digits = '';
     save(); render();
     const bar = U.$('#calc-link');
@@ -5229,6 +5300,9 @@
     linkedSub = null;
     linkedSpec = null;
     U.$('#calc-link').classList.add('hidden');
+    lockFactor(false);
+    // 연결이 풀리면 계수는 현재 모드의 자유 계산기 계수로 — 연결 중 모드가 바뀌었을 수 있다(감사 지적)
+    { const f0 = parseFactor(localStorage.getItem(factorKey())); factor = isNaN(f0) ? modeDefault() : f0; const fin = U.$('#factor'); if (fin) fin.value = factorText(factor); renderStats(); }
     syncFillSealBtn(); syncFillBtn();
     fit();   // 연결바가 사라져 높이가 도로 늘었다
   }
@@ -5237,6 +5311,9 @@
      (편집기에서 지운 뒤 계산 탭으로 돌아온 경우 — 값을 잃는 것보다 낫다). */
   /* 28일 작업은 계산이 수중 칸 / 봉함 칸으로 나뉘어 있다 — 어느 칸에 쓸지 subKey 로 받는다 */
   function writeSet(t, vals, fac, setId, subKey) {
+    // 분류가 계수를 고정하면(큐브몰드 1.00) 어떤 경로로 들어와도 그 계수로 쓴다 — 「작업에 넣기」가 자유 계산기 계수를 그대로 넘기던 구멍(감사 지적)
+    const sp = Spec.byKey(t && t.specKey);
+    if (sp && sp.factor) fac = sp.factor;
     if (subKey && Task.hasSubs(t)) {
       if (!t.sub) t.sub = {};
       if (!t.sub[subKey]) t.sub[subKey] = { photos: [], sets: [] };
@@ -5294,8 +5371,7 @@
     const day = U.dayKey(Date.now());
     let tasks = [];
     try {
-      tasks = (await Store.tasksOf(day))
-        .filter((t) => Task.juguOf(t) === U.jugu());   // 주구 분리 — 목록과 같은 눈높이
+      tasks = Task.mine(await Store.tasksOf(day));   // 주구+모드 분리 — 목록과 같은 눈높이(공시체 모드에서 큐브에 넣지 못하게, 감사 지적)
     } catch (e) { console.error(e); }
 
     const items = [];
@@ -5408,11 +5484,11 @@
       fit();
     });
     U.$('#factor-reset').addEventListener('click', () => {
-      factor = DEFAULT_FACTOR;
+      factor = modeDefault();
       fin.value = factorText(factor);
       fin.classList.remove('bad');
       save(); renderStats();
-      U.toast('보정계수를 0.97로 되돌렸습니다');
+      U.toast('보정계수를 ' + factorText(factor) + '로 되돌렸습니다');
     });
 
     U.$('#calc-link-save').addEventListener('click', saveToTask);
@@ -5439,9 +5515,6 @@
       U.sheet('계산 옵션', [
         { label: '결과 복사', sub: '카카오톡에 붙여넣기용 텍스트', onPick: copySummary },
         { label: '작업에 넣기', sub: '새 작업 또는 오늘 등록한 작업', onPick: attachToRecord },
-        { label: '방통시험 계산', sub: '몰탈 밀도·슬럼프 → 카톡 보고 문구', onPick: () => {
-            if (global.Bangtong) Bangtong.open();
-          } },
         { sep: true },
         { label: '전체 지우기', cls: 'danger', onPick: clearAll }
       ]);
@@ -5514,6 +5587,7 @@
   global.Calc = {
     // 작업 세트에 연결된 채인지 — PWA 자동 새로고침(pwa-client idle)이 이때는 미룬다(연결은 메모리뿐이라 새로고침에 끊긴다)
     isLinked: () => !!linkedId,
+    onModeChange: onModeChange,
     init: init,
     summaryText: summaryText,
     stats: stats,
@@ -5573,12 +5647,12 @@
       if (dongMode !== dm) return;                        // 그 사이 다른 동·날짜로 바뀜
     } else {
       try { rows = await Store.tasksOf(want); } catch (e) { console.error(e); fail = e || true; }
-      try { brows = await Store.bangsOf(want); } catch (e) { console.warn('[bangs]', e); }
+      if (U.mode() === 'bang') { try { brows = await Store.bangsOf(want); } catch (e) { console.warn('[bangs]', e); } }
       if (want !== U.dayKey(base.getTime()) || dongMode) return;      // 지나간 조회 — 버린다
     }
     loadFail = fail;
     // 주구 분리(사용자 지시) — 현재 주구 작업만. 반대편은 홈 설정에서 세그를 바꿔야 보인다
-    all = rows.filter((t) => Task.juguOf(t) === U.jugu());
+    all = Task.mine(rows);                 // 주구 + 모드(큐브몰드는 방통 모드) 필터
     bangs = brows.filter((b) => !b.jugu || b.jugu === U.jugu());
     const alive = Object.create(null);
     all.forEach((t) => { alive[t.id] = 1; });
@@ -5652,6 +5726,9 @@
 
     if (!rows.length) {
       list.innerHTML = '';
+      if (kindF && kindF.bangOnly) {           // 「방통시험」 칩 — 작업 행 없이 방통 구간만
+        appendBangs(list); updateBar(); return;
+      }
       emptyNode.innerHTML = loadFail
         // userMsg 는 store.js 가 만든 고정 문구다(사용자 입력 아님)
         ? ((loadFail.userMsg || '목록을 불러오지 못했습니다.') + '<br>위 날짜를 탭하면 다시 시도합니다.')
@@ -5662,7 +5739,7 @@
           : (dongMode ? '이 동의 작업이 없습니다.'
                       : '이 날짜에 작업이 없습니다.<br>오른쪽 위 <b>+</b> 로 등록하세요.'));
       list.appendChild(emptyNode);
-      appendBangs(list);               // 작업이 없어도 그날 방통시험은 보인다
+      if (U.mode() === 'bang') appendBangs(list);   // 방통 모드: 작업이 없어도 그날 방통시험은 보인다
       updateBar();
       return;
     }
@@ -5713,7 +5790,7 @@
     nodes.forEach((n) => frag.appendChild(n));
     list.innerHTML = '';
     list.appendChild(frag);
-    appendBangs(list);
+    if (U.mode() === 'bang') appendBangs(list);   // 방통시험 구간은 방통 모드에서만(2026-09-17)
     updateBar();
   }
 
@@ -5731,6 +5808,7 @@
       const main = U.el('div', 'bang-si-main');
       main.appendChild(U.el('span', 'bang-si-sup', Bangtong.placeOf(b)));   // 윗줄 = 동(사용자 지시)
       const sub = [Bangtong.supOf(b),
+                   (r.kgm3 == null && r.slump == null ? '값 미입력' : ''),
                    (r.kgm3 != null ? (r.kgm3 + 'kg/㎥') : ''),
                    (r.slump != null ? '슬럼프 ' + r.slump + 'mm' : ''),
                    ((b.photos || []).length ? '사진 ' + b.photos.length + '장' : '')]
@@ -5996,9 +6074,15 @@
   }
 
   /* ---------- 종류 칩 — 시트 안 뒤지지 않고 한 번에(사용자 지시: 필터 사용성) ---------- */
-  const KINDS = [{ key: 'all', label: '전체', test: null }]
-    .concat(Spec.SPECS.map((s) => ({ key: s.key, label: s.name, test: (t) => t.specKey === s.key })))
-    .concat([{ key: 'nomark', label: '사진 미체크', test: (t) => !t.photoMark }]);
+  // 모드별로 구성(2026-09-17): 공시체 = 전체·수직·수평·필러·28일·사진 미체크 / 방통 = 전체·큐브몰드·방통시험·사진 미체크
+  // 「방통시험」 칩(bangOnly)은 작업 행을 숨기고 그날 방통시험 구간만 남긴다
+  function kinds() {
+    const base = [{ key: 'all', label: '전체', test: null }];
+    const specs = Spec.forMode(U.mode()).map((s) => ({ key: s.key, label: s.name, test: (t) => t.specKey === s.key }));
+    const tail = [{ key: 'nomark', label: '사진 미체크', test: (t) => !t.photoMark }];
+    if (U.mode() === 'bang') return base.concat(specs, [{ key: 'bangonly', label: '방통시험', test: () => false, bangOnly: true }], tail);
+    return base.concat(specs, tail);
+  }
 
   function renderChips() {
     const box = U.$('#tasks-chips');
@@ -6012,7 +6096,9 @@
       c.addEventListener('click', () => setDong(null));
       box.appendChild(c);
     }
-    KINDS.forEach((k) => {
+    const ks = kinds();
+    if (kindF && !ks.some((k) => k.key === kindF.key)) kindF = null;   // 모드가 바뀌어 없어진 칩
+    ks.forEach((k) => {
       const on = k.test ? !!(kindF && kindF.key === k.key) : !kindF;
       const c = U.el('button', 'fchip' + (on ? ' on' : ''), k.label);
       c.addEventListener('click', () => {
@@ -6033,7 +6119,7 @@
 
   async function pickDong() {
     let rows = [];
-    try { rows = (await Store.allTasks()).filter((t) => Task.juguOf(t) === U.jugu()); } catch (e) { console.error(e); }
+    try { rows = Task.mine(await Store.allTasks()); } catch (e) { console.error(e); }
     const map = Object.create(null);
     rows.forEach((t) => {
       const k = dongKeyOf(t);
@@ -6155,7 +6241,7 @@
      각 폴더에 사진(동_타설-시험_n.jpg)과 **강도값 엑셀 한 장**(강도값.xlsx — 작업마다 열,
      값은 위→아래. 같은 분류라도 열 제목으로 구분). 사용자 지시 양식.
      수중 칸의 폴더명은 카톡 문구와 같은 「28일강도」다(사용자 지시). */
-  const ZIP_FOLDER = { vert: '수직', horiz: '수평', filler: '필러', water: '28일강도', seal: '봉함' };
+  const ZIP_FOLDER = { vert: '수직', horiz: '수평', filler: '필러', water: '28일강도', seal: '봉함', cube: '큐브몰드' };
   const mmdd = (d) => (d ? String(d).slice(5).replace('-', '') : '0000');
   // 압축파일 이름 — 「8월 25일 강도시험분.zip」 꼴(사용자 지시)
   const zipTitle = () => (base.getMonth() + 1) + '월 ' + base.getDate() + '일 강도시험분.zip';
@@ -6402,7 +6488,6 @@
     if ((tk.dong || "").trim() || (tk.part || "").trim()) return true;
     if (photoIdsOf(tk).length) return true;
     try { if (Task.filledSets(tk).length) return true; } catch (e) {}
-    if (bangX) { const v = bangVals(); if (v.w || v.s1 || v.s2) return true; }
     return false;
   }
 
@@ -6426,15 +6511,26 @@
     { key: 'vert', name: '수직' }, { key: 'horiz', name: '수평' },
     { key: 'filler', name: '필러' }, { key: 'd28', name: '28일' }
   ];
-  const plAllSpecs = () => PLAN_NAMES.map((n) => n.key);
+  /* 방통 모드 플래너(2026-09-17): 한 항목 = 방통시험(타설일, 값은 비움) + 큐브몰드(28일 뒤). 버퍼 항목은 mode 를 새겨 모드별로 나눠 보인다 */
+  const PLAN_NAMES_BANG = [{ key: 'bang', name: '방통시험' }, { key: 'cube', name: '큐브몰드' }];
+  const planNames = (mode) => ((mode || U.mode()) === 'bang' ? PLAN_NAMES_BANG : PLAN_NAMES);
+  const plAllSpecs = (mode) => planNames(mode).map((n) => n.key);
+  const plMine = () => plBuf.filter((it) => (it.mode || 'spec') === U.mode());
   let plDong = '', plSup = '', plPhone = '';
   let plBuf = [];
+  /* 플래너 「올린 묶음」에서 작업·방통을 열면 플래너를 잠시 닫고(둘 다 오버레이라 겹친다), 그 화면이 닫힐 때 플래너로 돌아온다 */
+  let plReturn = false;
+  function closeEditorView() {
+    Nav.showTask(false);
+    if (plReturn) { plReturn = false; openPlanner(); }
+  }
+  function overlayClosed() { if (plReturn) { plReturn = false; openPlanner(); } }
 
   function plLoad() {
     try {
       const j = JSON.parse(localStorage.getItem(K_PLANBUF) || '[]');
       if (Array.isArray(j)) plBuf = j.filter((x) => x && x.dong)
-        .map((x) => { if (!Array.isArray(x.specs)) x.specs = plAllSpecs(); return x; });
+        .map((x) => { if (!x.mode) x.mode = 'spec'; if (!Array.isArray(x.specs)) x.specs = plAllSpecs(x.mode); return x; });
     } catch (e) {}
   }
   function plSave() { try { localStorage.setItem(K_PLANBUF, JSON.stringify(plBuf)); } catch (e) {} }
@@ -6443,9 +6539,13 @@
     plLoad();
     const ci = $('#plan-cast');
     if (ci && !ci.value) ci.value = U.dayKey(Date.now());
-    renderPlanPick(); renderPlanBuf();
+    renderPlanPick(); renderPlanBuf(); renderPlanGroups();
+    // 모드별 모양: 방통 플래너는 층 칸을 보이고 계획표 OCR(공시체 타설계획표)은 숨긴다
+    const bang = (U.mode() === 'bang');
+    const ttl = $('#plan-title'); if (ttl) ttl.textContent = bang ? '방통 플래너' : '플래너';
+    const ff = $('#plan-floor-field'); if (ff) ff.classList.toggle('hidden', !bang);
     const ob = $('#plan-ocr');
-    if (ob) ob.classList.toggle('hidden', !(global.OCR && OCR.available && OCR.available()));
+    if (ob) ob.classList.toggle('hidden', bang || !(global.OCR && OCR.available && OCR.available()));
     Nav.showPlan(true);
   }
 
@@ -6512,8 +6612,9 @@
   function planAdd() {
     if (!plDong) { U.toast('동을 먼저 고르세요'); return; }
     plBuf.push({
-      id: U.uid(), castDay: planCastDay(), dong: plDong,
+      id: U.uid(), mode: U.mode(), castDay: planCastDay(), dong: plDong,
       supervisor: plSup, supPhone: plPhone,
+      floor: ($('#plan-floor') ? $('#plan-floor').value.replace(/\D/g, '').slice(0, 3) : ''),   // 방통 모드: 층(선택)
       part: ($('#plan-part') ? $('#plan-part').value.trim() : ''),
       specs: plAllSpecs()
     });
@@ -6521,6 +6622,7 @@
     // 연속 입력 대비 — 날짜는 유지, 동·감리·부위만 비운다
     plDong = ''; plSup = ''; plPhone = '';
     if ($('#plan-part')) $('#plan-part').value = '';
+    if ($('#plan-floor')) $('#plan-floor').value = '';
     renderPlanPick(); renderPlanBuf();
     U.buzz(6);
   }
@@ -6529,24 +6631,25 @@
     const box = $('#plan-buf');
     if (!box) return;
     box.innerHTML = '';
-    $('#plan-buf-n').textContent = plBuf.length;
+    const mine = plMine();                       // 현재 모드 항목만(다른 모드 것은 숨겨 두고 보존)
+    $('#plan-buf-n').textContent = mine.length;
     const up = $('#plan-up-all');
-    if (up) { up.disabled = !plBuf.length; up.textContent = plBuf.length ? ('전체 올리기 (' + plBuf.length + '건)') : '전체 올리기'; }
-    if (!plBuf.length) {
+    if (up) { up.disabled = !mine.length; up.textContent = mine.length ? ('전체 올리기 (' + mine.length + '건)') : '전체 올리기'; }
+    if (!mine.length) {
       box.appendChild(U.el('p', 'empty-msg', '비어 있습니다 — 위에서 담거나 계획표를 스캔하세요'));
       return;
     }
-    plBuf.forEach((it) => {
+    mine.forEach((it) => {
       const card = U.el('div', 'bang-saved-item');
       const main = U.el('div', 'bang-si-main');
       main.appendChild(U.el('span', 'bang-si-sup', it.dong));
-      const sub = [it.supervisor || '감리 미지정', Spec.md(it.castDay) + ' 타설', it.part || '']
+      const sub = [it.supervisor || '감리 미지정', Spec.md(it.castDay) + ' 타설', it.floor ? it.floor + '층' : '', it.part || '']
         .filter(Boolean).join(' · ');
       main.appendChild(U.el('span', 'bang-si-sub', sub));
       // 분류 체크박스 — 기본 전부 켬, 끈 분류는 올릴 때 뺀다(사용자 지시)
       const upBtn = U.el('button', 'bang-si-btn');
       const cks = U.el('div', 'plan-cks');
-      PLAN_NAMES.forEach((nm) => {
+      planNames(it.mode).forEach((nm) => {
         const on = it.specs.indexOf(nm.key) >= 0;
         const lab = U.el('label', 'plan-ck' + (on ? ' on' : ''));
         const ck = document.createElement('input');
@@ -6581,8 +6684,131 @@
     });
   }
 
+  /* ---------------- 올린 묶음 (2026-09-17 사용자 지시: 플래너로 넣은 것들을 한 번에 관리) ----------------
+     플래너로 올린 작업(같은 planId)과, 예전 작업(동+타설일 자동 묶음)을 타설일 역순으로 한 줄씩.
+     칩 = 구성원 상태(완료 ✓ / 시험일 / 없음=삭제됨). 칩을 누르면 그 작업(또는 방통 기록)을 연다. 「×」= 묶음 삭제(확인 후).
+     개별 삭제·수정은 편집기에서 그대로. 방통 모드는 구성원이 방통시험·큐브몰드. */
+  const GROUP_DAYS = 90;
+  async function renderPlanGroups() {
+    const box = $('#plan-groups');
+    if (!box) return;
+    const mode = U.mode();
+    const since = U.dayKey(Date.now() - GROUP_DAYS * 86400000);
+    let tasks = [], bangs = [];
+    try { tasks = Task.mine(await Store.allTasks()).filter((t) => (t.castDay || t.day || '') >= since); } catch (e) { console.warn('[plan groups]', e); }
+    if (mode === 'bang') {
+      try { bangs = (await Store.allBangs()).filter((b) => (!b.jugu || b.jugu === U.jugu()) && (b.day || '') >= since); } catch (e) {}
+    }
+    if (!Nav.isPlanOpen()) return;
+    const groups = Object.create(null), order = [];
+    const put = (key, rec, kind) => {
+      if (!key) return;
+      if (!groups[key]) { groups[key] = { key: key, tasks: [], bangs: [], castDay: '', dong: '', sup: '', part: '' }; order.push(key); }
+      const g = groups[key];
+      if (kind === 'task') { g.tasks.push(rec); g.castDay = g.castDay || rec.castDay || rec.day || ''; }
+      else { g.bangs.push(rec); g.castDay = g.castDay || rec.day || ''; }
+      g.dong = g.dong || (rec.dong || '');
+      g.sup = g.sup || (rec.supervisor || '');
+      g.part = g.part || (kind === 'task' ? (rec.part || '') : (rec.memo || ''));
+    };
+    tasks.forEach((t) => put(Task.batchKey(t), t, 'task'));
+    bangs.forEach((b) => put(Task.batchKeyBang(b), b, 'bang'));
+    order.sort((a, b) => (groups[b].castDay || '').localeCompare(groups[a].castDay || ''));
+    box.innerHTML = '';
+    if (!order.length) { box.appendChild(U.el('p', 'empty-msg', '올린 묶음이 없습니다')); return; }
+    const members = (mode === 'bang') ? [{ key: 'bang', name: '방통시험' }, { key: 'cube', name: '큐브몰드' }] : PLAN_NAMES;
+    order.forEach((key) => {
+      const g = groups[key];
+      const card = U.el('div', 'plan-grp');
+      const head = U.el('div', 'plan-grp-head');
+      head.appendChild(U.el('span', 'plan-grp-title', [Spec.md(g.castDay) + ' 타설', g.dong, g.sup].filter(Boolean).join(' · ')));
+      if (g.part) head.appendChild(U.el('span', 'plan-grp-sub', g.part));
+      card.appendChild(head);
+      const chips = U.el('div', 'plan-grp-chips');
+      // 지워질 것이 전부 보여야 한다(감사 지적) — 같은 분류가 여럿이면 칩도 여럿, 구성원 밖 분류(구버전 수중·봉함 등)도 칩으로
+      const bangChip = (b) => {
+        const filled = !!(b.w != null || b.s1 != null || b.s2 != null);
+        const chip = U.el('button', 'plan-chip' + (filled ? ' done' : ''), '방통시험' + (filled ? ' ✓' : ' 미입력'));
+        chip.addEventListener('click', () => { plReturn = true; Nav.showPlan(false); Bangtong.openEdit(b); });
+        return chip;
+      };
+      const taskChip = (t) => {
+        const done = Task.isDone(t);
+        const nm = (Spec.byKey(t.specKey) || {}).name || '분류 없음';
+        const chip = U.el('button', 'plan-chip' + (done ? ' done' : ''), nm + (done ? ' ✓' : ' ' + Spec.md(Task.testDayOf(t))));
+        chip.addEventListener('click', () => { plReturn = true; Nav.showPlan(false); open(t, t.day); });
+        return chip;
+      };
+      const goneChip = (name) => { const c = U.el('button', 'plan-chip gone', name + ' 없음'); c.disabled = true; return c; };
+      const shownIds = Object.create(null);
+      members.forEach((m) => {
+        if (m.key === 'bang') {
+          if (!g.bangs.length) chips.appendChild(goneChip(m.name));
+          g.bangs.forEach((b) => chips.appendChild(bangChip(b)));
+        } else {
+          const ts = g.tasks.filter((x) => x.specKey === m.key);
+          if (!ts.length) chips.appendChild(goneChip(m.name));
+          ts.forEach((t) => { shownIds[t.id] = 1; chips.appendChild(taskChip(t)); });
+        }
+      });
+      g.tasks.filter((t) => !shownIds[t.id]).forEach((t) => chips.appendChild(taskChip(t)));
+      card.appendChild(chips);
+      const del = U.el('button', 'bang-si-del plan-grp-del');
+      del.textContent = '×';
+      del.setAttribute('aria-label', '묶음 삭제');
+      del.addEventListener('click', () => {
+        const n = g.tasks.length + g.bangs.length;
+        // 무엇이 지워지는지 그대로 적는다 — 분류 나열 + 감리(여럿이면 전부)
+        const names = g.tasks.map((t) => (Spec.byKey(t.specKey) || {}).name || '분류 없음').concat(g.bangs.map(() => '방통시험'));
+        const sups = []; g.tasks.concat(g.bangs).forEach((r) => { const v = (r.supervisor || '').trim() || '감리 미지정'; if (sups.indexOf(v) < 0) sups.push(v); });
+        U.confirmSheet('이 묶음의 ' + n + '건을 모두 지울까요?\n' + names.join(' · ') + '\n' + sups.join(', ') + '\n사진·강도값도 함께 지워집니다', '묶음 삭제', async () => {
+          let k = 0;
+          for (const t of g.tasks) { try { await Store.deleteTask(t.id); k++; } catch (e) { console.error(e); } }
+          for (const b of g.bangs) { try { await Store.deleteBang(b.id); k++; } catch (e) { console.error(e); } }
+          U.toast(k + '건을 지웠습니다');
+          renderPlanGroups(); refreshLists();
+        }, true);
+      });
+      card.appendChild(del);
+      box.appendChild(card);
+    });
+  }
+
   /* 한 건 올리기 — 수직·수평·필러·28일 4건 등록(동·분류·타설일 중복은 건너뜀) */
   async function registerPlanItem(it) {
+    const planId = it.planId || U.uid();          // 한 항목에서 나온 작업은 같은 묶음
+    if ((it.mode || 'spec') === 'bang') {
+      // 방통 모드: 방통시험 레코드(타설일, 값은 비움 — 방통 화면에서 채운다) + 큐브몰드 작업(28일 뒤, 휴일 이월)
+      const want = Array.isArray(it.specs) ? it.specs : plAllSpecs('bang');
+      const dk = Task.dongKeyOf;
+      let ok = 0, skip = 0, bangs = [], tasks = [];
+      try { bangs = (await Store.allBangs()).filter((b) => !b.jugu || b.jugu === U.jugu()); } catch (e) {}
+      try { tasks = Task.mine(await Store.allTasks()); } catch (e) {}
+      if (want.indexOf('bang') >= 0) {
+        if (bangs.some((b) => dk(b.dong) === dk(it.dong) && b.day === it.castDay)) skip++;
+        else {
+          try {
+            await Store.putBang({ day: it.castDay, dong: it.dong, floor: it.floor || '', memo: it.part || '',
+              supervisor: it.supervisor || '', supPhone: it.supPhone || '', jugu: U.jugu(),
+              photos: [], w: null, s1: null, s2: null, planId: planId });
+            ok++;
+          } catch (e) { console.error('[planner bang]', e); }
+        }
+      }
+      if (want.indexOf('cube') >= 0) {
+        const testDay = U.dayKey(Spec.testDayOf(new Date(it.castDay + 'T00:00:00'), Spec.CUBE.age).getTime());
+        if (tasks.some((t) => dk(t.dong) === dk(it.dong) && t.specKey === 'cube' && (t.castDay || '') === it.castDay)) skip++;
+        else {
+          try {
+            await Store.putTask({ day: testDay, testDay: testDay, specKey: 'cube', castDay: it.castDay,
+              dong: it.dong, jugu: U.jugu(), supervisor: it.supervisor || '', supPhone: it.supPhone || '',
+              part: it.part || '', photos: [], sets: [], planId: planId });
+            ok++;
+          } catch (e) { console.error('[planner cube]', e); }
+        }
+      }
+      return { ok: ok, skip: skip, planId: planId };
+    }
     const cast = new Date(it.castDay + 'T00:00:00');
     const want = Array.isArray(it.specs) ? it.specs : plAllSpecs();
     const plan = Spec.SPECS.filter((s) => want.indexOf(s.key) >= 0).map((s) => ({
@@ -6601,26 +6827,26 @@
           day: p.testDay, testDay: p.testDay, specKey: p.spec.key, castDay: it.castDay,
           dong: it.dong, jugu: U.jugu(),
           supervisor: it.supervisor || '', supPhone: it.supPhone || '',
-          part: it.part || '', photos: [], sets: []
+          part: it.part || '', photos: [], sets: [], planId: planId
         });
         ok++;
       } catch (e) { console.error('[planner]', e); }
     }
-    return { ok: ok, skip: plan.length - fresh.length };
+    return { ok: ok, skip: plan.length - fresh.length, planId: planId };
   }
 
   async function uploadPlanItem(it) {
     if (Array.isArray(it.specs) && !it.specs.length) { U.toast('분류를 하나는 선택하세요'); return; }
     const r = await registerPlanItem(it);
     plBuf = plBuf.filter((x) => x.id !== it.id);
-    plSave(); renderPlanBuf(); refreshLists();
+    plSave(); renderPlanBuf(); renderPlanGroups(); refreshLists();
     U.toast(it.dong + ' — ' + r.ok + '건 등록' + (r.skip ? ' · 이미 있던 ' + r.skip + '건 건너뜀' : ''), 3000);
   }
 
   async function uploadPlanAll() {
-    if (!plBuf.length) return;
+    if (!plMine().length) return;
     // 분류를 전부 끈 항목은 두고 간다 — 지우면 담아둔 내용이 사라진다
-    const list = plBuf.filter((it) => !Array.isArray(it.specs) || it.specs.length);
+    const list = plMine().filter((it) => !Array.isArray(it.specs) || it.specs.length);
     if (!list.length) { U.toast('선택된 분류가 없습니다'); return; }
     U.toast('올리는 중…', 60000);
     let ok = 0, skip = 0;
@@ -6630,7 +6856,7 @@
       plBuf = plBuf.filter((x) => x.id !== it.id);
       plSave();
     }
-    renderPlanBuf(); refreshLists();
+    renderPlanBuf(); renderPlanGroups(); refreshLists();
     U.toast('작업 ' + ok + '건을 등록했습니다' + (skip ? ' · 이미 있던 ' + skip + '건 건너뜀' : ''), 3500);
   }
 
@@ -6653,6 +6879,12 @@
     if (!parsed.items.length) {
       U.toast('계획표에서 담당감리·동을 찾지 못했습니다\n표가 크게 나오게 찍어 보세요', 3500);
       return;
+    }
+    // 계획표 머리의 타설 날짜를 읽었으면 플래너 날짜를 그리로 맞춘다(사용자 지시) — 다르면 손으로 고치면 된다
+    const ci = $('#plan-cast');
+    if (parsed.date && ci && ci.value !== parsed.date) {
+      ci.value = parsed.date;
+      U.toast('계획표 날짜 ' + Spec.md(parsed.date) + '로 맞췄습니다', 2500);
     }
     const castDay = planCastDay();
     const byName = (nm) => {
@@ -6724,7 +6956,14 @@
   function openNow(task, dayKey) {
     tk = task ? JSON.parse(JSON.stringify(task)) : Task.draft(dayKey);
     dirty = false;
-    bangX = null;                    // 열 때는 항상 공시체 모드부터
+    // 여는 작업의 모드로 앱 모드를 맞춘다 — 계산기에서 「작업에 저장」 뒤 재오픈처럼 다른 모드에서 열리면
+    // 분류 칩이 그 작업 분류를 못 그려 엉뚱한 재분류(수직→큐브)가 나던 구멍(감사 지적)
+    const wantMode = Spec.modeOf(tk.specKey);
+    if (wantMode !== U.mode()) {
+      U.setMode(wantMode);
+      try { if (global.Home && Home.syncMode) Home.syncMode(); } catch (e) {}
+      try { if (global.Calc && Calc.onModeChange) Calc.onModeChange(); } catch (e) {}
+    }
     $('#tk-heading').textContent = task ? '작업' : '새 작업';
     $('#tk-delete').classList.toggle('hidden', !task);
     renderSpecs();
@@ -6743,7 +6982,6 @@
     renderReport();
     renderValues();
     renderPhotos();
-    syncBangUI();
     Nav.showTask(true);
   }
 
@@ -6757,14 +6995,16 @@
 
     $('#tk-due-when').textContent = '(' + Spec.shortDate(day) + ' 시험 기준)';
 
-    Spec.SPECS.forEach((s) => {
+    // 모드별 분류(2026-09-17): 공시체 4종 / 방통 모드는 큐브몰드 하나. 작업 자신의 분류가 목록에 없으면(안전판) 그 칩도 그린다
+    let specList = Spec.forMode(U.mode());
+    if (tk.specKey && !specList.some((x) => x.key === tk.specKey)) { const own = Spec.byKey(tk.specKey); if (own) specList = specList.concat([own]); }
+    specList.forEach((s) => {
       const b = U.el('button', 'spec-pill sp-' + s.key + (s.key === tk.specKey ? ' on' : ''));
       b.appendChild(U.el('span', 'sp-name', s.name));
       b.appendChild(U.el('span', 'sp-age', s.age + '일'));
       b.appendChild(U.el('span', 'sp-cast', Spec.shortDate(Spec.defaultCastDay(s.key, day))));
       b.addEventListener('click', () => {
         if (tk.specKey === s.key) return;
-        if (bangX) { bangX = null; }                  // 방통 모드에서 분류로 되돌아온다
         // 28일↔단일재령으로 저장구조가 바뀌면 반대편에 든 사진·강도값이 저장 때 버려진다 —
         // 미리 옮겨 둔다(증발 방지, 반대심문 확인). store.taskRec 에도 같은 안전판이 있다.
         migrateAcrossSub(tk.specKey, s.key);
@@ -6775,21 +7015,14 @@
         markDirty();
         renderSpecs(); renderAge(); renderReport();
         renderSubTabs(); renderValues(); renderPhotos();
-        syncBangUI();
       });
       wrap.appendChild(b);
     });
 
-    // 방통시험 — 분류 칩과 같은 줄·같은 동작(사용자 지시). 누르면 이 화면이 바로 방통 입력이 된다.
-    const bp = U.el('button', 'spec-pill sp-bang' + (tk.specKey === 'bang' ? ' on' : ''));
-    bp.appendChild(U.el('span', 'sp-name', '방통시험'));
-    bp.addEventListener('click', enterBang);
-    wrap.appendChild(bp);
-
     // 월요일이면 전날(일요일) 몫도 함께 시험한다
     const note = $('#tk-due-note');
     const due = Spec.dueOn(day);
-    const deferred = due.items.filter((i) => i.deferred);
+    const deferred = (U.mode() === 'spec') ? due.items.filter((i) => i.deferred) : [];   // 휴무 이월 안내는 공시체 분류 얘기
     if (deferred.length) {
       note.textContent = '일요일 휴무분 · ' +
         deferred.map((i) => i.spec.name + ' ' + Spec.shortDate(i.castDay)).join(' · ');
@@ -6831,7 +7064,7 @@
     const el = $('#tk-report-prev');
     if (!el) return;
     el.innerHTML = '';
-    if (!tk || bangX) return;        // 방통 모드 — 이 구획은 숨겨져 있고 spec 'bang' 은 보고축에 없다
+    if (!tk) return;
     // 내보내기가 두 갈래라 문구도 둘이다 — 어느 쪽으로 보내든 뭐가 나갈지 여기서 본다
     const rows = [
       ['감리별', Task.supAxisOff(tk) ? '보내지 않음' : Task.exportLabel(tk)],
@@ -6885,102 +7118,6 @@
       if (photos.length || sets.length) U.toast('두 칸의 사진·값을 합쳤습니다');
     }
     curSub = 'water';
-  }
-
-  /* ---------------- 방통시험 모드 (사용자 지시: 분류 칩처럼, 화면 이동 없이) ----------------
-     「방통시험」 칩을 고르면 이 편집기가 그대로 방통 입력이 된다.
-     tk 는 공용 캐리어(동·감리·사진·날짜)로 계속 쓰고, 방통 고유값만 bangX 가 든다.
-     저장은 putTask 가 아니라 putBang — 값은 계산기식 숫자 문자열(무게=끝2자리 소수). */
-  let bangX = null;   // { w, s1, s2, fl(숫자 문자열), id(저장된 방통 id), active }
-  const isBang = () => !!bangX;
-  const bDigits = (s) => String(s || '').replace(/\D/g, '');
-  // 무게는 자율 입력(사용자 지시) — 숫자와 소수점 하나만 남긴다
-  const bClean = (s) => {
-    let t = String(s || '').replace(/[^0-9.]/g, '');
-    const i = t.indexOf('.');
-    if (i >= 0) t = t.slice(0, i + 1) + t.slice(i + 1).replace(/\./g, '');
-    return t;
-  };
-
-  function enterBang() {
-    if (bangX) return;
-    if (!tk) return;
-    migrateAcrossSub(tk.specKey, 'bang');   // d28 에서 오면 사진을 평탄화(hasSubs('bang')=false)
-    tk.specKey = 'bang';
-    bangX = { w: '', s1: '', s2: '', fl: '', id: null, active: 'w' };
-    markDirty();
-    renderSpecs(); renderSubTabs(); renderValues(); renderPhotos(); renderReport();
-    syncBangUI();
-  }
-
-  /* 방통 모드 화면 전환 — 공시체 전용 구획은 CSS(.bangmode)가 숨긴다 */
-  function syncBangUI() {
-    const on = isBang();
-    $('#view-task').classList.toggle('bangmode', on);
-    $('#tk-bang-fields').classList.toggle('hidden', !on);
-    $('#tk-bang-keypad').classList.toggle('hidden', !on);
-    $('#tk-heading').textContent = on ? '방통시험' : (tk && tk.id ? '작업' : '새 작업');
-    $('#tk-delete').classList.toggle('hidden', on ? !bangX.id : !(tk && tk.id));
-    if (on) { renderBangFields(); renderBangResult(); }
-  }
-
-  function renderBangFields() {
-    if (!bangX) return;
-    $('#tkbv-w').textContent = bClean(bangX.w) || '0';   // 무게: 친 그대로(자율)
-    $('#tkbv-s1').textContent = bDigits(bangX.s1) ? String(parseInt(bangX.s1, 10)) : '0';
-    $('#tkbv-s2').textContent = bDigits(bangX.s2) ? String(parseInt(bangX.s2, 10)) : '0';
-    $('#tkbv-fl').textContent = bDigits(bangX.fl) ? (parseInt(bangX.fl, 10) + '층') : '—';
-    ['w', 's1', 's2', 'fl'].forEach((f) => $('#tkb-' + f).classList.toggle('on', bangX.active === f));
-  }
-
-  function bangVals() {
-    const w = parseFloat(bClean(bangX.w));
-    const a = bDigits(bangX.s1), b = bDigits(bangX.s2);
-    return {
-      w: (isFinite(w) && w > 0) ? w : null,
-      s1: a ? parseInt(a, 10) : null,
-      s2: b ? parseInt(b, 10) : null
-    };
-  }
-
-  function renderBangResult() {
-    if (!bangX) return;
-    $('#tk-bang-result').innerHTML = Bangtong.resultHTML(Bangtong._calc(bangVals()));
-  }
-
-  function bangPress(k) {
-    if (!bangX) return;
-    const isW = (bangX.active === 'w');
-    let s = isW ? bClean(bangX[bangX.active]) : bDigits(bangX[bangX.active]);
-    if (k === 'del') s = s.slice(0, -1);
-    else if (k === 'clr') s = '';
-    else if (k === '.') {
-      if (!isW || s.indexOf('.') >= 0) return;          // 소수점은 무게 칸에서만, 하나만
-      s = (s === '' ? '0.' : s + '.');
-    } else if (/^[0-9]$/.test(k)) {
-      s = (s === '0') ? k : (s + k);
-      const max = isW ? 10 : (bangX.active === 'fl' ? 2 : 4);
-      if (s.length > max) return;
-    }
-    bangX[bangX.active] = s;
-    markDirty();
-    renderBangFields(); renderBangResult();
-    U.buzz(4);
-  }
-
-  function bindBang() {
-    $('#tk-bang-keypad').addEventListener('click', (e) => {
-      const b = e.target.closest('[data-tkk]');
-      if (b) bangPress(b.getAttribute('data-tkk'));
-    });
-    ['w', 's1', 's2', 'fl'].forEach((f) => {
-      $('#tkb-' + f).addEventListener('click', () => {
-        if (!bangX) return;
-        bangX.active = f;
-        renderBangFields();
-        U.buzz(4);
-      });
-    });
   }
 
   /* 지금 편집 중인 그릇. 28일이 아니면 작업 자체가 그릇이다. */
@@ -7306,7 +7443,8 @@
     if (!tk) return;
     const box = bag();
     const sets = Store.normalizeSets(box);
-    const fresh = { id: U.uid(), name: '', values: [], factor: Calc.DEFAULT_FACTOR };
+    const spF = (Spec.byKey(tk.specKey) || {}).factor;        // 큐브몰드는 계수 1.00 고정
+    const fresh = { id: U.uid(), name: '', values: [], factor: spF || Calc.DEFAULT_FACTOR };
     box.sets = sets.concat([fresh]);
     delete box.values; delete box.factor;
     markDirty();
@@ -7317,6 +7455,7 @@
   /* 작업을 먼저 저장해 id 를 확보한 뒤 계산 탭을 그 세트에 연결한다 */
   async function openCalc(setId) {
     if (!tk) return;
+    plReturn = false;                 // 계산기로 넘어가면 플래너 복귀 흐름은 끝 — 남겨 두면 나중에 무관한 작업을 닫을 때 플래너가 튀어나온다(감사 지적)
     // await 너머에서 tk(다른 작업 열기)와 curSub(수중/봉함 탭 전환)가 바뀔 수 있다.
     // 바뀐 curSub 로 반대편 칸을 뒤지면 엉뚱한 세트에 연결돼 실측값을 덮어쓴다(감사 확인).
     const owner = tk;
@@ -7666,33 +7805,6 @@
     // 저장 대상을 붙들어 두고, 화면 상태는 '아직 그 작업을 보고 있을 때만' 건드린다.
     const owner = tk;
 
-    // 방통 모드 — putTask 가 아니라 putBang. tk 는 동·감리·사진 캐리어다.
-    if (bangX) {
-      const bx = bangX;
-      const v = bangVals();
-      const rec = {
-        id: bx.id || undefined,
-        day: owner.day || U.dayKey(Date.now()),
-        dong: owner.dong || '', floor: bDigits(bx.fl),
-        memo: (owner.part || '').trim(),               // 메모 칸(#tk-part)을 방통 메모로 쓴다
-        supervisor: owner.supervisor || '', supPhone: owner.supPhone || '',
-        jugu: owner.jugu || U.jugu(),
-        photos: (owner.photos || []).slice(),
-        w: v.w, s1: v.s1, s2: v.s2
-      };
-      let saved;
-      try { saved = await Store.putBang(rec); }
-      catch (e) { console.error(e); U.toast('저장하지 못했습니다'); return null; }
-      if (bangX === bx) {
-        bx.id = saved.id;
-        if (tk === owner) { dirty = false; syncBangUI(); }
-      }
-      Store.gc((owner.photos || []).slice().concat(pendingIds));
-      refreshLists();
-      if (!silent) U.toast('방통시험을 저장했습니다');
-      return saved;
-    }
-
     let rec;
     try { rec = await Store.putTask(owner); }
     catch (e) { console.error(e); U.toast('저장하지 못했습니다'); return null; }
@@ -7710,59 +7822,39 @@
   }
 
   function removeTask() {
-    // 방통 모드 — 저장된 방통 기록을 지운다
-    if (bangX) {
-      if (!bangX.id) { tk = null; bangX = null; Nav.showTask(false); return; }
-      const bid = bangX.id;
-      const owner = tk;
-      U.confirmSheet('이 방통시험 기록을 지울까요?\n사진도 함께 지워집니다', '삭제', async () => {
-        try { await Store.deleteBang(bid); }
-        catch (e) { console.error(e); U.toast('삭제하지 못했습니다'); return; }
-        if (tk === owner) { tk = null; bangX = null; Nav.showTask(false); }
-        refreshLists();
-        U.toast('삭제했습니다');
-      }, true);
-      return;
-    }
-    if (!tk || !tk.id) { tk = null; Nav.showTask(false); return; }
+    if (!tk || !tk.id) { tk = null; closeEditorView(); return; }
     const id = tk.id;
     const owner = tk;
     U.confirmSheet('이 작업을 삭제할까요?\n사진도 함께 지워집니다', '삭제', async () => {
       try { await Store.deleteTask(id); }
       catch (e) { console.error(e); U.toast('삭제하지 못했습니다'); return; }
       // 삭제가 도는 사이 다른 작업을 열었을 수 있다 — 그때는 그 화면을 닫지 않는다
-      if (tk === owner) { tk = null; Nav.showTask(false); }
+      if (tk === owner) { tk = null; closeEditorView(); }
       refreshLists();
       U.toast('삭제했습니다');
     }, true);
   }
 
   function tryClose() {
-    if (!tk) { Nav.showTask(false); return; }
+    if (!tk) { closeEditorView(); return; }
     collect();
     // 예전의 "빈 작업" 판정은 동·분류·날짜만 고른 작업을 빈 것으로 오판해 경고 없이
     // 버렸다(작업 증발 신고의 실제 원인 — 버그리포트). 규칙을 단순화한다:
     // 바뀐 게 없으면 조용히 닫고, 바뀌었으면 무조건 묻는다.
-    if (!dirty) { tk = null; Nav.showTask(false); Store.gc(pendingIds.slice()); return; }
+    if (!dirty) { tk = null; closeEditorView(); Store.gc(pendingIds.slice()); return; }
     // 자동저장(사용자 지시) — 묻지 않고 저장하고 닫는다. 내용이 하나도 없는 새 작업은 만들지 않는다.
-    if (!hasSubstance()) { tk = null; Nav.showTask(false); Store.gc(pendingIds.slice()); return; }
+    if (!hasSubstance()) { tk = null; closeEditorView(); Store.gc(pendingIds.slice()); return; }
     clearTimeout(autoT);
     const owner = tk;
     save(true).then((r) => {
       if (tk !== owner) return;          // 저장 사이 다른 작업을 열었다 — 그 화면은 건드리지 않는다
-      tk = null; Nav.showTask(false);
+      tk = null; closeEditorView();
       if (!r) U.toast('저장하지 못했습니다 — 다시 열어 확인하세요', 3500);
     });
   }
 
   /* ---------------- 내보내기 ---------------- */
   async function exportTask() {
-    // 방통 모드 — 저장 뒤 방통 전용 카톡(문구+사진)으로 보낸다
-    if (bangX) {
-      const r = await save(true);
-      if (r) Bangtong.exportRec(r);
-      return;
-    }
     const rec = await save(true);
     if (!rec) return;
     const title = Task.summary(rec);
@@ -7836,7 +7928,6 @@
   /* ---------------- 바인딩 ---------------- */
   function bind() {
     $('#tk-back').addEventListener('click', tryClose);
-    bindBang();
     bindPlanner();
     const hp = $('#home-plan');
     if (hp) hp.addEventListener('click', openPlanner);
@@ -7923,7 +8014,8 @@
 
   global.TaskUI = {
     init: init, open: open, tryClose: tryClose, setValues: setValues,
-    isOpen: () => !!tk, addFiles: addFiles
+    isOpen: () => !!tk, addFiles: addFiles,
+    _overlayClosed: overlayClosed        // 플래너에서 연 방통 화면이 닫힐 때(bangtong.close) 플래너로 복귀
   };
 })(window);
 
@@ -10833,6 +10925,8 @@
   /* 저장된 한 건을 카톡으로 — 문구 + 사진 묶어서 */
   async function exportBang(b) {
     const r = bangStats(b);
+    // 플래너가 만든 값 없는 기록(w/s1/s2 null)은 문구에 undefined 가 낀다 — 채우기 전엔 못 보낸다(감사 지적)
+    if (r.gml == null) { U.toast('몰탈 무게를 먼저 입력하세요 — 기록을 탭해 채우세요', 3000); return; }
     const head = bangTitle(b);
     const text = (head !== '감리 미지정' ? (head + '\n') : '') + report(r) +
                  (b.memo ? ('\n' + b.memo) : '');
@@ -10884,6 +10978,7 @@
     if (editing) { endEdit(); }          // 저장 안 한 수정은 폐기 — 원본은 그대로다
     $('#view-bang').classList.add('hidden');
     refreshOutside();
+    try { if (global.TaskUI && TaskUI._overlayClosed) TaskUI._overlayClosed(); } catch (e) {}   // 플래너에서 열었으면 플래너로
   }
   function isOpen() { return !$('#view-bang').classList.contains('hidden'); }
 
@@ -11347,7 +11442,7 @@
     try { tasks = await Task.list(day); } catch (e) { console.error(e); failed = e || true; }
     // 그날 방통시험도 따로 보여준다(사용자 지시) — 실패해도 작업 목록은 그대로 산다
     try {
-      bangs = (await Store.bangsOf(day)).filter((b) => !b.jugu || b.jugu === U.jugu());
+      if (U.mode() === 'bang') bangs = (await Store.bangsOf(day)).filter((b) => !b.jugu || b.jugu === U.jugu());
     } catch (e) { console.warn('[home bangs]', e); }
     if (my !== taskSeq) return;      // 그 사이 날짜가 또 바뀌었다 — 지나간 조회는 버린다
 
@@ -11366,7 +11461,7 @@
     const c = Task.counts(tasks);
     U.$('#task-count').textContent = c.done + '/' + c.all;
     if (!tasks.length && !bangs.length) { list.appendChild(emptyNode); return; }
-    if (!tasks.length) return;      // 방통시험은 오늘 작업에 안 싣는다(사용자 지시 2026-09-09) — 작업 탭·방통 화면에서 본다
+    if (!tasks.length) { appendBangRows(list, bangs); return; }   // 방통 모드: 작업이 없어도 그날 방통시험은 보인다
 
     /* 만들 땐 하나씩이지만 수행은 감리별로 몰아서 한다 → 감리별로 묶고,
        끝난 작업은 맨 아래로 내린다. */
@@ -11420,7 +11515,7 @@
       row.addEventListener('click', () => TaskUI.open(t, day));
       list.appendChild(row);
     });
-
+    appendBangRows(list, bangs);       // 방통 모드에서만 채워져 온다(공시체 모드는 빈 배열)
   }
 
   /* 그날의 방통시험 — 작업 아래 별도 구간(사용자 지시). 탭하면 방통 화면에서 수정 */
@@ -11438,6 +11533,7 @@
       body.appendChild(title);
       const r = Bangtong.statsOf(b);
       const meta = [];
+      if (r.kgm3 == null && r.slump == null) meta.push('값 미입력');   // 플래너가 만든 빈 기록 — 탭해서 채운다
       if (r.kgm3 != null) meta.push(r.kgm3 + 'kg/㎥');
       if (r.slump != null) meta.push('슬럼프 ' + r.slump + 'mm');
       if ((b.photos || []).length) meta.push('사진 ' + b.photos.length + '장');
@@ -11446,6 +11542,46 @@
       row.appendChild(body);
       row.addEventListener('click', () => Bangtong.openEdit(b));
       list.appendChild(row);
+    });
+  }
+
+  /* ---------------- 모드(공시체·방통·물성) ----------------
+     홈 상단 세그먼트. 모드는 U.mode() 하나로, 홈 목록·작업탭·계산기 계수·제목이 따라간다(사용자 지시 2026-09-17).
+     물성은 아직 빈 화면 — 작업 카드 대신 「준비 중」 카드, 계산·작업 탭도 같은 카드(CSS .propmode). */
+  function syncMode() {
+    const m = U.mode();
+    const seg = U.$('#home-mode');
+    if (seg) seg.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.m === m));
+    const prop = (m === 'prop');
+    const hp = U.$('#home-prop'); if (hp) hp.classList.toggle('hidden', !prop);
+    document.querySelectorAll('.todo-card').forEach((c) => c.classList.toggle('hidden', prop));
+    // 일정표 스캔은 공시체 전용(OCR 이 있을 때만 보이던 버튼)
+    const ocrOk = !!(global.OCR && OCR.available && OCR.available());
+    const ho = U.$('#home-ocr');
+    if (ho) ho.classList.toggle('hidden', m !== 'spec' || !ocrOk);
+    const to = U.$('#tasks-ocr');                       // 일정표 스캔은 공시체 작업을 만든다 — 공시체 모드에서만(감사 지적)
+    if (to) to.classList.toggle('hidden', m !== 'spec' || !ocrOk);
+    const co = U.$('#calc-ocr');                        // 성적판 값 읽기는 큐브에도 쓴다 — 물성만 CSS 가 막는다
+    if (co) co.classList.toggle('hidden', !ocrOk);
+    ['#view-calc', '#view-tasks'].forEach((id) => { const v = U.$(id); if (v) v.classList.toggle('propmode', prop); });
+    const cp = U.$('#calc-prop'); if (cp) cp.classList.toggle('hidden', !prop);
+    const tp = U.$('#tasks-prop'); if (tp) tp.classList.toggle('hidden', !prop);
+    const ct = U.$('#calc-title'); if (ct) ct.textContent = (m === 'bang') ? '큐브몰드 압축강도' : '공시체 압축강도';
+    const tt = U.$('#tasks-title'); if (tt) tt.textContent = (m === 'bang') ? '방통 · 작업' : '작업';
+    const add = U.$('#task-add');
+    if (add && add.lastChild && add.lastChild.nodeType === 3) add.lastChild.textContent = (m === 'bang') ? '추가' : '작업 추가';
+  }
+  function bindMode() {
+    const seg = U.$('#home-mode');
+    if (!seg) return;
+    seg.addEventListener('click', (e) => {
+      const b = e.target.closest('button');
+      if (!b || U.mode() === b.dataset.m) return;
+      U.setMode(b.dataset.m);
+      syncMode();
+      renderTasks();
+      if (global.Calc && Calc.onModeChange) Calc.onModeChange();
+      U.buzz(6);
     });
   }
 
@@ -11462,12 +11598,23 @@
       if (++eggN >= 5) { eggN = 0; if (global.Powder) Powder.open(); }
     });
     bindSettings();
+    bindMode();
     U.$('#day-prev').addEventListener('click', () => goDay(-1));
     U.$('#day-next').addEventListener('click', () => goDay(1));
     U.$('#day-label').addEventListener('click', () => goDay(0));   // 탭하면 오늘로
 
     U.$('#task-add').addEventListener('click', () => {
-      TaskUI.open(null, U.dayKey(base.getTime()));
+      const day = U.dayKey(base.getTime());
+      if (U.mode() === 'prop') return;
+      if (U.mode() === 'bang') {
+        // 방통 모드: 방통시험(밀도·슬럼프 화면) 또는 큐브몰드 작업(편집기 — 기본 분류가 큐브몰드)
+        U.sheet('추가', [
+          { label: '방통시험', sub: '몰탈 밀도 · 슬럼프', onPick: () => { if (global.Bangtong) Bangtong.open(); } },
+          { label: '큐브몰드 작업', sub: '방통 후 28일 압축강도 · 계수 1.00', onPick: () => TaskUI.open(null, day) }
+        ]);
+        return;
+      }
+      TaskUI.open(null, day);
     });
 
   }
@@ -11479,6 +11626,7 @@
     renderClock();
     renderStorage();
     syncSettings();
+    syncMode();
     renderTasks();
     renderWeather(false);
   }
@@ -11516,6 +11664,7 @@
   }
 
   global.Home = {
+    syncMode: syncMode,
     init: init, refresh: refresh, _nagBackup: maybeNagBackup,
     _shiftState: shiftState, _base: () => base, _goDay: goDay, _greeting: greeting
   };

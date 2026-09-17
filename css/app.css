@@ -224,12 +224,15 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
 .sp-horiz  {background:#dcfce7;color:#15803d}   /* 수평 3일  */
 .sp-filler {background:#fef3c7;color:#b45309}   /* 필러 10일 */
 .sp-d28    {background:#ede9fe;color:#6d28d9}   /* 28일 (수중·봉함 한 세트) */
+.sp-cube   {background:#fef3c7;color:#92400e}   /* 큐브몰드 (방통 모드, 28일·계수 1.00) */
 .sp-water  {background:#ede9fe;color:#6d28d9}   /* 수중 28일 — 구버전 */
 .sp-seal   {background:#ffe4e6;color:#be123c}   /* 봉함 28일 */
 :root[data-theme="dark"] .sp-vert{background:#16233d;color:#93c5fd}
 :root[data-theme="dark"] .sp-horiz{background:#12291b;color:#86efac}
 :root[data-theme="dark"] .sp-filler{background:#2a2110;color:#fcd34d}
 :root[data-theme="dark"] .sp-d28{background:#231a3a;color:#c4b5fd}
+:root[data-theme="dark"] .sp-cube{background:#3a2a12;color:#fcd34d}
+.factor-input.locked{background:var(--surface-2);color:var(--text-2)}
 :root[data-theme="dark"] .sp-water{background:#231a3a;color:#c4b5fd}
 :root[data-theme="dark"] .sp-seal{background:#2d1419;color:#fda4af}
 
@@ -343,19 +346,8 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
 .sp-cast{font-size:11px;font-weight:700;margin-top:2px;font-variant-numeric:tabular-nums;opacity:.9}
 .lbl-sub{font-weight:600;color:var(--text-2);opacity:.8}
 /* 방통시험 칩 — 분류 칩과 같은 줄, 같은 모양(사용자 지시: 사족 없이) */
-.spec-pill.sp-bang{color:var(--accent);justify-content:center}
-.spec-pill.sp-bang .sp-name{font-size:13px;white-space:nowrap;letter-spacing:-.04em}
 /* 방통 모드 — 공시체 전용 구획을 숨기고 이 화면에서 바로 방통을 입력한다(화면 이동 없음) */
 /* 메모(#tk-part-field)는 방통에도 있다(사용자 지시) — 숨기지 않는다 */
-#view-task.bangmode .two-col,
-#view-task.bangmode .age-hint,
-#view-task.bangmode #tk-due-when,
-#view-task.bangmode #tk-due-note,
-#view-task.bangmode #tk-subtabs,
-#view-task.bangmode #tk-sets-field,
-#view-task.bangmode .photomark-check{display:none}
-#tk-bang-fields .bang-pair{margin-top:10px}
-#tk-bang-fields .bang-card{margin-top:12px}
 .due-note{
   margin-top:7px;padding:7px 9px;border-radius:var(--r-sm);
   background:#fff7ed;color:#c2410c;font-size:12px;font-weight:700;line-height:1.4;
@@ -726,6 +718,19 @@ body.kb-edit .display{padding-bottom:2px}
 }
 .seg button::after{content:'';position:absolute;left:0;right:0;top:-6px;bottom:-6px}
 .seg button.on{background:var(--accent);color:var(--on-accent)}
+
+/* 모드 세그먼트(홈 상단) + 물성 준비 중 카드 — 2026-09-17. propmode 는 계산·작업 탭 본문을 통째로 숨긴다 */
+.mode-card{padding:8px}
+.mode-card .seg{width:100%}
+.mode-card .seg button{flex:1 1 0;min-height:38px;font-size:15px;font-weight:700}
+.prop-card{display:flex;flex-direction:column;align-items:center;gap:6px;padding:28px 16px;text-align:center;color:var(--text-2);font-size:15px}
+.prop-card b{color:var(--text);font-size:17px}
+#view-calc.propmode > :not(.topbar):not(.prop-card),
+#view-tasks.propmode > :not(.topbar):not(.prop-card){display:none !important}
+#view-calc.propmode .prop-card,#view-tasks.propmode .prop-card{margin:12px 14px}
+/* 헤더의 추가·OCR·⋯·전체선택 버튼도 막는다 — 안 그러면 「준비 중」 위로 공시체 편집기가 열린다(감사 지적) */
+#view-calc.propmode .topbar > :not(.topbar-mark):not(h1),
+#view-tasks.propmode .topbar > :not(.topbar-mark):not(h1){display:none !important}
 
 /* 스위치 — 체크박스를 숨기고 트랙+손잡이를 그린다 */
 .sw{flex:0 0 auto;position:relative;width:46px;height:28px}
@@ -1255,6 +1260,16 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
   background:var(--accent);color:var(--on-accent);font-size:13px;font-weight:800}
 .bang-si-del{flex:0 0 auto;width:32px;height:38px;color:var(--danger);font-size:20px;font-weight:700}
 /* 플래너 버퍼 — 항목별 분류 체크박스(기본 전부 켬) */
+/* 플래너 「올린 묶음」 — 한 줄 = 타설일·동·감리 + 구성원 상태 칩 + 묶음 삭제 */
+.plan-grp{position:relative;padding:10px 40px 10px 12px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface);margin-bottom:8px}
+.plan-grp-head{display:flex;flex-direction:column;gap:2px;margin-bottom:6px}
+.plan-grp-title{font-size:14px;font-weight:700}
+.plan-grp-sub{font-size:12px;color:var(--text-2)}
+.plan-grp-chips{display:flex;gap:6px;flex-wrap:wrap}
+.plan-chip{font-size:12px;font-weight:700;padding:6px 10px;min-height:32px;border-radius:var(--r-sm);border:1px solid var(--line);background:var(--surface-2);color:var(--text)}
+.plan-chip.done{background:var(--accent-soft);color:var(--accent);border-color:var(--accent)}
+.plan-chip.gone{opacity:.45;text-decoration:line-through}
+.plan-grp-del{position:absolute;right:6px;top:6px}
 .plan-cks{display:flex;gap:6px;margin-top:4px;flex-wrap:wrap}
 .plan-ck{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--text-2);
   padding:4px 8px;border:1px solid var(--line);border-radius:var(--r-sm);position:relative}

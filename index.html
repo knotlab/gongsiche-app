@@ -184,6 +184,14 @@
   </header>
 
   <div class="home-scroll">
+    <!-- 모드(공시체·방통·물성) — 세 탭이 이 선택을 따라간다(사용자 지시 2026-09-17). home.js bindMode/syncMode -->
+    <div class="card mode-card">
+      <span class="seg" id="home-mode" role="tablist">
+        <button data-m="spec" class="on">공시체</button>
+        <button data-m="bang">방통</button>
+        <button data-m="prop">물성</button>
+      </span>
+    </div>
     <!-- 날씨 · 안내 멘트 -->
     <button class="card hello-card" id="wx-card">
       <div class="wx-main">
@@ -224,6 +232,9 @@
       </div>
     </div>
 
+
+    <!-- 물성 모드 — 아직 빈 화면(사용자 지시: 준비 중) -->
+    <div class="card prop-card hidden" id="home-prop"><b>물성시험</b><span>준비 중입니다</span></div>
 
     <!-- 작업 -->
     <div class="card todo-card">
@@ -302,7 +313,7 @@
 <section class="view hidden" id="view-calc" data-view="calc">
   <header class="topbar topbar-hero">
     <span class="topbar-mark" aria-hidden="true"><svg class="ic"><use href="#ic-logo"/></svg></span>
-    <h1>공시체 압축강도</h1>
+    <h1 id="calc-title">공시체 압축강도</h1>
     <!-- 화이트보드 사진 → 강도값 입력 (OCR beta). 플러그인 없으면 숨긴다 -->
     <button class="icon-btn hidden" id="calc-ocr" aria-label="성적판 사진으로 값 입력">
       <svg class="ic" aria-hidden="true"><use href="#ic-scan"/></svg>
@@ -311,6 +322,8 @@
       <svg class="ic" aria-hidden="true"><use href="#ic-more"/></svg>
     </button>
   </header>
+
+  <div class="card prop-card hidden" id="calc-prop"><b>물성시험</b><span>준비 중입니다</span></div>
 
   <div class="link-bar hidden" id="calc-link">
     <div class="link-txt">
@@ -414,7 +427,7 @@
 <section class="view hidden" id="view-tasks" data-view="tasks">
   <header class="topbar topbar-hero">
     <span class="topbar-mark" aria-hidden="true"><svg class="ic"><use href="#ic-logo"/></svg></span>
-    <h1>작업</h1>
+    <h1 id="tasks-title">작업</h1>
     <button class="mini-btn" id="tasks-all">전체 선택</button>
     <!-- 일정표 사진 → 작업 자동 등록 (OCR beta). 플러그인 없으면 숨긴다 -->
     <button class="icon-btn hidden" id="tasks-ocr" aria-label="일정표 사진으로 작업 등록">
@@ -424,6 +437,8 @@
       <svg class="ic" aria-hidden="true"><use href="#ic-plus"/></svg>
     </button>
   </header>
+
+  <div class="card prop-card hidden" id="tasks-prop"><b>물성시험</b><span>준비 중입니다</span></div>
 
   <div class="day-nav tasks-nav">
     <button class="day-arrow" id="tasks-prev" aria-label="이전 날">
@@ -486,29 +501,6 @@
       <span class="field-label">공시체 분류 <span class="lbl-sub" id="tk-due-when"></span></span>
       <div class="spec-pick" id="tk-specs"></div>
       <div class="due-note hidden" id="tk-due-note"></div>
-    </div>
-
-    <!-- 방통시험 모드 — 분류에서 「방통시험」을 고르면 이 화면이 그대로 방통 입력이 된다(화면 이동 없음) -->
-    <div class="field hidden" id="tk-bang-fields">
-      <button class="bang-field" id="tkb-w">
-        <span class="field-label">몰탈 무게 (g)</span>
-        <span class="bang-val" id="tkbv-w">0.00</span>
-      </button>
-      <div class="bang-pair">
-        <button class="bang-field" id="tkb-s1">
-          <span class="field-label">슬럼프 ① (mm)</span>
-          <span class="bang-val" id="tkbv-s1">0</span>
-        </button>
-        <button class="bang-field" id="tkb-s2">
-          <span class="field-label">슬럼프 ② (mm)</span>
-          <span class="bang-val" id="tkbv-s2">0</span>
-        </button>
-        <button class="bang-field" id="tkb-fl">
-          <span class="field-label">층 (선택)</span>
-          <span class="bang-val" id="tkbv-fl">—</span>
-        </button>
-      </div>
-      <div class="card bang-card" id="tk-bang-result"></div>
     </div>
 
     <div class="two-col">
@@ -591,22 +583,6 @@
         </button>
       </div>
     </div>
-  </div>
-
-  <!-- 방통 모드 전용 숫자 키패드 (계산기와 같은 배열) -->
-  <div class="bang-keypad hidden" id="tk-bang-keypad">
-    <button class="key" data-tkk="7">7</button>
-    <button class="key" data-tkk="8">8</button>
-    <button class="key" data-tkk="9">9</button>
-    <button class="key" data-tkk="4">4</button>
-    <button class="key" data-tkk="5">5</button>
-    <button class="key" data-tkk="6">6</button>
-    <button class="key" data-tkk="1">1</button>
-    <button class="key" data-tkk="2">2</button>
-    <button class="key" data-tkk="3">3</button>
-    <button class="key key-dot" data-tkk="." aria-label="소수점">.</button>
-    <button class="key" data-tkk="0">0</button>
-    <button class="key key-back" data-tkk="del" aria-label="한 글자 지우기">⌫</button>
   </div>
 
   <div class="ed-actions">
@@ -712,7 +688,7 @@
     <button class="icon-btn" id="plan-back" aria-label="뒤로">
       <svg class="ic" aria-hidden="true"><use href="#ic-back"/></svg>
     </button>
-    <h1>플래너</h1>
+    <h1 id="plan-title">플래너</h1>
     <!-- 타설계획표 사진 → 대기 목록 (OCR). 플러그인 없으면 숨긴다 -->
     <button class="icon-btn hidden" id="plan-ocr" aria-label="타설계획표 사진으로 담기">
       <svg class="ic" aria-hidden="true"><use href="#ic-scan"/></svg>
@@ -727,6 +703,12 @@
       <span class="field-label">동수</span>
       <button class="pick-box" id="plan-dong"><span id="plan-dong-txt">동 선택</span></button>
     </div>
+    <!-- 방통 모드에서만 — 층(선택). 방통시험 레코드의 floor 로 들어간다 -->
+    <label class="field hidden" id="plan-floor-field">
+      <span class="field-label">층 <span class="lbl-sub">선택</span></span>
+      <input type="text" id="plan-floor" inputmode="numeric" maxlength="3"
+             autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+    </label>
     <div class="field">
       <span class="field-label">담당 감리</span>
       <button class="pick-box" id="plan-sup"><span id="plan-sup-txt">감리 선택</span></button>
@@ -744,6 +726,12 @@
       <span class="field-label">대기 목록 <b id="plan-buf-n">0</b>건
         <span class="lbl-sub">올리기를 누른 것만 등록됩니다</span></span>
       <div id="plan-buf"></div>
+    </div>
+
+    <!-- 올린 묶음 — 플래너로 올린 작업들을 한 줄씩(상태 칩·묶음 삭제). taskui.renderPlanGroups -->
+    <div class="field">
+      <span class="field-label">올린 묶음 <span class="lbl-sub">최근 90일 · 칩을 누르면 그 작업</span></span>
+      <div id="plan-groups"></div>
     </div>
   </div>
   <div class="ed-actions">
