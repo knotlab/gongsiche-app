@@ -491,11 +491,6 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
 .row-edit::after{content:'';position:absolute;inset:-6px}
 .row-edit .ic{width:var(--ic-sm);height:var(--ic-sm);transform:scaleX(-1)}
 .row-edit:active{opacity:1;background:var(--surface-2)}
-/* 작업탭 행의 강도값 복사 버튼(2026-09-18) — 편집 버튼과 같은 꼴 */
-.row-copy{position:relative;flex:0 0 auto;width:32px;height:32px;border-radius:var(--r-sm);display:grid;place-items:center;color:var(--text-2);opacity:.7}
-.row-copy::after{content:'';position:absolute;inset:-6px -4px}   /* 가로는 gap 10px 안에서만(row-edit 의 6px 과 합쳐 10) — 겹치면 옆 버튼이 탭을 훔친다 */
-.row-copy .ic{width:var(--ic-sm);height:var(--ic-sm)}
-.row-copy:active{opacity:1;background:var(--surface-2)}
 
 /* ---------- P1 : 통계 ---------- */
 /* 계산 화면은 아래에서부터 자리를 잡는다.

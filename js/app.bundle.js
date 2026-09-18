@@ -5957,15 +5957,6 @@
     body.appendChild(U.el('div', 'task-meta', meta.join(' · ')));
     row.appendChild(body);
 
-    // 강도값 복사(2026-09-18 사용자 지시: 원클릭) — 세트마다 한 줄 「24.50 24.60 24.70」
-    if (Task.filledSets(t).length) {
-      const cp = U.el('button', 'row-copy');
-      cp.appendChild(U.icon('copy'));
-      cp.setAttribute('aria-label', '강도값 복사');
-      cp.addEventListener('click', (e) => { e.stopPropagation(); copyValues(t); });
-      row.appendChild(cp);
-    }
-
     // 체크는 행 전체, 편집은 오른쪽 버튼
     const edit = U.el('button', 'row-edit');
     edit.appendChild(U.icon('back'));
@@ -6286,17 +6277,6 @@
     const rows = [];
     for (let i = 0; i < n; i++) rows.push(lists.map((a) => (a && a[i] != null) ? num2(a[i]) : '').join('\t\t'));
     return rows.join('\n');
-  }
-
-  /* 작업의 강도값 복사(작업탭 행 버튼) — 세트마다 열, 값은 아래로 */
-  function copyValues(t) {
-    const all = Task.allSets(t).filter((p) => ((p.set && p.set.values) || []).length);   // 28일은 수중 칸 → 봉함 칸 순
-    const lists = all.map((p) => p.set.values);
-    if (!lists.length) { U.toast('복사할 강도값이 없습니다'); return; }
-    // 28일이면 어느 열이 수중·봉함인지 토스트로 알린다(붙여넣는 값엔 글자를 섞지 않는다 — 감사 지적 반영)
-    const tags = Object.create(null); all.forEach((p) => { if (p.tag) tags[p.tag] = (tags[p.tag] || 0) + 1; });
-    const how = Object.keys(tags).length ? ' (' + Object.keys(tags).map((k) => k + ' ' + tags[k]).join(' · ') + ' 순)' : '';
-    U.copyText(valuesTsv(lists)).then((ok) => U.toast(ok ? ('강도값 ' + lists.length + '세트를 복사했습니다' + how + ' — 엑셀에 붙이면 세로로 들어갑니다') : '복사에 실패했습니다', 3200));
   }
 
   /* ZIP 동봉 강도값.html — 엑셀 없이도 값 확인·복사가 다 되는 **독립 페이지**(사용자 지시 2026-09-18).
