@@ -491,6 +491,11 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
 .row-edit::after{content:'';position:absolute;inset:-6px}
 .row-edit .ic{width:var(--ic-sm);height:var(--ic-sm);transform:scaleX(-1)}
 .row-edit:active{opacity:1;background:var(--surface-2)}
+/* 작업탭 행의 강도값 복사 버튼(2026-09-18) — 편집 버튼과 같은 꼴 */
+.row-copy{position:relative;flex:0 0 auto;width:32px;height:32px;border-radius:var(--r-sm);display:grid;place-items:center;color:var(--text-2);opacity:.7}
+.row-copy::after{content:'';position:absolute;inset:-6px -4px}   /* 가로는 gap 10px 안에서만(row-edit 의 6px 과 합쳐 10) — 겹치면 옆 버튼이 탭을 훔친다 */
+.row-copy .ic{width:var(--ic-sm);height:var(--ic-sm)}
+.row-copy:active{opacity:1;background:var(--surface-2)}
 
 /* ---------- P1 : 통계 ---------- */
 /* 계산 화면은 아래에서부터 자리를 잡는다.
@@ -805,7 +810,7 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
 .rec-body{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;justify-content:center;gap:3px}
 .rec-title{font-size:15px;font-weight:700;letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rec-title.untitled{color:var(--text-2);font-weight:600}
-.rec-meta{display:flex;align-items:center;gap:6px;min-width:0}
+.rec-meta{display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:wrap}   /* 좁은 폰에서 배지·감리가 넘치면 다음 줄로(복사 버튼이 폭을 먹는다 — 감사 지적) */
 .rec-date{font-size:12px;color:var(--text-2);font-variant-numeric:tabular-nums;flex:0 0 auto}
 .tag-chip{
   flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
@@ -844,7 +849,7 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
 /* 목록 행에서 동수 옆에 붙는 담당 감리 — 제목보다 한 단계 약하게 */
 .row-sup{
   margin-left:6px;font-size:12px;font-weight:600;color:var(--text-2);
-  white-space:nowrap;
+  white-space:nowrap;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;
 }
 
 /* ---------- 그룹 헤더(작업 탭 = 감리별) ----------
@@ -1007,6 +1012,11 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
 /* 보이는 크기는 38, 손가락이 닿는 면적은 44 (가로는 gap 6px 안에서만 넓힌다) */
 .set-open::after,.set-del::after{content:'';position:absolute;inset:-3px}
 .set-open{color:var(--accent)}
+/* 세트 값 복사 버튼(2026-09-18) — 계산기 버튼과 같은 크기, 값 없으면 흐리게 */
+.set-copy{position:relative;flex:0 0 auto;width:38px;height:38px;border-radius:var(--r-md);display:grid;place-items:center;background:var(--surface);color:var(--text-2)}
+.set-copy::after{content:'';position:absolute;inset:-3px}
+.set-copy .ic{width:var(--ic-md);height:var(--ic-md)}
+.set-copy:disabled{opacity:.35}
 .set-open .ic,.set-del .ic{width:var(--ic-md);height:var(--ic-md)}
 .set-open:active,.set-del:active{background:var(--line)}
 

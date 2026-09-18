@@ -2472,7 +2472,11 @@
     for (let r = 0; r < maxLen; r++) {
       let row = '<row r="' + (r + 2) + '">';
       cols.forEach((c, i) => {
-        if (c[r] != null) row += '<c r="' + colRef(i) + (r + 2) + '"><v>' + c[r] + '</v></c>';
+        const v = c[r];
+        if (v == null || v === '') return;
+        // 숫자는 값 셀, 글자(담당 감리·보정평균·복사용 한 줄)는 inlineStr — 2026-09-18
+        if (typeof v === 'number') row += '<c r="' + colRef(i) + (r + 2) + '"><v>' + v + '</v></c>';
+        else row += '<c r="' + colRef(i) + (r + 2) + '" t="inlineStr"><is><t>' + xmlEsc(String(v)) + '</t></is></c>';
       });
       rows += row + '</row>';
     }
@@ -3562,7 +3566,7 @@
 /* ============ contacts.js — 감리 연락처 ============
    자동 생성 파일. 직접 고치지 말고 contacts.csv 를 갱신한 뒤
    node tools/make-contacts.js 를 다시 돌릴 것.
-   생성: 2026-08-21 · 59명
+   생성: 2026-09-18 · 59명
 ================================================= */
 (function (global) {
   'use strict';
@@ -3930,11 +3934,11 @@
     },
     {
       "team": "4공구",
-      "dong": "213동(특화동)",
+      "dong": "213동",
       "name": "박기동",
       "rank": "상무",
       "phone": "010-5354-1027",
-      "raw": "HD 4공구 213동(특화동) 박기동 상무",
+      "raw": "HD 4공구 213동 박기동 상무",
       "jugu": "24"
     },
     {
@@ -4453,6 +4457,27 @@
     return (ds.length === 1) ? dongText(ds[0]) : '';
   }
 
+  /* 동의 **기본** 담당 감리(명부) — 작업에 적힌 감리와 무관하다(2026-09-18 사용자 지시: 엑셀엔 214동이 김채성 상무로
+     돼 있어도 명부의 담당 이상호 이사로). 표기 차이("215동(특화동)" vs "215동 특화동")는 동 키로 맞춘다. 명부에 없으면 작업의 감리 */
+  function defaultSup(t) {
+    const own = ((t && t.supervisor) || '').trim();
+    if (!global.Contacts) return own;
+    const raw = ((t && t.dong) || '').trim();
+    // 후보 표기: 원문 → 표시 표기(dongOf) → 다중동이면 첫 동(원문·표시) — 콤마가 남으면 명부 단일 동과 절대 안 맞는다(감사 지적)
+    const cands = [];
+    const push = (x) => { x = String(x || '').trim(); if (x && cands.indexOf(x) < 0) cands.push(x); };
+    push(raw); push(dongOf(t));
+    const first = raw.split(/[,，]/)[0];
+    push(first); push(dongText(first));
+    let cs = [];
+    for (let i = 0; i < cands.length && !cs.length; i++) cs = Contacts.byDong(cands[i]);
+    for (let i = 0; i < cands.length && !cs.length; i++) {
+      const key = dongKeyOf(cands[i]);
+      if (key) cs = Contacts.mine().filter((c) => Contacts.dongsOf(c).some((d) => dongKeyOf(d) === key));
+    }
+    return cs.length ? cs.map((c) => Contacts.label(c)).join(', ') : own;
+  }
+
   /* 봉함은 감리축으로 보내지 않는다(사용자 지시). 날짜축으로만 나간다.
      28일 작업이면 봉함 "칸"이 그 대상이고, 구버전이면 분류 자체가 봉함이다. */
   function supAxisOff(t, subKey) {
@@ -4589,7 +4614,7 @@
     autoReportDay: autoReportDay, reportDayOf: reportDayOf, exportLabel: exportLabel,
     wmText: wmText,
     supAxisOff: supAxisOff,
-    batchKey: batchKey, batchKeyBang: batchKeyBang, dongKeyOf: dongKeyOf,
+    batchKey: batchKey, batchKeyBang: batchKeyBang, dongKeyOf: dongKeyOf, defaultSup: defaultSup,
     exportGroup: exportGroup, groupForExport: groupForExport, groupByDay: groupByDay
   };
 })(window);
@@ -5932,6 +5957,15 @@
     body.appendChild(U.el('div', 'task-meta', meta.join(' · ')));
     row.appendChild(body);
 
+    // 강도값 복사(2026-09-18 사용자 지시: 원클릭) — 세트마다 한 줄 「24.50 24.60 24.70」
+    if (Task.filledSets(t).length) {
+      const cp = U.el('button', 'row-copy');
+      cp.appendChild(U.icon('copy'));
+      cp.setAttribute('aria-label', '강도값 복사');
+      cp.addEventListener('click', (e) => { e.stopPropagation(); copyValues(t); });
+      row.appendChild(cp);
+    }
+
     // 체크는 행 전체, 편집은 오른쪽 버튼
     const edit = U.el('button', 'row-edit');
     edit.appendChild(U.icon('back'));
@@ -6242,6 +6276,66 @@
      값은 위→아래. 같은 분류라도 열 제목으로 구분). 사용자 지시 양식.
      수중 칸의 폴더명은 카톡 문구와 같은 「28일강도」다(사용자 지시). */
   const ZIP_FOLDER = { vert: '수직', horiz: '수평', filler: '필러', water: '28일강도', seal: '봉함', cube: '큐브몰드' };
+
+  /* 복사 결과는 **엑셀 세로 모양 그대로**(사용자 지시 2026-09-18): 한 세트 = 값이 줄바꿈으로 아래로,
+     세트 여럿 = 탭으로 나뉜 열(세트 사이 빈 열 하나 — xlsx 와 같은 배치). 엑셀 셀 하나를 고르고 붙이면 그대로 들어간다 */
+  const num2 = (v) => U.fix2(typeof v === 'number' ? v : (v && v.v));
+  function valueColumn(vals) { return (vals || []).map(num2).join('\n'); }
+  function valuesTsv(lists) {
+    const n = lists.reduce((m, a) => Math.max(m, (a || []).length), 0);
+    const rows = [];
+    for (let i = 0; i < n; i++) rows.push(lists.map((a) => (a && a[i] != null) ? num2(a[i]) : '').join('\t\t'));
+    return rows.join('\n');
+  }
+
+  /* 작업의 강도값 복사(작업탭 행 버튼) — 세트마다 열, 값은 아래로 */
+  function copyValues(t) {
+    const all = Task.allSets(t).filter((p) => ((p.set && p.set.values) || []).length);   // 28일은 수중 칸 → 봉함 칸 순
+    const lists = all.map((p) => p.set.values);
+    if (!lists.length) { U.toast('복사할 강도값이 없습니다'); return; }
+    // 28일이면 어느 열이 수중·봉함인지 토스트로 알린다(붙여넣는 값엔 글자를 섞지 않는다 — 감사 지적 반영)
+    const tags = Object.create(null); all.forEach((p) => { if (p.tag) tags[p.tag] = (tags[p.tag] || 0) + 1; });
+    const how = Object.keys(tags).length ? ' (' + Object.keys(tags).map((k) => k + ' ' + tags[k]).join(' · ') + ' 순)' : '';
+    U.copyText(valuesTsv(lists)).then((ok) => U.toast(ok ? ('강도값 ' + lists.length + '세트를 복사했습니다' + how + ' — 엑셀에 붙이면 세로로 들어갑니다') : '복사에 실패했습니다', 3200));
+  }
+
+  /* ZIP 동봉 강도값.html — 엑셀 없이도 값 확인·복사가 다 되는 **독립 페이지**(사용자 지시 2026-09-18).
+     엑셀과 같은 모양: 세트마다 열(동(세트)·담당 감리·타설/시험일·값 아래로·보정평균) + 열마다 「복사」(세로 붙여넣기용),
+     위에 「전체 복사」(세트=열, 탭 구분 — xlsx 배치 그대로). xlsx 엔 매크로 없이 버튼을 못 넣어 「원클릭 복사」를 여기서 받는다.
+     외부 리소스 0, 글자는 전부 이스케이프. */
+  function valuesHtml(folder, cols) {
+    const esc = (x) => String(x == null ? '' : x).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+    const colHtml = cols.map((c) => {
+      const when = [c.cast ? '타설 ' + Spec.md(c.cast) : '', c.test ? '시험 ' + Spec.md(c.test) : ''].filter(Boolean).join(' · ');
+      return '<div class="col"><div class="d">' + esc(c.header) + '</div><div class="s">' + esc(c.sup || '감리 미지정') + '</div>' +
+        '<div class="t">' + esc(when) + '</div>' +
+        '<div class="vals">' + c.vals.map((v) => '<div class="v">' + esc(U.fix2(v)) + '</div>').join('') + '</div>' +
+        '<div class="c">' + (c.corr != null ? '보정평균 <b>' + esc(U.fix2(c.corr)) + '</b>' : '') + '</div>' +
+        '<button type="button" data-c="' + esc(valueColumn(c.vals)) + '">복사</button></div>';
+    }).join('');
+    const all = valuesTsv(cols.map((c) => c.vals));
+    return '<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+      '<title>' + esc(folder) + ' 강도값</title><style>' +
+      'body{font-family:system-ui,-apple-system,"Malgun Gothic",sans-serif;margin:16px;color:#111;background:#f6f7f9}' +
+      'h1{font-size:18px;margin:0 0 10px}.top{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 4px}' +
+      '.hint{margin:0 0 12px;font-size:13px;color:#555}' +
+      '.grid{display:flex;gap:12px;overflow-x:auto;padding-bottom:10px;align-items:flex-start}' +
+      '.col{flex:0 0 156px;border:1px solid #cfd4dc;border-radius:12px;padding:10px;background:#fff}' +
+      '.d{font-weight:700;font-size:15px;word-break:keep-all}.s{font-size:13px;color:#333;margin-top:2px}.t{font-size:12px;color:#666;margin:2px 0 8px}' +
+      '.vals{border-top:1px solid #e5e7eb;border-bottom:1px solid #e5e7eb;padding:6px 0;margin-bottom:6px}' +
+      '.v{font-size:17px;font-variant-numeric:tabular-nums;padding:3px 0}.c{font-size:13px;color:#333;margin-bottom:8px;min-height:18px}.c b{font-size:15px}' +
+      'button{min-height:40px;padding:0 14px;border:0;border-radius:10px;background:#2563eb;color:#fff;font-size:15px;font-weight:700;width:100%}' +
+      'button.ok{background:#16a34a}button.no{background:#dc2626}.top button{width:auto;background:#374151}' +
+      '</style></head><body><h1>' + esc(folder) + ' · 강도값</h1>' +
+      '<p class="top"><button type="button" data-c="' + esc(all) + '">전체 복사 — 엑셀 모양 그대로(세트는 열, 값은 아래로)</button></p>' +
+      '<p class="hint">복사한 뒤 엑셀에서 셀 하나를 고르고 붙여넣기 하면 값이 세로로 들어갑니다. 열마다 「복사」는 그 세트만.</p>' +
+      '<div class="grid">' + colHtml + '</div>' +
+      '<script>document.addEventListener("click",function(e){var b=e.target.closest("button[data-c]");if(!b)return;var t=b.getAttribute("data-c"),o=b.textContent;' +
+      'function done(ok){b.textContent=ok?"복사됨":"복사 실패";b.className=ok?"ok":"no";setTimeout(function(){b.textContent=o;b.className="";},1500);}' +
+      'function fb(){var ta=document.createElement("textarea");ta.value=t;ta.setAttribute("readonly","");ta.style.cssText="position:fixed;top:0;left:0;opacity:0";document.body.appendChild(ta);ta.select();ta.setSelectionRange(0,ta.value.length);var ok=false;try{ok=document.execCommand("copy");}catch(err){}document.body.removeChild(ta);done(ok);}' +
+      'if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(function(){done(true);},fb);}else{fb();}});</script></body></html>';
+  }
+
   const mmdd = (d) => (d ? String(d).slice(5).replace('-', '') : '0000');
   // 압축파일 이름 — 「8월 25일 강도시험분.zip」 꼴(사용자 지시)
   const zipTitle = () => (base.getMonth() + 1) + '월 ' + base.getDate() + '일 강도시험분.zip';
@@ -6316,28 +6410,34 @@
           if (hasVals) {
             // 강도값은 폴더당 엑셀 한 장 — **세트마다 열 하나**, 제목 = 동(세트 텍스트). 같은 작업의 세트는 붙여 두고
             // 작업 사이엔 빈 열 하나(사용자 지시: 구분)
-            const base = key.slice(pc.folder.length + 1);
+            // 열 제목은 읽는 글자 — 표시 동(「215동 특화동」) + 같은 폴더에 같은 동이 또 있으면 「(2)」. 사진 파일명(key, 밑줄)과는 별개
+            const suf = key.slice((pc.folder + '/' + nameBase).length);           // '' 또는 '_2'
+            const base = (Task.dongOf(t) || '동미지정') + (suf ? ' (' + suf.slice(1) + ')' : '');
             const list = (sheets[pc.folder] = sheets[pc.folder] || []);
             allSets.forEach((s) => {
               if (!(s.values || []).length) return;
-              list.push({ task: key, header: base + paren(labelOf(s)), vals: s.values.map((v) => v.v) });
+              const stt = Task.setStats(s);
+              list.push({ task: key, header: base + paren(labelOf(s)), sup: Task.defaultSup(t),
+                          cast: t.castDay || '', test: Task.testDayOf(t) || '',
+                          vals: s.values.map((v) => v.v), corr: stt.n ? stt.corr : null });
             });
           }
         }
       }
 
-      // 폴더별 강도값.xlsx — 열=세트(제목 동(세트명)), 행=값(위→아래). 작업 사이엔 빈 열 하나
+      // 폴더별 강도값.xlsx — 열=세트(1행 동(세트명) · 2행 기본 담당 감리(명부) · 값 위→아래 · 「보정평균 x」). 복사는 html 버튼·앱 버튼이 맡는다(세로 모양).
+      // **세트 사이마다 빈 열**(2026-09-18 사용자 지시: 강도값 간 횡으로 한 칸). 같은 폴더에 강도값.html(세트마다 복사 버튼)도 넣는다
       for (const folder of Object.keys(sheets)) {
         const cols = sheets[folder];
         const heads = [], colsArr = [];
-        let lastTask = null;
         cols.forEach((c) => {
-          if (lastTask !== null && c.task !== lastTask) { heads.push(''); colsArr.push([]); }
-          lastTask = c.task;
-          heads.push(c.header); colsArr.push(c.vals);
+          if (heads.length) { heads.push(''); colsArr.push([]); }
+          heads.push(c.header);
+          colsArr.push([c.sup || ''].concat(c.vals, [c.corr != null ? '보정평균 ' + U.fix2(c.corr) : '']));
         });
         const xlsx = Share.makeXlsx(heads, colsArr);
         entries.push({ name: folder + '/강도값.xlsx', data: new Uint8Array(await xlsx.arrayBuffer()) });
+        entries.push({ name: folder + '/강도값.html', data: new TextEncoder().encode(valuesHtml(folder, cols)) });
       }
 
       if (!entries.length) { U.toast('내보낼 사진·강도값이 없습니다'); return; }
@@ -7419,7 +7519,18 @@
       del.setAttribute('aria-label', Task.setName(set, i) + ' 삭제');
       del.addEventListener('click', () => removeSet(set, i));
 
+      // 값 복사(2026-09-18 사용자 지시: 원클릭, **엑셀 세로 모양**) — 값이 줄바꿈으로 이어져 엑셀에 붙이면 아래로 들어간다
+      const cp = U.el('button', 'set-copy');
+      cp.appendChild(U.icon('copy'));
+      cp.setAttribute('aria-label', Task.setName(set, i) + ' 값 복사');
+      cp.disabled = !st.n;
+      cp.addEventListener('click', () => {
+        const col = (set.values || []).map((v) => U.fix2(v.v)).join('\n');
+        U.copyText(col).then((ok) => U.toast(ok ? ('값 ' + st.n + '개를 복사했습니다 — 엑셀에 붙이면 세로로 들어갑니다') : '복사에 실패했습니다', 2800));
+      });
+
       row.appendChild(left);
+      row.appendChild(cp);
       row.appendChild(open);
       row.appendChild(del);
       wrap.appendChild(row);
