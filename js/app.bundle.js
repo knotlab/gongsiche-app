@@ -6297,8 +6297,7 @@
     return '<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
       '<title>' + esc(folder) + ' 강도값</title><style>' +
       'body{font-family:system-ui,-apple-system,"Malgun Gothic",sans-serif;margin:16px;color:#111;background:#f6f7f9}' +
-      'h1{font-size:18px;margin:0 0 10px}.top{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 4px}' +
-      '.hint{margin:0 0 12px;font-size:13px;color:#555}' +
+      'h1{font-size:18px;margin:0 0 10px}.top{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 12px}' +
       '.grid{display:flex;gap:12px;overflow-x:auto;padding-bottom:10px;align-items:flex-start}' +
       '.col{flex:0 0 156px;border:1px solid #cfd4dc;border-radius:12px;padding:10px;background:#fff}' +
       '.d{font-weight:700;font-size:15px;word-break:keep-all}.s{font-size:13px;color:#333;margin-top:2px}.t{font-size:12px;color:#666;margin:2px 0 8px}' +
@@ -6306,9 +6305,8 @@
       '.v{font-size:17px;font-variant-numeric:tabular-nums;padding:3px 0}.c{font-size:13px;color:#333;margin-bottom:8px;min-height:18px}.c b{font-size:15px}' +
       'button{min-height:40px;padding:0 14px;border:0;border-radius:10px;background:#2563eb;color:#fff;font-size:15px;font-weight:700;width:100%}' +
       'button.ok{background:#16a34a}button.no{background:#dc2626}.top button{width:auto;background:#374151}' +
-      '</style></head><body><h1>' + esc(folder) + ' · 강도값</h1>' +
-      '<p class="top"><button type="button" data-c="' + esc(all) + '">전체 복사 — 엑셀 모양 그대로(세트는 열, 값은 아래로)</button></p>' +
-      '<p class="hint">복사한 뒤 엑셀에서 셀 하나를 고르고 붙여넣기 하면 값이 세로로 들어갑니다. 열마다 「복사」는 그 세트만.</p>' +
+      '</style></head><body><h1>' + esc(folder) + '</h1>' +
+      '<p class="top"><button type="button" data-c="' + esc(all) + '">전체 복사</button></p>' +
       '<div class="grid">' + colHtml + '</div>' +
       '<script>document.addEventListener("click",function(e){var b=e.target.closest("button[data-c]");if(!b)return;var t=b.getAttribute("data-c"),o=b.textContent;' +
       'function done(ok){b.textContent=ok?"복사됨":"복사 실패";b.className=ok?"ok":"no";setTimeout(function(){b.textContent=o;b.className="";},1500);}' +
@@ -7506,7 +7504,7 @@
       cp.disabled = !st.n;
       cp.addEventListener('click', () => {
         const col = (set.values || []).map((v) => U.fix2(v.v)).join('\n');
-        U.copyText(col).then((ok) => U.toast(ok ? ('값 ' + st.n + '개를 복사했습니다 — 엑셀에 붙이면 세로로 들어갑니다') : '복사에 실패했습니다', 2800));
+        U.copyText(col).then((ok) => U.toast(ok ? '복사했습니다' : '복사에 실패했습니다'));
       });
 
       row.appendChild(left);
