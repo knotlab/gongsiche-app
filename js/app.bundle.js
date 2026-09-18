@@ -6271,6 +6271,19 @@
   /* 복사 결과는 **엑셀 세로 모양 그대로**(사용자 지시 2026-09-18): 한 세트 = 값이 줄바꿈으로 아래로,
      세트 여럿 = 탭으로 나뉜 열(세트 사이 빈 열 하나 — xlsx 와 같은 배치). 엑셀 셀 하나를 고르고 붙이면 그대로 들어간다 */
   const num2 = (v) => U.fix2(typeof v === 'number' ? v : (v && v.v));
+
+  /* 내보내기 감리 표기(사용자 지시 2026-09-18): 명부의 기본 담당 감리, 앱에 설정된 감리가 그와 다르면 소괄호에 — 「이상호 이사 (김채성 상무)」.
+     같은 사람인지는 이름(첫 낱말)으로 본다 — 직급이 붙고 안 붙고는 차이로 치지 않는다 */
+  function supText(t) {
+    // 명부에 없는 동·감리(직접 입력)도 그대로 — 명부에 동이 없으면 defaultSup 이 앱의 감리를 돌려주고, 그것도 없으면 「감리 미지정」
+    const def = Task.defaultSup(t), own = ((t && t.supervisor) || '').trim();
+    const nm = (x) => String(x || '').trim().split(/s+/)[0];
+    if (!own && !def) return '감리 미지정';
+    if (!own) return def;
+    if (!def) return own;
+    if (def.split(',').some((x) => nm(x) === nm(own))) return def;
+    return def + ' (' + own + ')';
+  }
   function valueColumn(vals) { return (vals || []).map(num2).join('\n'); }
   function valuesTsv(lists) {
     const n = lists.reduce((m, a) => Math.max(m, (a || []).length), 0);
@@ -6395,7 +6408,7 @@
             allSets.forEach((s) => {
               if (!(s.values || []).length) return;
               const stt = Task.setStats(s);
-              list.push({ task: key, header: base + paren(labelOf(s)), sup: Task.defaultSup(t),
+              list.push({ task: key, header: base + paren(labelOf(s)), sup: supText(t),
                           cast: t.castDay || '', test: Task.testDayOf(t) || '',
                           vals: s.values.map((v) => v.v), corr: stt.n ? stt.corr : null });
             });
