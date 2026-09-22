@@ -119,7 +119,8 @@
 
   /* ---- 바텀시트 (confirm 대용 포함) ----
      items: [{label, sub, cls, onPick}] — onPick 은 시트가 닫힌 뒤 호출 */
-  function sheet(title, items) {
+  /* onCancel: 취소 버튼·배경 탭으로 닫힐 때만(항목을 골라 닫힐 땐 안 부른다) — 공유 시트가 「취소」를 돌려주는 데 쓴다 */
+  function sheet(title, items, onCancel) {
     const back = $('#sheet-back'), box = $('#sheet');
     box.innerHTML = '';
     if (title) box.appendChild(el('div', 'sheet-title', title));
@@ -138,7 +139,7 @@
     box.appendChild(scroll);
 
     const cancel = el('button', 'sheet-item sheet-cancel', '취소');
-    cancel.addEventListener('click', close);
+    cancel.addEventListener('click', () => { close(); if (onCancel) onCancel(); });
     box.appendChild(cancel);
 
     // 고른 것이 있으면 그 자리부터 보여 준다
@@ -147,7 +148,7 @@
 
     back.classList.remove('hidden');
     back.addEventListener('click', onBack);
-    function onBack(e) { if (e.target === back) close(); }
+    function onBack(e) { if (e.target === back) { close(); if (onCancel) onCancel(); } }
     function close() {
       back.classList.add('hidden');
       back.removeEventListener('click', onBack);
@@ -2259,6 +2260,38 @@
     return { Share: C.Plugins.Share, Filesystem: C.Plugins.Filesystem, isNative: true };
   }
 
+  /* ---------- 아이폰(웹) 공유 함정 (2026-09-22) ----------
+     navigator.share 는 **사용자 탭 직후(활성화 중)** 에만 된다. 사진을 읽고 ZIP 을 만드는 몇 초 사이에 활성화가 끝나면
+     iOS 는 NotAllowedError 를 던지고, 예전 코드는 그걸 「취소 아님」으로 보고 다운로드 폴백으로 빠졌다 — 설치형(홈 화면) PWA 에선
+     a[download] 가 아무 일도 안 하는데 토스트는 「저장했다」고 했다(아이폰 실증상). 지금은 활성화가 없으면 시트로 탭을 한 번 더 받아
+     그 클릭 안에서 share 를 부르고, 아이폰 설치형에선 다운로드 폴백을 「실패」로 정직하게 돌려준다. */
+  const isIOS = () => /iP(hone|ad|od)/.test(navigator.userAgent) || navigator.standalone === true ||
+                      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isStandalone = () => navigator.standalone === true ||
+                             !!(window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+  function needGesture() {
+    if (cap()) return false;
+    const ua = navigator.userActivation;
+    return ua ? !ua.isActive : true;          // 활성화 API 가 없는 옛 사파리는 늘 시트로
+  }
+  // share 는 시트 버튼의 click 핸들러 안에서 **동기로** 불러야 한다(await 뒤면 활성화가 또 끝난다)
+  function withGesture(title, doShare) {
+    return new Promise((resolve) => {
+      let picked = false;
+      U.sheet(title, [{ label: '공유하기', cls: 'strong', onPick: () => { picked = true; resolve(doShare()); } }],
+        () => { if (!picked) resolve('cancel'); });
+    });
+  }
+  function shareNow(payload) {
+    try {
+      return navigator.share(payload).then(() => 'webshare',
+        (e) => { if (isCancel(e)) return 'cancel'; console.warn('[share] 실패', e); return 'fail'; });
+    } catch (e) { return Promise.resolve(isCancel(e) ? 'cancel' : 'fail'); }
+  }
+  async function webShare(payload, title) {
+    return needGesture() ? withGesture(title, () => shareNow(payload)) : shareNow(payload);
+  }
+
   function canWebShareFiles(files) {
     try {
       return !!(navigator.canShare && navigator.share && files.length && navigator.canShare({ files: files }));
@@ -2319,6 +2352,7 @@
   // 차단 확률을 낮추고, 여러 장이면 'download-multi' 를 돌려 호출부가 '성공'이 아니라
   // '차단될 수 있으니 확인하라'고 알리게 한다(반대심문 확인 — 조용한 성공 오보고 방지).
   async function downloadBlobs(blobs, baseName, text) {
+    if (isIOS() && isStandalone()) return 'fail';   // 홈 화면 PWA 의 a[download] 는 무반응 — 「저장했다」고 거짓말하지 않는다
     const multi = blobs.length + (text ? 1 : 0) > 1;
     for (let i = 0; i < blobs.length; i++) {
       clickDownload(blobs[i], baseName + '_' + (i + 1) + '.jpg');
@@ -2354,22 +2388,19 @@
     if (blobs.length) {
       const files = blobsToFiles(blobs, baseName);
       if (canWebShareFiles(files)) {
-        try {
-          const payload = { files: files, title: opt.title || '공시체 기록' };
-          if (text) payload.text = text;
-          await navigator.share(payload);
-          return 'webshare';
-        } catch (e) {
-          if (isCancel(e)) return 'cancel';
-          console.warn('[share] 파일 공유 실패 → 다운로드 폴백', e);
-        }
+        const payload = { files: files, title: opt.title || '공시체 기록' };
+        if (text) payload.text = text;
+        const how = await webShare(payload, opt.title || '사진 공유');
+        if (how !== 'fail') return how;
+        console.warn('[share] 파일 공유 실패 → 다운로드 폴백');
       }
       return downloadBlobs(blobs, baseName, text);
     }
 
     if (text && navigator.share) {
-      try { await navigator.share({ text: text, title: opt.title || '공시체 기록' }); return 'webshare-text'; }
-      catch (e) { if (isCancel(e)) return 'cancel'; }
+      const how = await webShare({ text: text, title: opt.title || '공시체 기록' }, opt.title || '공유');
+      if (how === 'webshare') return 'webshare-text';
+      if (how === 'cancel') return 'cancel';
     }
     if (text) {
       const ok = await U.copyText(text);
@@ -2569,13 +2600,14 @@
     let file = null;
     try { file = new File([blob], name, { type: blob.type || 'application/zip' }); } catch (e) {}
     if (file && canWebShareFiles([file])) {
-      try { await navigator.share({ files: [file], title: title || name }); return 'webshare'; }
-      catch (e) { if (isCancel(e)) return 'cancel'; }
+      const how = await webShare({ files: [file], title: title || name }, name);
+      if (how !== 'fail') return how;
     }
     return downloadOne(blob, name);
   }
 
   function downloadOne(blob, name) {
+    if (isIOS() && isStandalone()) return 'fail';   // 위와 같은 이유
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = name;
@@ -2593,8 +2625,8 @@
     let file = null;
     try { file = new File([blob], name, { type: blob.type || 'application/zip' }); } catch (e) {}
     if (file && canWebShareFiles([file])) {
-      try { await navigator.share({ files: [file], title: title || name }); return 'webshare'; }
-      catch (e) { if (isCancel(e)) return 'cancel'; }
+      const how = await webShare({ files: [file], title: title || name }, name);
+      if (how !== 'fail') return how;
     }
     return downloadOne(blob, name);
   }
@@ -2604,7 +2636,8 @@
     makeZip: makeZip, parseZip: parseZip, makeXlsx: makeXlsx,
     exportFile: exportFile, shareFile: shareFile,
     isNative: () => !!cap(),
-    hasWebShare: () => !!(navigator.share)
+    hasWebShare: () => !!(navigator.share),
+    _needGesture: needGesture, _isIOS: isIOS, _isStandalone: isStandalone
   };
 })(window);
 
@@ -6292,39 +6325,140 @@
     return rows.join('\n');
   }
 
-  /* ZIP 동봉 강도값.html — 엑셀 없이도 값 확인·복사가 다 되는 **독립 페이지**(사용자 지시 2026-09-18).
-     엑셀과 같은 모양: 세트마다 열(동(세트)·담당 감리·타설/시험일·값 아래로·보정평균) + 열마다 「복사」(세로 붙여넣기용),
-     위에 「전체 복사」(세트=열, 탭 구분 — xlsx 배치 그대로). xlsx 엔 매크로 없이 버튼을 못 넣어 「원클릭 복사」를 여기서 받는다.
-     외부 리소스 0, 글자는 전부 이스케이프. */
-  function valuesHtml(folder, cols) {
+  function blobToDataUrl(blob) {
+    return new Promise((resolve) => {
+      if (!blob) { resolve(''); return; }
+      try {
+        const fr = new FileReader();
+        fr.onload = () => resolve(String(fr.result || ''));
+        fr.onerror = () => resolve('');
+        fr.readAsDataURL(blob);
+      } catch (e) { resolve(''); }
+    });
+  }
+
+  /* ZIP 동봉 강도값.html — 엑셀 없이도 값 확인·복사·사진 보기가 다 되는 **독립 페이지**(사용자 지시 2026-09-18/22).
+     작업(동) 카드마다: 동·담당 감리·타설/시험일 → 세트 열(값 세로·보정평균·「복사」·그 세트의 사진 이름) → 회차별 사진 썸네일.
+     썸네일은 data URI 로 심어 압축을 풀지 않아도 보이고, 크게 보기는 같은 폴더의 원본 파일(없으면 썸네일)로.
+     마우스(PC)는 올리면 크게 미리보기, 탭(폰)은 라이트박스(좌우 넘기기·Esc·스와이프). 위에 검색·전체 복사·보정평균 복사·표 보기·인쇄.
+     외부 리소스 0, 글자는 전부 이스케이프. xlsx 엔 매크로 없이 버튼을 못 넣어 「원클릭 복사」를 여기서 받는다. */
+  function valuesHtml(folder, cards) {
     const esc = (x) => String(x == null ? '' : x).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
-    const colHtml = cols.map((c) => {
+    const num = (v) => U.fix2(v);
+    let seq = 0;
+    const allSets = [];
+    cards.forEach((c) => c.sets.forEach((st) => allSets.push(st)));
+    const cardsHtml = cards.map((c) => {
       const when = [c.cast ? '타설 ' + Spec.md(c.cast) : '', c.test ? '시험 ' + Spec.md(c.test) : ''].filter(Boolean).join(' · ');
-      return '<div class="col"><div class="d">' + esc(c.header) + '</div><div class="s">' + esc(c.sup || '감리 미지정') + '</div>' +
-        '<div class="t">' + esc(when) + '</div>' +
-        '<div class="vals">' + c.vals.map((v) => '<div class="v">' + esc(U.fix2(v)) + '</div>').join('') + '</div>' +
-        '<div class="c">' + (c.corr != null ? '보정평균 <b>' + esc(U.fix2(c.corr)) + '</b>' : '') + '</div>' +
-        '<button type="button" data-c="' + esc(valueColumn(c.vals)) + '">복사</button></div>';
+      const pairOf = (i) => c.pairs.find((pr) => pr.idx === i);
+      const setsHtml = c.sets.map((st) => {
+        const pr = pairOf(st.pairIdx);
+        const names = pr ? pr.photos.map((ph) => ph.name) : [];
+        return '<div class="set">' +
+          '<div class="sname"><span>' + esc(st.name || '세트') + '</span><small>' + st.n + '개</small></div>' +
+          '<div class="vals">' + st.vals.map((v) => '<div class="v">' + esc(num(v)) + '</div>').join('') + '</div>' +
+          '<div class="c"><span>보정평균</span><b>' + esc(num(st.corr)) + '</b><small>평균 ' + esc(num(st.avg)) + ' × ' + esc(String(st.factor)) + '</small></div>' +
+          '<button type="button" class="cp" data-c="' + esc(valueColumn(st.vals)) + '">복사</button>' +
+          (names.length ? '<div class="pn">' + names.map((n) => '<a href="#" data-photo="' + esc(n) + '">' + esc(n) + '</a>').join('') + '</div>' : '') +
+          '</div>';
+      }).join('');
+      const pairsHtml = c.pairs.filter((pr) => pr.photos.length).map((pr) => {
+        const lab = (pr.idx + 1) + '회차' + (pr.label ? ' · ' + pr.label : '');
+        return '<div class="pair"><div class="plab">' + esc(lab) + '</div><div class="thumbs">' +
+          pr.photos.map((ph) => {
+            const i = seq++;
+            return '<figure class="ph" data-i="' + i + '" data-name="' + esc(ph.name) + '" data-full="' + esc(encodeURI(ph.name)) + '">' +
+              (ph.thumb ? '<img src="' + ph.thumb + '" alt="' + esc(ph.name) + '" loading="lazy">' : '<span class="noimg">미리보기 없음</span>') +
+              '<figcaption>' + esc(ph.name) + '</figcaption></figure>';
+          }).join('') + '</div></div>';
+      }).join('');
+      const q = (c.dong + ' ' + c.sup + ' ' + c.sets.map((st) => st.name).join(' ')).toLowerCase();
+      return '<section class="card" data-q="' + esc(q) + '">' +
+        '<div class="chead"><div class="dong">' + esc(c.dong) + '</div><div class="sup">' + esc(c.sup) + '</div><div class="when">' + esc(when) + '</div>' +
+        (c.sets.length > 1 ? '<button type="button" class="cp mini" data-c="' + esc(valuesTsv(c.sets.map((st) => st.vals))) + '">이 동 전체 복사</button>' : '') +
+        '</div>' +
+        (setsHtml ? '<div class="sets">' + setsHtml + '</div>' : '<p class="none">강도값 없음</p>') +
+        (pairsHtml ? '<div class="photos">' + pairsHtml + '</div>' : '') +
+        '</section>';
     }).join('');
-    const all = valuesTsv(cols.map((c) => c.vals));
+    const nPhotos = seq;
+    let tbl = '';
+    if (allSets.length) {
+      const maxN = allSets.reduce((m, st) => Math.max(m, st.vals.length), 0);
+      tbl = '<div class="tblwrap"><table class="tbl"><thead><tr><th class="rl">동</th>' + allSets.map((st) => '<th>' + esc(st.header) + '</th>').join('') + '</tr>' +
+        '<tr class="sub"><th class="rl">담당</th>' + allSets.map((st) => '<th>' + esc(st.sup || '') + '</th>').join('') + '</tr></thead><tbody>';
+      for (let r = 0; r < maxN; r++) tbl += '<tr><td class="rl">' + (r + 1) + '</td>' + allSets.map((st) => '<td>' + (st.vals[r] != null ? esc(num(st.vals[r])) : '') + '</td>').join('') + '</tr>';
+      tbl += '<tr class="corr"><td class="rl">보정평균</td>' + allSets.map((st) => '<td>' + esc(num(st.corr)) + '</td>').join('') + '</tr></tbody></table></div>';
+    }
+    const tools = allSets.length
+      ? '<button type="button" data-c="' + esc(valuesTsv(allSets.map((st) => st.vals))) + '">전체 복사</button>' +
+        '<button type="button" class="gray" data-c="' + esc(allSets.map((st) => num(st.corr)).join('\t\t')) + '">보정평균 복사</button>' +
+        '<button type="button" class="gray" id="tv">표 보기</button>'
+      : '';
+    const css = '*{box-sizing:border-box}[hidden]{display:none!important}' +
+      'body{font-family:system-ui,-apple-system,"Malgun Gothic",sans-serif;margin:0;color:#111;background:#f3f4f6}body.noscroll{overflow:hidden}' +
+      '.top{position:sticky;top:0;z-index:20;background:#fff;border-bottom:1px solid #e5e7eb;padding:10px 14px;display:flex;flex-wrap:wrap;gap:8px;align-items:center}' +
+      '.top h1{font-size:18px;margin:0 12px 0 0}.top .meta{font-size:13px;color:#555;margin-right:auto}' +
+      '.tools{display:flex;flex-wrap:wrap;gap:6px;align-items:center}.tools input{min-height:40px;padding:0 10px;border:1px solid #cfd4dc;border-radius:10px;font-size:15px;width:150px}' +
+      'button{min-height:40px;padding:0 14px;border:0;border-radius:10px;background:#2563eb;color:#fff;font-size:15px;font-weight:700;cursor:pointer;-webkit-tap-highlight-color:transparent}' +
+      'button.gray{background:#374151}button.ok{background:#16a34a}button.no{background:#dc2626}button.mini{min-height:32px;padding:0 10px;font-size:13px}' +
+      '.cards{padding:12px;display:flex;flex-direction:column;gap:12px;max-width:1400px;margin:0 auto}' +
+      '.card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:12px}' +
+      '.chead{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:baseline;margin-bottom:10px}.dong{font-size:20px;font-weight:800}.sup{font-size:15px;color:#333}.when{font-size:13px;color:#666}.chead .mini{margin-left:auto}' +
+      '.sets{display:flex;gap:10px;overflow-x:auto;padding-bottom:6px;align-items:flex-start}' +
+      '.set{flex:0 0 150px;border:1px solid #e5e7eb;border-radius:12px;padding:10px;background:#fafafa}' +
+      '.sname{font-weight:700;font-size:15px;display:flex;justify-content:space-between;align-items:baseline;gap:6px}.sname span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sname small{font-weight:400;color:#666;font-size:12px;flex:0 0 auto}' +
+      '.vals{border-top:1px solid #e5e7eb;border-bottom:1px solid #e5e7eb;padding:6px 0;margin:6px 0}.v{font-size:17px;font-variant-numeric:tabular-nums;padding:3px 0}' +
+      '.c{display:flex;flex-direction:column;font-size:13px;color:#333;margin-bottom:8px}.c b{font-size:16px}.c small{color:#777;font-size:12px}.set .cp{width:100%}' +
+      '.pn{margin-top:8px;font-size:11px;display:flex;flex-direction:column;gap:2px}.pn a{color:#2563eb;text-decoration:none;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.none{color:#888;font-size:14px;margin:0 0 8px}' +
+      '.photos{margin-top:10px;display:flex;flex-direction:column;gap:8px}.pair{display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap}' +
+      '.plab{flex:0 0 auto;font-size:13px;font-weight:700;background:#eef2ff;color:#3730a3;padding:6px 10px;border-radius:999px}.thumbs{display:flex;gap:8px;flex-wrap:wrap}' +
+      '.ph{margin:0;width:104px;cursor:zoom-in}.ph img,.ph .noimg{width:104px;height:104px;object-fit:cover;border-radius:10px;border:1px solid #e5e7eb;background:#eee;display:block}' +
+      '.ph .noimg{display:grid;place-items:center;font-size:11px;color:#888}.ph figcaption{font-size:11px;color:#555;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+      '#peek{position:fixed;z-index:40;pointer-events:none;background:#fff;padding:6px;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.35)}#peek img{display:block;max-width:60vw;max-height:60vh;border-radius:8px}' +
+      '#box{position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.9);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:16px}' +
+      '#box img{max-width:94vw;max-height:78vh;border-radius:8px;background:#222}#box .cap{color:#fff;font-size:14px;text-align:center;word-break:break-all}' +
+      '#box .x{position:absolute;top:12px;right:12px;width:44px;height:44px;border-radius:50%;background:rgba(255,255,255,.18);font-size:22px;padding:0}' +
+      '#box .nav{position:absolute;top:50%;transform:translateY(-50%);width:48px;height:64px;border-radius:12px;background:rgba(255,255,255,.18);font-size:28px;padding:0}#box .prev{left:8px}#box .next{right:8px}' +
+      '.tblwrap{display:none;padding:12px;overflow-x:auto}.tbl{border-collapse:collapse;font-size:15px;background:#fff}' +
+      '.tbl th,.tbl td{border:1px solid #d1d5db;padding:6px 10px;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.tbl th{background:#f1f3f6;text-align:center}' +
+      '.tbl .sub th{font-weight:400;font-size:13px;color:#444}.tbl .rl{text-align:center;color:#666;background:#f9fafb}.tbl .corr td{font-weight:700;background:#fefce8}' +
+      'body.table .cards{display:none}body.table .tblwrap{display:block}' +
+      '@media (max-width:600px){.set{flex-basis:132px}.ph,.ph img,.ph .noimg{width:88px}.ph img,.ph .noimg{height:88px}.tools input{width:110px;min-height:36px}.top button{min-height:36px;padding:0 10px;font-size:14px}.top h1{font-size:17px}}' +
+      '@media print{.top,.cp,#peek,#box,.pn{display:none!important}.card{break-inside:avoid;border:1px solid #bbb}.sets{overflow:visible;flex-wrap:wrap}.cards{padding:0;gap:8px}body{background:#fff}}';
+    const js = '(function(){' +
+      'var QA=function(s,r){return Array.prototype.slice.call((r||document).querySelectorAll(s));};' +
+      'function flash(b,ok){var o=b.getAttribute("data-o")||b.textContent;b.setAttribute("data-o",o);b.textContent=ok?"복사됨":"복사 실패";b.classList.remove("ok","no");b.classList.add(ok?"ok":"no");setTimeout(function(){b.textContent=o;b.classList.remove("ok","no");},1500);}' +
+      'function fb(t,b){var ta=document.createElement("textarea");ta.value=t;ta.setAttribute("readonly","");ta.style.cssText="position:fixed;top:0;left:0;opacity:0";document.body.appendChild(ta);ta.select();ta.setSelectionRange(0,ta.value.length);var ok=false;try{ok=document.execCommand("copy");}catch(e){}document.body.removeChild(ta);flash(b,ok);}' +
+      'function copy(t,b){if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(function(){flash(b,true);},function(){fb(t,b);});}else{fb(t,b);}}' +
+      'var phs=QA(".ph"),cur=-1,box=document.getElementById("box"),bimg=box.querySelector("img"),bcap=box.querySelector(".cap"),peek=document.getElementById("peek"),pimg=peek.querySelector("img");' +
+      'function setImg(img,f){var th=f.querySelector("img"),full=f.getAttribute("data-full");img.onerror=function(){img.onerror=null;img.src=th?th.getAttribute("src"):"";};img.src=full||(th?th.getAttribute("src"):"");}' +
+      'function openBox(i){if(!phs.length)return;i=(i+phs.length)%phs.length;cur=i;var f=phs[i];setImg(bimg,f);bcap.textContent=f.getAttribute("data-name")+"  ("+(i+1)+"/"+phs.length+")";box.hidden=false;peek.hidden=true;document.body.classList.add("noscroll");}' +
+      'function closeBox(){box.hidden=true;document.body.classList.remove("noscroll");}' +
+      'document.addEventListener("click",function(e){' +
+        'var b=e.target.closest("button[data-c]");if(b){copy(b.getAttribute("data-c"),b);return;}' +
+        'var a=e.target.closest("a[data-photo]");if(a){e.preventDefault();var n=a.getAttribute("data-photo");for(var i=0;i<phs.length;i++){if(phs[i].getAttribute("data-name")===n){openBox(i);return;}}return;}' +
+        'var f=e.target.closest(".ph");if(f){openBox(+f.getAttribute("data-i"));return;}' +
+        'if(e.target.closest("#box .x")){closeBox();return;}if(e.target.closest("#box .prev")){openBox(cur-1);return;}if(e.target.closest("#box .next")){openBox(cur+1);return;}if(e.target===box){closeBox();return;}' +
+        'if(e.target.closest("#tv")){var on=document.body.classList.toggle("table");document.getElementById("tv").textContent=on?"카드 보기":"표 보기";return;}' +
+        'if(e.target.closest("#pr")){window.print();return;}' +
+      '});' +
+      'document.addEventListener("keydown",function(e){if(box.hidden)return;if(e.key==="Escape")closeBox();else if(e.key==="ArrowLeft")openBox(cur-1);else if(e.key==="ArrowRight")openBox(cur+1);});' +
+      'var sx=null;box.addEventListener("touchstart",function(e){sx=e.touches[0].clientX;},{passive:true});box.addEventListener("touchend",function(e){if(sx==null)return;var dx=e.changedTouches[0].clientX-sx;sx=null;if(Math.abs(dx)>50)openBox(dx<0?cur+1:cur-1);},{passive:true});' +
+      'var lx=0,ly=0;pimg.onload=function(){placeAt(lx,ly);};function place(e){lx=e.clientX;ly=e.clientY;placeAt(lx,ly);}function placeAt(cx,cy){var w=peek.offsetWidth,h=peek.offsetHeight,x=cx+18,y=cy+18;if(x+w>window.innerWidth-8)x=Math.max(8,cx-w-18);if(y+h>window.innerHeight-8)y=Math.max(8,window.innerHeight-h-8);peek.style.left=x+"px";peek.style.top=y+"px";}' +
+      'var fine=window.matchMedia&&window.matchMedia("(hover:hover) and (pointer:fine)").matches;' +
+      'if(fine){phs.forEach(function(f){f.addEventListener("mouseenter",function(e){setImg(pimg,f);peek.hidden=false;place(e);});f.addEventListener("mousemove",place);f.addEventListener("mouseleave",function(){peek.hidden=true;});});}' +
+      'var q=document.getElementById("q");if(q)q.addEventListener("input",function(){var s=q.value.trim().toLowerCase();QA(".card").forEach(function(c){c.hidden=!!s&&c.getAttribute("data-q").indexOf(s)<0;});});' +
+      '})();';
     return '<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
-      '<title>' + esc(folder) + ' 강도값</title><style>' +
-      'body{font-family:system-ui,-apple-system,"Malgun Gothic",sans-serif;margin:16px;color:#111;background:#f6f7f9}' +
-      'h1{font-size:18px;margin:0 0 10px}.top{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 12px}' +
-      '.grid{display:flex;gap:12px;overflow-x:auto;padding-bottom:10px;align-items:flex-start}' +
-      '.col{flex:0 0 156px;border:1px solid #cfd4dc;border-radius:12px;padding:10px;background:#fff}' +
-      '.d{font-weight:700;font-size:15px;word-break:keep-all}.s{font-size:13px;color:#333;margin-top:2px}.t{font-size:12px;color:#666;margin:2px 0 8px}' +
-      '.vals{border-top:1px solid #e5e7eb;border-bottom:1px solid #e5e7eb;padding:6px 0;margin-bottom:6px}' +
-      '.v{font-size:17px;font-variant-numeric:tabular-nums;padding:3px 0}.c{font-size:13px;color:#333;margin-bottom:8px;min-height:18px}.c b{font-size:15px}' +
-      'button{min-height:40px;padding:0 14px;border:0;border-radius:10px;background:#2563eb;color:#fff;font-size:15px;font-weight:700;width:100%}' +
-      'button.ok{background:#16a34a}button.no{background:#dc2626}.top button{width:auto;background:#374151}' +
-      '</style></head><body><h1>' + esc(folder) + '</h1>' +
-      '<p class="top"><button type="button" data-c="' + esc(all) + '">전체 복사</button></p>' +
-      '<div class="grid">' + colHtml + '</div>' +
-      '<script>document.addEventListener("click",function(e){var b=e.target.closest("button[data-c]");if(!b)return;var t=b.getAttribute("data-c"),o=b.textContent;' +
-      'function done(ok){b.textContent=ok?"복사됨":"복사 실패";b.className=ok?"ok":"no";setTimeout(function(){b.textContent=o;b.className="";},1500);}' +
-      'function fb(){var ta=document.createElement("textarea");ta.value=t;ta.setAttribute("readonly","");ta.style.cssText="position:fixed;top:0;left:0;opacity:0";document.body.appendChild(ta);ta.select();ta.setSelectionRange(0,ta.value.length);var ok=false;try{ok=document.execCommand("copy");}catch(err){}document.body.removeChild(ta);done(ok);}' +
-      'if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(function(){done(true);},fb);}else{fb();}});</script></body></html>';
+      '<title>' + esc(folder) + ' 강도값</title><style>' + css + '</style></head><body>' +
+      '<header class="top"><h1>' + esc(folder) + '</h1><span class="meta">작업 ' + cards.length + ' · 세트 ' + allSets.length + ' · 사진 ' + nPhotos + '</span>' +
+      '<div class="tools">' + (cards.length > 1 ? '<input id="q" type="search" placeholder="동·감리 검색" autocomplete="off">' : '') + tools +
+      '<button type="button" class="gray" id="pr">인쇄</button></div></header>' +
+      '<div class="cards">' + cardsHtml + '</div>' + tbl +
+      '<div id="peek" hidden><img alt=""></div>' +
+      '<div id="box" hidden><button type="button" class="x" aria-label="닫기">×</button><button type="button" class="nav prev" aria-label="이전">‹</button><img alt=""><div class="cap"></div><button type="button" class="nav next" aria-label="다음">›</button></div>' +
+      '<script>' + js + '</script></body></html>';
   }
 
   const mmdd = (d) => (d ? String(d).slice(5).replace('-', '') : '0000');
@@ -6348,6 +6482,7 @@
       return name.replace(/(\.[a-z0-9]+)$/i, ' (' + k + ')$1');
     };
     const sheets = Object.create(null);        // 폴더 → [{ header, vals }] (엑셀 열들)
+    const pages = Object.create(null);         // 폴더 → [카드] (강도값.html — 세트 열 + 회차별 사진)
 
     try {
       for (const t of rows) {
@@ -6380,6 +6515,11 @@
           const idxOf = (s) => { let i = allSets.findIndex((x) => x.id && x.id === s.id); if (i < 0) i = allSets.indexOf(s); return i; };
           const labelOf = (s) => String(s.name || '').trim() || (allSets.length > 1 && idxOf(s) >= 0 ? '세트 ' + (idxOf(s) + 1) : '');
           const pairLab = (pr) => pr.sets.map(labelOf).filter(Boolean).join(', ');
+          // 열 제목·html 카드 제목 — 표시 동(「215동 특화동」) + 같은 폴더에 같은 동이 또 있으면 「(2)」. 사진 파일명(key, 밑줄)과는 별개
+          const suf = key.slice((pc.folder + '/' + nameBase).length);           // '' 또는 '_2'
+          const base = (Task.dongOf(t) || '동미지정') + (suf ? ' (' + suf.slice(1) + ')' : '');
+          // 강도값.html 카드 — 세트 열 + 회차별 사진(썸네일은 data URI 로 심어 압축을 안 풀어도 보인다, 크게 보기는 같은 폴더의 원본)
+          const card = { dong: base, sup: supText(t), cast: t.castDay || '', test: Task.testDayOf(t) || '', sets: [], pairs: [] };
 
           if (ids.length) {
             let photos = [];
@@ -6390,29 +6530,36 @@
             const cnt = Object.create(null);
             for (const pr of pairs) {
               const lab = paren(pairLab(pr));
+              const pcard = { idx: pr.idx, label: pairLab(pr), photos: [] };
               for (const id of pr.photos) {
-                const b = byId[id] ? await Store.fullBlob(byId[id]) : null;
+                const p = byId[id];
+                const b = p ? await Store.fullBlob(p) : null;
                 if (!b) continue;
                 const n = (cnt[lab] = (cnt[lab] || 0) + 1);
-                entries.push({ name: uniqEntry(key + lab + '_' + n + '.jpg'), data: new Uint8Array(await b.arrayBuffer()) });
+                const name = uniqEntry(key + lab + '_' + n + '.jpg');
+                entries.push({ name: name, data: new Uint8Array(await b.arrayBuffer()) });
+                const th = (p.thumb instanceof Blob) ? p.thumb : (p.thumb ? new Blob([p.thumb], { type: 'image/jpeg' }) : null);
+                pcard.photos.push({ name: name.slice(pc.folder.length + 1), thumb: await blobToDataUrl(th) });
               }
+              card.pairs.push(pcard);
             }
           }
           if (hasVals) {
-            // 강도값은 폴더당 엑셀 한 장 — **세트마다 열 하나**, 제목 = 동(세트 텍스트). 같은 작업의 세트는 붙여 두고
-            // 작업 사이엔 빈 열 하나(사용자 지시: 구분)
-            // 열 제목은 읽는 글자 — 표시 동(「215동 특화동」) + 같은 폴더에 같은 동이 또 있으면 「(2)」. 사진 파일명(key, 밑줄)과는 별개
-            const suf = key.slice((pc.folder + '/' + nameBase).length);           // '' 또는 '_2'
-            const base = (Task.dongOf(t) || '동미지정') + (suf ? ' (' + suf.slice(1) + ')' : '');
+            // 강도값은 폴더당 엑셀 한 장 — **세트마다 열 하나**, 제목 = 동(세트 텍스트)
             const list = (sheets[pc.folder] = sheets[pc.folder] || []);
             allSets.forEach((s) => {
               if (!(s.values || []).length) return;
               const stt = Task.setStats(s);
-              list.push({ task: key, header: base + paren(labelOf(s)), sup: supText(t),
-                          cast: t.castDay || '', test: Task.testDayOf(t) || '',
-                          vals: s.values.map((v) => v.v), corr: stt.n ? stt.corr : null });
+              const col = { task: key, header: base + paren(labelOf(s)), name: labelOf(s), sup: supText(t),
+                            cast: t.castDay || '', test: Task.testDayOf(t) || '',
+                            vals: s.values.map((v) => v.v), n: stt.n || 0, factor: stt.factor,
+                            avg: stt.n ? stt.avg : null, corr: stt.n ? stt.corr : null,
+                            pairIdx: pairs.findIndex((pr) => pr.sets.some((x) => x.id === s.id)) };
+              list.push(col);
+              card.sets.push(col);
             });
           }
+          if (card.sets.length || card.pairs.some((pr) => pr.photos.length)) (pages[pc.folder] = pages[pc.folder] || []).push(card);
         }
       }
 
@@ -6428,7 +6575,10 @@
         });
         const xlsx = Share.makeXlsx(heads, colsArr);
         entries.push({ name: folder + '/강도값.xlsx', data: new Uint8Array(await xlsx.arrayBuffer()) });
-        entries.push({ name: folder + '/강도값.html', data: new TextEncoder().encode(valuesHtml(folder, cols)) });
+      }
+      // 폴더별 강도값.html — 엑셀 없이도 값·사진 확인과 복사가 되는 독립 페이지(사진만 있는 작업도 실린다)
+      for (const folder of Object.keys(pages)) {
+        entries.push({ name: folder + '/강도값.html', data: new TextEncoder().encode(valuesHtml(folder, pages[folder])) });
       }
 
       if (!entries.length) { U.toast('내보낼 사진·강도값이 없습니다'); return; }
