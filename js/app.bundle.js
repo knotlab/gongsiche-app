@@ -157,8 +157,8 @@
     sheet.close = close;
   }
 
-  function confirmSheet(title, okLabel, onOk, danger) {
-    sheet(title, [{ label: okLabel, cls: danger ? 'danger' : 'strong', onPick: onOk }]);
+  function confirmSheet(title, okLabel, onOk, danger, onCancel) {
+    sheet(title, [{ label: okLabel, cls: danger ? 'danger' : 'strong', onPick: onOk }], onCancel);
   }
 
   /* ---- 진동 ---- */
@@ -338,11 +338,6 @@
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(src, 0, 0, w, h);
     return { cv: cv, w: w, h: h };
-  }
-
-  function drawScaled(src, sw, sh, maxSide, quality) {
-    const r = scaleTo(src, sw, sh, maxSide);
-    return canvasToBlob(r.cv, 'image/jpeg', quality).then((blob) => ({ blob: blob, w: r.w, h: r.h }));
   }
 
   /* 원본 → {full, thumb, w, h} */
@@ -690,6 +685,13 @@
   }
 
   /* 사진 원본 blob — 인라인(Blob/ArrayBuffer)·앱 파일·OPFS 어디에 있든 Blob 으로 돌려준다 */
+  /* 레코드 없이 id 만으로 원본 사진 읽기 — 레코드가 아직 안 되살아난 사진을 목록·편집기가 원본에서 바로 띄우게 */
+  function origBlob(id) {
+    if (!id) return Promise.resolve(null);
+    if (photoFsOk() && global.Native && Native.photoRead) return Native.photoRead(id).catch(() => opfsRead(id).catch(() => null));
+    return opfsRead(id).catch(() => null);
+  }
+
   function fullBlob(p) {
     if (!p) return Promise.resolve(null);
     if (p.full) return Promise.resolve(p.full);
@@ -1055,6 +1057,7 @@
        웹      = localStorage (실사고에서 IndexedDB 와 달리 생존한 별도 계층)
      쓰기마다 800ms 디바운스로 전체를 미러링하고, 복원 때 1순위로 쓴다. */
   const K_MIRROR = 'gsc.tasks.mirror.v1';
+  const K_MIRROR2 = 'gsc.tasks.mirror.prev.v1';   // 미러가 확 줄 때 이전(큰) 미러 보존 — 축소 상태가 좋은 미러를 못 지우게(2026-09-22)
   let mirrorTimer = null;
   let restoring = false;      // 복원 중 — gc·mirror·서버 push 를 잠근다(부분 상태 유출·원본 삭제 방지)
 
@@ -1073,19 +1076,42 @@
           reqp(t.objectStore('bangs').getAll())
         ]);
       })
-        .then((pair) => {
+        .then(async (pair) => {
           const rows = pair[0] || [], bangs = pair[1] || [];
           if (!rows.length && !bangs.length) return;   // 빈 DB 로 미러를 덮지 않는다
+          const nNew = rows.length + bangs.length;
+          // 이전 미러가 지금보다 훨씬 크면(절반 초과 축소) 이전 것을 prev 로 보존한다 —
+          // 웹뷰 초기화 뒤 축소된 상태가 좋은 미러를 지우지 못하게(2026-09-22 실사고 방지)
+          try {
+            const prevStr = await mirrorRaw(K_MIRROR);
+            if (prevStr) {
+              const pj = JSON.parse(prevStr);
+              const nOld = (pj.tasks || []).length + (pj.bangs || []).length;
+              if (nOld > 0 && nNew * 2 < nOld) await mirrorWrite(K_MIRROR2, prevStr);
+            }
+          } catch (e) {}
+          // 보존해 둔 prev 가 더는 '훨씬 큰' 게 아니면(DB 가 회복·성장) 지운다 — 영구 잔존으로 복원 제안이 반복되지 않게(감사 지적)
+          try {
+            const p2 = await mirrorRaw(K_MIRROR2);
+            if (p2) { const j2 = JSON.parse(p2); const n2 = (j2.tasks || []).length + (j2.bangs || []).length; if (nNew * 2 >= n2) await mirrorWrite(K_MIRROR2, ''); }
+          } catch (e) {}
           const body = JSON.stringify({
             at: Date.now(), day: U.dayKey(Date.now()), n: rows.length, tasks: rows, bangs: bangs
           });
-          if (global.Native && Native.prefOk && Native.prefOk()) {
-            return Native.prefSet(K_MIRROR, body);
-          }
-          try { localStorage.setItem(K_MIRROR, body); } catch (e) {}
+          await mirrorWrite(K_MIRROR, body);
         })
         .catch(() => {});
     }, 800);
+  }
+
+  function mirrorRaw(key) {
+    if (global.Native && Native.prefOk && Native.prefOk()) return Native.prefGet(key).catch(() => null);
+    try { return Promise.resolve(localStorage.getItem(key)); } catch (e) { return Promise.resolve(null); }
+  }
+  function mirrorWrite(key, body) {
+    if (global.Native && Native.prefOk && Native.prefOk()) return Native.prefSet(key, body);
+    try { localStorage.setItem(key, body); } catch (e) {}
+    return Promise.resolve();
   }
 
   function mirrorInfo() {
@@ -1428,6 +1454,22 @@
       }).catch(() => false);
   }
 
+  /* 당일 제한(K_FBAK_DAY) 무시하고 지금 상태를 파일백업으로 남긴다 — 복원 직후처럼 '지금 꼭 남겨야' 할 때 */
+  function forceFileBackup() {
+    if (!(global.Native && Native.backupOk && Native.backupOk())) return Promise.resolve(false);
+    return run((db) => {
+      const t = db.transaction(['tasks', 'bangs']);
+      return Promise.all([reqp(t.objectStore('tasks').getAll()), reqp(t.objectStore('bangs').getAll())]);
+    }).then((pair) => {
+      const rows = pair[0] || [], bangs = pair[1] || [];
+      if (!rows.length && !bangs.length) return false;
+      const today = U.dayKey(Date.now());
+      const name = 'gsc-' + today.replace(/-/g, '') + '.json';
+      const body = JSON.stringify({ at: Date.now(), day: today, n: rows.length, tasks: rows, bangs: bangs });
+      return Native.backupWrite(name, body).then((ok) => { if (ok) { try { localStorage.setItem(K_FBAK_DAY, today); } catch (e) {} Native.backupTrim(7); } return ok; });
+    }).catch(() => false);
+  }
+
   /* 최신 파일 백업을 localStorage 백업과 같은 모양(info)으로 읽어 온다 */
   function fileBackupInfo() {
     if (!(global.Native && Native.backupOk && Native.backupOk())) return Promise.resolve(null);
@@ -1500,7 +1542,7 @@
       const blob = canFs
         ? (global.Native && Native.photoRead ? await Native.photoRead(id) : null)
         : await opfsRead(id);
-      if (!blob) return false;
+      if (!blob) return 'nofile';   // 레코드도 파일도 없음 — 호출자가 참조를 걷어낼 수 있게 구분
       const img = await U.processImage(blob, { maxSide: 1600, thumbSide: 320, quality: 0.82 });
       const slim = { id: id, w: img.w, h: img.h, createdAt: uidTime(id) || Date.now() };
       if (canFs) { slim.file = 1; slim.thumb = img.thumb; }
@@ -1510,6 +1552,7 @@
         catch (e) { slim.thumb = img.thumb; }
       }
       await tx(['photos'], 'readwrite', (t) => { t.objectStore('photos').put(slim); });
+      try { if (global.U && U.dropUrl) U.dropUrl(id); } catch (e) {}   // 폴백이 원본으로 만든 URL 을 버려 다음 렌더는 썸네일로
       return true;
     } catch (e) { console.warn('[reviveThumb]', e); return false; }
   }
@@ -1521,16 +1564,36 @@
     try {
       const uniq = []; const seen = Object.create(null);
       (ids || []).forEach((id) => { if (id && !seen[id]) { seen[id] = 1; uniq.push(id); } });
-      let done = 0, changed = 0;
+      let done = 0, changed = 0; const dead = [];
       for (const id of uniq) {
-        if (await reviveThumb(id)) changed++;
+        const r = await reviveThumb(id);
+        if (r === 'nofile') dead.push(id); else if (r) changed++;
         if (++done % 40 === 0) { try { if (global.Home) Home.refresh(); } catch (e) {} await new Promise((r) => setTimeout(r, 0)); }
       }
       if (changed) {
         try { if (global.Home) Home.refresh(); } catch (e) {}
         try { if (global.Tasks && global.Nav && Nav.current && Nav.current() === 'tasks') Tasks.refresh(); } catch (e) {}
       }
+      // 레코드도 파일도 없는 참조는 걷어낸다(옛 washAll — 죽은 참조가 「완료」로 위장하지 않게, 감사 지적).
+      // 파일 접근이 통째로 막힌 순간의 오판을 막기 위해, 이번에 한 장이라도 살렸거나 죽은 수가 적을 때만.
+      if (dead.length && (changed > 0 || dead.length <= 10)) await washDead(dead);
     } finally { reviving = false; }
+  }
+
+  /* 레코드도 파일도 없는 사진 id 를 작업·방통 참조에서 걷어낸다(바뀐 레코드만 다시 저장) */
+  async function washDead(ids) {
+    const bad = Object.create(null); ids.forEach((id) => { bad[id] = 1; });
+    const strip = (arr) => { if (!Array.isArray(arr)) return false; const n = arr.length; for (let i = arr.length - 1; i >= 0; i--) if (bad[arr[i]]) arr.splice(i, 1); return arr.length !== n; };
+    try {
+      const r = await run((db) => { const t = db.transaction(['tasks', 'bangs']); return Promise.all([reqp(t.objectStore('tasks').getAll()), reqp(t.objectStore('bangs').getAll())]); });
+      for (const t of (r[0] || [])) {
+        let hit = strip(t.photos);
+        if (t.sub) Spec.SUBS.forEach((sb) => { const b = t.sub[sb.key]; if (b && strip(b.photos)) hit = true; });
+        if (hit) { try { await putTask(t); } catch (e) {} }
+      }
+      for (const b of (r[1] || [])) { if (strip(b.photos)) { try { await putBang(b); } catch (e) {} } }
+      console.log('[washDead]', ids.length + '개 죽은 사진 참조 정리');
+    } catch (e) { console.warn('[washDead]', e); }
   }
 
   /* 참조됐는데 레코드 없는 사진을 스스로 찾아 되살린다(부팅 자가치유 — 복원이 중간에 끊긴 뒤에도 회복) */
@@ -1559,6 +1622,7 @@
   async function bestBackupInfo() {
     const cands = [];
     try { const m = await mirrorInfo(); if (m) cands.push(m); } catch (e) {}
+    try { const s2 = await mirrorRaw(K_MIRROR2); if (s2) { const j = JSON.parse(s2); if (j && (Array.isArray(j.tasks) || Array.isArray(j.bangs))) cands.push(j); } } catch (e) {}
     const b = backupInfo(); if (b) cands.push(b);
     const b2 = bakInfo(K_BAK2); if (b2) cands.push(b2);
     try {
@@ -1583,21 +1647,34 @@
     restoring = true;
     const need = [];
     return (async () => {
+      // 지금 DB 에 더 새로 저장된 기록(updatedAt 이 백업보다 큼)은 건너뛴다 — 복원이 최신 편집을 옛 값으로 되돌리지 않게(감사 지적).
+      // 백업에 없는 기록은 지우지 않는다(복원은 채우기만).
+      const cur = Object.create(null), curB = Object.create(null);
+      try {
+        const r = await run((db) => { const t = db.transaction(['tasks', 'bangs']); return Promise.all([reqp(t.objectStore('tasks').getAll()), reqp(t.objectStore('bangs').getAll())]); });
+        (r[0] || []).forEach((t) => { if (t && t.id) cur[t.id] = t.updatedAt || 0; });
+        (r[1] || []).forEach((b) => { if (b && b.id) curB[b.id] = b.updatedAt || 0; });
+      } catch (e) {}
+      const newer = (map, c) => !!(c && c.id && map[c.id] != null && (c.updatedAt || 0) < map[c.id]);
       let n = 0;
       for (const t of (info.tasks || [])) {
         let c; try { c = JSON.parse(JSON.stringify(t)); } catch (e) { continue; }
         refIds(c, need);
+        if (newer(cur, c)) { n++; continue; }
         try { await putTask(c); n++; } catch (e) {}
       }
       for (const b of (info.bangs || [])) {
         let c; try { c = JSON.parse(JSON.stringify(b)); } catch (e) { continue; }
         (c.photos || []).forEach((id) => { if (id) need.push(id); });
+        if (newer(curB, c)) continue;
         try { await putBang(c); } catch (e) {}
       }
       return n;
     })().then((n) => {
       restoring = false;
+      try { mirrorWrite(K_MIRROR2, ''); } catch (e) {}   // 보존해 둔 prev 미러는 제 몫을 다했다 — 영구 잔존 방지
       mirrorSoon();
+      try { forceFileBackup(); } catch (e) {}   // 복원한 완전본을 오늘 파일백업으로도 즉시 남긴다
       reviveThumbs(need);
       return n;
     }, (e) => { restoring = false; throw e; });
@@ -1618,6 +1695,7 @@
     backupDaily: backupDaily, restoreBackup: restoreBackup,
     backupToFileDaily: backupToFileDaily, fileBackupInfo: fileBackupInfo,
     mirrorInfo: mirrorInfo, mirrorSoon: mirrorSoon, bestBackupInfo: bestBackupInfo, reviveMissingThumbs: reviveMissingThumbs,
+    forceFileBackup: forceFileBackup, origBlob: origBlob,
     migratePhotosToFiles: migratePhotosToFiles,
     gc: gc, estimate: estimate
   };
@@ -5342,7 +5420,7 @@
     save(); renderStats();
   }
 
-  function capFor(specKey) { return (!specKey || specKey === 'd28') ? 9 : 3; }
+  function capFor(specKey) { return (!specKey || specKey === 'd28' || specKey === 'water' || specKey === 'seal') ? 9 : 3; }   // 구버전 water/seal 도 28일
   function cap() { return capFor(linkedSpec); }
   function capMsg() {
     const s = linkedSpec && Spec.byKey(linkedSpec);
@@ -6010,9 +6088,17 @@
       img.src = U.thumbUrl(p.id, p.thumb || p.full);
       img.alt = '';
       th.appendChild(img);
+    } else if (id) {
+      // 레코드가 아직 안 되살아난 사진 — 원본 파일에서 바로 띄운다(썸네일은 뒤에서 채워짐). 파일도 없으면 실패 표시
+      const img = new Image(); img.alt = '';
+      th.appendChild(img);
+      Store.origBlob(id).then((b) => {
+        if (b) { img.src = U.thumbUrl(id, b); }   // 캐시를 거쳐야 dropUrl 이 회수한다(누수 방지)
+        else { th.innerHTML = ''; const np = U.el('div', 'nopic bad'); np.appendChild(U.icon('warn')); th.appendChild(np); }
+      }).catch(() => {});
     } else {
-      const np = U.el('div', 'nopic' + (id ? ' bad' : ''));
-      np.appendChild(U.icon(id ? 'warn' : 'note'));
+      const np = U.el('div', 'nopic');
+      np.appendChild(U.icon('note'));
       th.appendChild(np);
     }
     row.appendChild(th);
@@ -6450,18 +6536,18 @@
       '.tools{display:flex;flex-wrap:wrap;gap:6px;align-items:center}.tools input{min-height:40px;padding:0 10px;border:1px solid #cfd4dc;border-radius:10px;font-size:15px;width:150px}' +
       'button{min-height:40px;padding:0 14px;border:0;border-radius:10px;background:#2563eb;color:#fff;font-size:15px;font-weight:700;cursor:pointer;-webkit-tap-highlight-color:transparent}' +
       'button.gray{background:#374151}button.ok{background:#16a34a}button.no{background:#dc2626}button.mini{min-height:32px;padding:0 10px;font-size:13px}' +
-      '.cards{padding:12px;display:flex;flex-direction:column;gap:12px;max-width:1400px;margin:0 auto}' +
-      '.card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:12px}' +
-      '.chead{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:baseline;margin-bottom:10px}.dong{font-size:20px;font-weight:800}.sup{font-size:15px;color:#333}.when{font-size:13px;color:#666}.chead .mini{margin-left:auto}' +
-      '.sets{display:flex;gap:10px;overflow-x:auto;padding-bottom:6px;align-items:flex-start}' +
-      '.set{flex:0 0 150px;border:1px solid #e5e7eb;border-radius:12px;padding:10px;background:#fafafa}' +
-      '.sname{font-weight:700;font-size:15px;display:flex;justify-content:space-between;align-items:baseline;gap:6px}.sname span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sname small{font-weight:400;color:#666;font-size:12px;flex:0 0 auto}' +
-      '.vals{border-top:1px solid #e5e7eb;border-bottom:1px solid #e5e7eb;padding:6px 0;margin:6px 0}.v{font-size:17px;font-variant-numeric:tabular-nums;padding:3px 0}' +
-      '.c{display:flex;flex-direction:column;font-size:13px;color:#333;margin-bottom:8px}.c b{font-size:16px}.c small{color:#777;font-size:12px}.set .cp{width:100%}' +
-      '.pn{margin-top:8px;font-size:11px;display:flex;flex-direction:column;gap:2px}.pn a{color:#2563eb;text-decoration:none;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.none{color:#888;font-size:14px;margin:0 0 8px}' +
-      '.photos{margin-top:10px;display:flex;flex-direction:column;gap:8px}.pair{display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap}' +
-      '.plab{flex:0 0 auto;font-size:13px;font-weight:700;background:#eef2ff;color:#3730a3;padding:6px 10px;border-radius:999px}.thumbs{display:flex;gap:8px;flex-wrap:wrap}' +
-      '.ph{margin:0;width:104px;cursor:zoom-in}.ph img,.ph .noimg{width:104px;height:104px;object-fit:cover;border-radius:10px;border:1px solid #e5e7eb;background:#eee;display:block}' +
+      '.cards{padding:10px;display:grid;grid-template-columns:repeat(auto-fill,minmax(222px,1fr));gap:10px;align-items:start}' +
+      '.card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:9px}' +
+      '.chead{display:flex;flex-wrap:wrap;gap:3px 10px;align-items:baseline;margin-bottom:7px}.dong{font-size:17px;font-weight:800}.sup{font-size:13px;color:#333}.when{font-size:12px;color:#666}.chead .mini{margin-left:auto}' +
+      '.sets{display:flex;flex-wrap:wrap;gap:7px;align-items:flex-start}' +
+      '.set{flex:1 1 96px;min-width:92px;max-width:180px;border:1px solid #e5e7eb;border-radius:10px;padding:6px 7px;background:#fafafa}' +
+      '.sname{font-weight:700;font-size:14px;display:flex;justify-content:space-between;align-items:baseline;gap:6px}.sname span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sname small{font-weight:400;color:#666;font-size:12px;flex:0 0 auto}' +
+      '.vals{border-top:1px solid #e5e7eb;border-bottom:1px solid #e5e7eb;padding:3px 0;margin:5px 0}.v{font-size:15px;font-variant-numeric:tabular-nums;padding:0;line-height:1.3}' +
+      '.c{display:flex;flex-direction:column;font-size:12px;color:#333;margin-bottom:6px}.c b{font-size:15px}.c small{color:#777;font-size:11px}.set .cp{width:100%;min-height:34px}' +
+      '.pn{margin-top:6px;font-size:11px;display:flex;flex-direction:column;gap:2px}.pn a{color:#2563eb;text-decoration:none;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.none{color:#888;font-size:13px;margin:0 0 6px}' +
+      '.photos{margin-top:8px;display:flex;flex-direction:column;gap:6px}.pair{display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap}' +
+      '.plab{flex:0 0 auto;font-size:12px;font-weight:700;background:#eef2ff;color:#3730a3;padding:4px 9px;border-radius:999px}.thumbs{display:flex;gap:6px;flex-wrap:wrap}' +
+      '.ph{margin:0;width:78px;cursor:zoom-in}.ph img,.ph .noimg{width:78px;height:78px;object-fit:cover;border-radius:8px;border:1px solid #e5e7eb;background:#eee;display:block}' +
       '.ph .noimg{display:grid;place-items:center;font-size:11px;color:#888}.ph figcaption{font-size:11px;color:#555;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
       '#peek{position:fixed;z-index:40;pointer-events:none;background:#fff;padding:6px;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.35)}#peek img{display:block;max-width:60vw;max-height:60vh;border-radius:8px}' +
       '#box{position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.9);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:16px}' +
@@ -7862,7 +7948,18 @@
         cell.appendChild(img);
         // 탭하면 원본 크게 보기(사용자 지시) — 삭제 X 는 stopPropagation 이라 안 겹친다
         cell.addEventListener('click', () => openLightbox(pid));
-      } else { cell.classList.add('loading'); cell.textContent = '불러오기 실패'; }
+      } else {
+        // 레코드가 아직 안 되살아난 사진 — 원본 파일에서 바로 띄운다(썸네일은 뒤에서 채워짐)
+        const img = new Image(); img.draggable = false; img.alt = (i + 1) + '번 사진';
+        cell.appendChild(img);
+        cell.addEventListener('click', () => openLightbox(pid));
+        // 실패 표시는 img 만 바꾼다 — cell.textContent 로 덮으면 뒤에 붙는 삭제 X·번호까지 지워져 죽은 사진을 못 지운다(감사 지적)
+        const failed = () => { cell.classList.add('loading'); const s = document.createElement('span'); s.textContent = '불러오기 실패'; if (img.parentNode === cell) cell.replaceChild(s, img); };
+        Store.origBlob(pid).then((b) => {
+          if (b) img.src = U.thumbUrl(pid, b);   // 캐시를 거쳐야 dropUrl 이 회수한다(누수 방지)
+          else failed();
+        }).catch(failed);
+      }
       const del = U.el('button', 'del');
       del.appendChild(U.icon('close'));
       del.setAttribute('aria-label', (i + 1) + '번 사진 삭제');
@@ -11053,6 +11150,7 @@
                       typeof navigator.share === 'function' && !!navigator.canShare;
     U.toast('사진 처리 중…', 60000);
     let ok = 0, fail = 0;
+    const owner = draft;   // 처리 중(await) 에 다른 기록을 열면 draft 가 바뀐다 — 처음 그릇에만 붙인다(감사 지적)
     try {
       for (const f of files) {
         const id = U.uid();
@@ -11063,11 +11161,10 @@
             try { shareFiles.push(new File([img.full], 'bang_' + id + '.jpg', { type: 'image/jpeg' })); }
             catch (e) {}
           }
-          draft.photos.push(id); ok++;
+          owner.photos.push(id); ok++;
         } catch (e) { console.error('[bang photo]', e); fail++; }
       }
-      saveDraft();
-      await renderPhotos();
+      if (draft === owner) { saveDraft(); await renderPhotos(); }
     } finally {
       const done = ok ? (ok + '장 추가했습니다' + (fail ? ' · ' + fail + '장 실패' : ''))
                       : '사진을 불러오지 못했습니다';
@@ -11284,8 +11381,6 @@
 
   function init() {
     loadDraft();
-    const hb = $('#home-bang');
-    if (hb) hb.addEventListener('click', open);
     $('#bang-back').addEventListener('click', close);
 
     // 칸 고르기 (층 포함 — 키패드로 채우는 네 칸)
@@ -12035,12 +12130,13 @@
 
   /* 뒤로가기 한 단계 처리. 더 이상 물러설 곳이 없으면 false */
   function goBack() {
-    if (global.Powder && Powder.isOpen()) { Powder.close(); return true; }
-    if (global.Bangtong && Bangtong.isOpen()) { Bangtong.close(); return true; }
+    // 바텀시트가 떠 있으면 그것부터 — 방통 화면 안의 시트에서 뒤로가기가 화면째 닫아 수정 중 값을 버리던 결함(감사 지적)
     if (!U.$('#sheet-back').classList.contains('hidden')) {
       if (U.sheet.close) U.sheet.close();
       return true;
     }
+    if (global.Powder && Powder.isOpen()) { Powder.close(); return true; }
+    if (global.Bangtong && Bangtong.isOpen()) { Bangtong.close(); return true; }
     if (!U.$('#lightbox').classList.contains('hidden')) {
       if (lightboxCloser) lightboxCloser(); else U.$('#lightbox').classList.add('hidden');
       return true;
@@ -12096,6 +12192,20 @@
     // 더블탭 차단은 키패드 연타를 씹으므로 넣지 않는다
     // (안드로이드는 viewport meta 의 user-scalable=no 로 이미 막힌다)
     document.addEventListener('gesturestart', (e) => { if (!zoomable) e.preventDefault(); });
+
+    // 백그라운드로 갈 때 오늘 상태를 파일백업(DATA + 외부 문서 폴더)으로 즉시 남긴다 —
+    // 오늘 작업이 미러(SharedPreferences)뿐 아니라 파일로도 몇 초 안에 남게(2026-09-22 증발 방지).
+    // 네이티브에서만 동작(웹은 forceFileBackup 이 조용히 false), 2분 스로틀.
+    let bgBakAt = 0;
+    const bgBackup = () => {
+      if (document.visibilityState !== 'hidden') return;
+      const now = Date.now();
+      if (now - bgBakAt < 120000) return;
+      bgBakAt = now;
+      try { if (Store.forceFileBackup) Store.forceFileBackup(); } catch (e) {}
+    };
+    document.addEventListener('visibilitychange', bgBackup);
+    window.addEventListener('pagehide', bgBackup);
   }
 
   function boot() {
@@ -12136,10 +12246,23 @@
       Store.taskCount().then(async (n) => {
         // 백업들 중 '가장 큰' 것과 견줘, DB 가 비었거나 절반 밑으로 확 줄었으면 복원을 권한다.
         // (2026-09-22 실사고: 웹뷰 초기화 뒤 부분복원으로 429 → 16 이 됐는데 예전엔 빈 경우만 제안해 놓쳤다)
+        const maintain = () => {
+          Store.backupDaily();
+          Store.backupToFileDaily();
+          Store.mirrorSoon();
+          Store.reviveMissingThumbs();    // 복원이 끊겼어도 남은 썸네일을 마저 되살린다(자가치유)
+          // 기존 blob 사진을 파일로 이전(P2) — 조용히, 조금씩. 중단돼도 다음 부팅에 이어서.
+          Store.migratePhotosToFiles().then((m) => { if (m) console.log('[사진 파일 이전]', m + '장'); });
+        };
         let bak = null;
         try { bak = await Store.bestBackupInfo(); } catch (e) {}
         const bakN = bak ? ((bak.tasks || []).length + (bak.bangs || []).length) : 0;
-        if (bak && bakN > 0 && (n === 0 || n * 2 < bakN)) {
+        // 같은 백업을 이미 거절했으면(의도적 정리 등) 7일간 다시 묻지 않는다 — 매 부팅 반복 제안 방지(감사 지적)
+        const SKIP = 'gsc.restore.skip.v1';
+        const sig = bak ? (String(bak.at || '') + '|' + bakN) : '';
+        let skipped = false;
+        try { const s = JSON.parse(localStorage.getItem(SKIP) || 'null'); skipped = !!(s && s.sig === sig && (Date.now() - (s.at || 0)) < 7 * 86400000); } catch (e) {}
+        if (bak && bakN > 0 && (n === 0 || n * 2 < bakN) && !skipped) {
           if (!U.$('#sheet-back').classList.contains('hidden')) return;
           if (Nav.isTaskOpen() || Nav.isAIOpen() || Nav.isAuditOpen() || Nav.isSupOpen()) return;
           if (global.Powder && Powder.isOpen()) return;
@@ -12150,19 +12273,22 @@
             U.dayLabel(bak.at) + ' 백업(' + bakN + '건)이 있습니다\n' +
             '복원할까요? (파일로 남은 사진은 함께 살립니다)', '복원',
             async () => {
+              try { localStorage.removeItem(SKIP); } catch (e) {}
               U.toast('복원 중…', 120000);
-              const k = await Store.restoreBackup(bak);
-              U.toast('작업 ' + k + '건을 복원했습니다 — 사진 미리보기는 이어서 채워집니다', 3500);
+              try {
+                const k = await Store.restoreBackup(bak);
+                U.toast('작업 ' + k + '건을 복원했습니다 — 사진 미리보기는 이어서 채워집니다', 3500);
+              } catch (e) { console.error(e); U.toast('복원하지 못했습니다'); }
               try { Home.refresh(); } catch (e) {}
+              Store.migratePhotosToFiles().then((m) => { if (m) console.log('[사진 파일 이전]', m + '장'); });
+            }, false,
+            () => {   // 거절 = 지금 상태가 맞다는 뜻. 같은 백업은 7일간 다시 안 묻고, 평소 유지보수는 그대로(감사 지적)
+              try { localStorage.setItem(SKIP, JSON.stringify({ sig: sig, at: Date.now() })); } catch (e) {}
+              maintain();
             });
           return;
         }
-        Store.backupDaily();
-        Store.backupToFileDaily();
-        Store.mirrorSoon();
-        Store.reviveMissingThumbs();    // 복원이 끊겼어도 남은 썸네일을 마저 되살린다(자가치유)
-        // 기존 blob 사진을 파일로 이전(P2) — 조용히, 조금씩. 중단돼도 다음 부팅에 이어서.
-        Store.migratePhotosToFiles().then((m) => { if (m) console.log('[사진 파일 이전]', m + '장'); });
+        maintain();
       }).catch(() => {});
     }, 1500);
   }

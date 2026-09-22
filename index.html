@@ -255,8 +255,7 @@
         <button class="task-add hidden" id="home-ocr">
           <svg class="ic" aria-hidden="true"><use href="#ic-scan"/></svg>일정표 스캔
         </button>
-        <!-- 방통시험 버튼은 오늘 작업 메뉴에서 뺐다(사용자 지시 2026-09-13) — 계산 탭 ⋯ 메뉴·편집기 칩으로 들어간다.
-             bangtong.js 의 #home-bang 바인딩은 null 안전 -->
+        <!-- 방통시험 진입은 방통 모드의 「추가」 시트·목록 줄·플래너 칩뿐(2026-09-17) — 홈 전용 버튼 없음 -->
         <!-- 공시체 플래너 — 타설일 하나로 수직·수평·필러·28일 네 작업을 한 번에(사용자 요청) -->
         <button class="task-add" id="home-plan">
           <svg class="ic" aria-hidden="true"><use href="#ic-note"/></svg>플래너
@@ -656,7 +655,7 @@
         <button class="btn ghost" id="bang-shoot">촬영</button>
         <button class="btn ghost" id="bang-pick">앨범</button>
       </div>
-      <button class="btn primary" id="bang-save">이 방통시험 저장</button>
+      <button class="btn btn-primary" id="bang-save">이 방통시험 저장</button>
       <button class="btn ghost bang-copy" id="bang-copy">저장 없이 카톡 문구만 복사</button>
     </div>
 
@@ -678,7 +677,7 @@
     <button class="key" data-bk="3">3</button>
     <button class="key key-dot" data-bk="." aria-label="소수점">.</button>
     <button class="key" data-bk="0">0</button>
-    <button class="key key-back" data-bk="del" aria-label="한 글자 지우기">⌫</button>
+    <button class="key key-back" data-bk="del" aria-label="한 글자 지우기"><svg class="ic" aria-hidden="true"><use href="#ic-backspace"/></svg></button>
   </div>
 
   <!-- 웹 폴백용 파일 입력(네이티브 카메라가 없을 때만) -->
