@@ -1482,77 +1482,125 @@
   /* 복원 — 사진 스토어도 같이 날아간 경우, 죽은 사진 id 가 남아 있으면
      사진 0장짜리 작업이 「완료」로 위장한다(isDone 이 개수만 본다 — 감사 지적).
      실존하는 사진 id 만 남기고 복원한다. info 를 주면 그걸(파일 백업 등), 없으면 localStorage 백업. */
+  /* 참조 사진 id 를 모은다(28일 두 칸 포함) */
+  function refIds(t, out) {
+    (t && t.photos || []).forEach(function (id) { if (id) out.push(id); });
+    if (t && t.sub) Spec.SUBS.forEach(function (sb) {
+      var b = t.sub[sb.key]; if (b && b.photos) b.photos.forEach(function (id) { if (id) out.push(id); });
+    });
+  }
+
+  /* 사진 한 장 되살리기 — 파일(앱 데이터 or OPFS)로 살아 있으면 썸네일만 다시 뽑아 레코드 재생성.
+     원본 파일은 절대 다시 쓰지 않는다. 이미 레코드가 있으면 건너뛴다. 파일이 없으면 조용히 실패. */
+  async function reviveThumb(id) {
+    try {
+      const have = await run((db) => reqp(db.transaction('photos').objectStore('photos').get(id))).catch(() => null);
+      if (have) return true;
+      const canFs = photoFsOk();
+      const blob = canFs
+        ? (global.Native && Native.photoRead ? await Native.photoRead(id) : null)
+        : await opfsRead(id);
+      if (!blob) return false;
+      const img = await U.processImage(blob, { maxSide: 1600, thumbSide: 320, quality: 0.82 });
+      const slim = { id: id, w: img.w, h: img.h, createdAt: uidTime(id) || Date.now() };
+      if (canFs) { slim.file = 1; slim.thumb = img.thumb; }
+      else {
+        slim.opfs = 1;
+        try { slim.thumbBuf = await img.thumb.arrayBuffer(); slim.thumbType = img.thumb.type || 'image/jpeg'; }
+        catch (e) { slim.thumb = img.thumb; }
+      }
+      await tx(['photos'], 'readwrite', (t) => { t.objectStore('photos').put(slim); });
+      return true;
+    } catch (e) { console.warn('[reviveThumb]', e); return false; }
+  }
+
+  /* 참조됐는데 레코드 없는 사진의 썸네일을 뒤에서 조금씩 되살린다(재개 가능·무해). */
+  let reviving = false;
+  async function reviveThumbs(ids) {
+    if (reviving) return; reviving = true;
+    try {
+      const uniq = []; const seen = Object.create(null);
+      (ids || []).forEach((id) => { if (id && !seen[id]) { seen[id] = 1; uniq.push(id); } });
+      let done = 0, changed = 0;
+      for (const id of uniq) {
+        if (await reviveThumb(id)) changed++;
+        if (++done % 40 === 0) { try { if (global.Home) Home.refresh(); } catch (e) {} await new Promise((r) => setTimeout(r, 0)); }
+      }
+      if (changed) {
+        try { if (global.Home) Home.refresh(); } catch (e) {}
+        try { if (global.Tasks && global.Nav && Nav.current && Nav.current() === 'tasks') Tasks.refresh(); } catch (e) {}
+      }
+    } finally { reviving = false; }
+  }
+
+  /* 참조됐는데 레코드 없는 사진을 스스로 찾아 되살린다(부팅 자가치유 — 복원이 중간에 끊긴 뒤에도 회복) */
+  function reviveMissingThumbs() {
+    return run((db) => {
+      const t = db.transaction(['tasks', 'bangs', 'photos']);
+      return Promise.all([
+        reqp(t.objectStore('tasks').getAll()),
+        reqp(t.objectStore('bangs').getAll()),
+        reqp(t.objectStore('photos').getAllKeys())
+      ]);
+    }).then((r) => {
+      const live = Object.create(null); (r[2] || []).forEach((k) => { live[k] = 1; });
+      const want = [];
+      (r[0] || []).forEach((t) => refIds(t, want));
+      (r[1] || []).forEach((b) => (b.photos || []).forEach((id) => { if (id) want.push(id); }));
+      const missing = want.filter((id) => !live[id]);
+      if (missing.length) reviveThumbs(missing);
+      return missing.length;
+    }).catch(() => 0);
+  }
+
+  /* 미러·localStorage·파일백업(7세대) 을 통틀어 **작업이 가장 많은** 백업을 고른다.
+     실사고(2026-09-22): 부분복원이 미러·당일 파일백업을 429→16 으로 덮었지만 전날 파일백업(429)은 살아 있었다.
+     그래서 '가장 최신'이 아니라 '가장 큰' 것을 기준으로 삼는다. */
+  async function bestBackupInfo() {
+    const cands = [];
+    try { const m = await mirrorInfo(); if (m) cands.push(m); } catch (e) {}
+    const b = backupInfo(); if (b) cands.push(b);
+    const b2 = bakInfo(K_BAK2); if (b2) cands.push(b2);
+    try {
+      const list = (global.Native && Native.backupList) ? await Native.backupList() : [];
+      for (const e of list) {
+        try { const j = JSON.parse(await Native.backupRead(e)); if (j && (Array.isArray(j.tasks) || Array.isArray(j.bangs))) cands.push(j); } catch (e2) {}
+      }
+    } catch (e) {}
+    let best = null, bestN = -1;
+    cands.forEach((c) => { const nn = (c.tasks || []).length + (c.bangs || []).length; if (nn > bestN) { bestN = nn; best = c; } });
+    if (best) best._n = bestN;
+    return best;
+  }
+
+  /* 백업 복원 — 기록(작업·방통)을 먼저 다 써넣고(빠름·무중단), 사진 썸네일은 뒤에서 되살린다.
+     예전엔 사진마다 processImage 를 돌리며 작업을 하나씩 써서 1000장이면 몇 분씩 걸렸고, 중간에 끊기면
+     '일부만 복원된' 상태가 남아 미러·백업을 덮었다(실사고 2026-09-22). 지금은 기록이 즉시 다 들어가고
+     원본 사진은 파일로 그대로라 값·사진이 곧바로 온전하다. 썸네일은 뒤에서 채워지고, 끊겨도 다음 부팅이 마저 한다. */
   function restoreBackup(given) {
     const info = given || backupInfo() || bakInfo(K_BAK2);
     if (!info) return Promise.resolve(0);
-    restoring = true;      // 이 동안 gc·mirror·서버 push 를 잠근다 (원본 삭제·부분상태 유출 차단)
-    return run((db) => reqp(db.transaction('photos').objectStore('photos').getAllKeys()))
-      .catch(() => [])
-      .then(async (keys) => {
-        const live = Object.create(null);
-        (keys || []).forEach((k) => { live[k] = 1; });
-        const canFs = photoFsOk();
-        const revived = Object.create(null);
-
-        // DB 는 죽었어도 원본이 파일(앱 데이터 or OPFS)로 살아 있으면 사진까지 되살린다 —
-        // 썸네일을 다시 뽑아 레코드를 재생성. 파일도 없으면 그때만 목록에서 뺀다.
-        const washAll = async (ids) => {
-          const out = [];
-          for (const id of (ids || [])) {
-            if (live[id] || revived[id]) { out.push(id); continue; }
-            try {
-              const blob = canFs
-                ? (global.Native && Native.photoRead ? await Native.photoRead(id) : null)
-                : await opfsRead(id);
-              if (blob) {
-                // 유일하게 살아남은 원본이다 — **파일은 절대 다시 쓰지 않는다**(재기록 중
-                // 끊기면 마지막 사본이 손상된다 + 재인코딩 화질 열화, 반대심문 확인).
-                // 썸네일만 다시 뽑아 DB 레코드를 재생성한다.
-                const img = await U.processImage(blob, { maxSide: 1600, thumbSide: 320, quality: 0.82 });
-                const slim = { id: id, w: img.w, h: img.h, createdAt: uidTime(id) || Date.now() };
-                if (canFs) {
-                  slim.file = 1;
-                  slim.thumb = img.thumb;
-                } else {
-                  slim.opfs = 1;
-                  try {
-                    slim.thumbBuf = await img.thumb.arrayBuffer();
-                    slim.thumbType = img.thumb.type || 'image/jpeg';
-                  } catch (e) { slim.thumb = img.thumb; }
-                }
-                await tx(['photos'], 'readwrite', (t) => { t.objectStore('photos').put(slim); });
-                revived[id] = 1;
-                out.push(id);
-                continue;
-              }
-            } catch (e) { console.warn('[restore photo]', e); }
-          }
-          return out;
-        };
-
-        let n = 0;
-        for (const t of (info.tasks || [])) {
-          let c;
-          try { c = JSON.parse(JSON.stringify(t)); } catch (e) { continue; }
-          c.photos = await washAll(c.photos);
-          if (c.sub) {
-            for (const s of Spec.SUBS) {
-              if (c.sub[s.key]) c.sub[s.key].photos = await washAll(c.sub[s.key].photos);
-            }
-          }
-          try { await putTask(c); n++; } catch (e) {}
-        }
-        // 방통 기록도 같이 되살린다 — 사진은 파일로 살아남았으면 썸네일만 재생성
-        for (const b of (info.bangs || [])) {
-          let c;
-          try { c = JSON.parse(JSON.stringify(b)); } catch (e) { continue; }
-          c.photos = await washAll(c.photos);
-          try { await putBang(c); } catch (e) {}
-        }
-        return n;
-      })
-      .then((n) => { restoring = false; mirrorSoon(); return n; },   // 다 끝난 뒤 완전한 상태를 한 번만 민다
-            (e) => { restoring = false; throw e; });
+    restoring = true;
+    const need = [];
+    return (async () => {
+      let n = 0;
+      for (const t of (info.tasks || [])) {
+        let c; try { c = JSON.parse(JSON.stringify(t)); } catch (e) { continue; }
+        refIds(c, need);
+        try { await putTask(c); n++; } catch (e) {}
+      }
+      for (const b of (info.bangs || [])) {
+        let c; try { c = JSON.parse(JSON.stringify(b)); } catch (e) { continue; }
+        (c.photos || []).forEach((id) => { if (id) need.push(id); });
+        try { await putBang(c); } catch (e) {}
+      }
+      return n;
+    })().then((n) => {
+      restoring = false;
+      mirrorSoon();
+      reviveThumbs(need);
+      return n;
+    }, (e) => { restoring = false; throw e; });
   }
 
   global.Store = {
@@ -1569,7 +1617,7 @@
     taskCount: taskCount, backupInfo: backupInfo, backupNow: backupNow, fullSnapshot: fullSnapshot,
     backupDaily: backupDaily, restoreBackup: restoreBackup,
     backupToFileDaily: backupToFileDaily, fileBackupInfo: fileBackupInfo,
-    mirrorInfo: mirrorInfo, mirrorSoon: mirrorSoon,
+    mirrorInfo: mirrorInfo, mirrorSoon: mirrorSoon, bestBackupInfo: bestBackupInfo, reviveMissingThumbs: reviveMissingThumbs,
     migratePhotosToFiles: migratePhotosToFiles,
     gc: gc, estimate: estimate
   };
@@ -12086,34 +12134,33 @@
     // DB 는 비었는데 백업이 남아 있으면(증발 사고) 그냥 덮지 말고 복원을 권한다.
     setTimeout(() => {
       Store.taskCount().then(async (n) => {
-        if (!n) {
-          // 상시 미러(가장 최신) → localStorage 일일 백업 → 파일 백업 순으로 찾는다
-          let bak = null;
-          try { bak = await Store.mirrorInfo(); } catch (e) {}
-          if (!bak) bak = Store.backupInfo();
-          if (!bak) { try { bak = await Store.fileBackupInfo(); } catch (e) { bak = null; } }
-          if (!bak) return;
-          // 사용자가 이미 다른 시트·오버레이를 보고 있으면 치환하지 않는다(잘못 누름 방지).
-          // 시트뿐 아니라 작업 편집기·AI·검수·감리선택 오버레이 위로도 뜨면 안 된다(반대심문 확인).
-          // DB 가 빈 상태면 다음 부팅에 다시 제안된다.
+        // 백업들 중 '가장 큰' 것과 견줘, DB 가 비었거나 절반 밑으로 확 줄었으면 복원을 권한다.
+        // (2026-09-22 실사고: 웹뷰 초기화 뒤 부분복원으로 429 → 16 이 됐는데 예전엔 빈 경우만 제안해 놓쳤다)
+        let bak = null;
+        try { bak = await Store.bestBackupInfo(); } catch (e) {}
+        const bakN = bak ? ((bak.tasks || []).length + (bak.bangs || []).length) : 0;
+        if (bak && bakN > 0 && (n === 0 || n * 2 < bakN)) {
           if (!U.$('#sheet-back').classList.contains('hidden')) return;
           if (Nav.isTaskOpen() || Nav.isAIOpen() || Nav.isAuditOpen() || Nav.isSupOpen()) return;
           if (global.Powder && Powder.isOpen()) return;
           if (global.Bangtong && Bangtong.isOpen()) return;
           if (!U.$('#lightbox').classList.contains('hidden')) return;
           U.confirmSheet(
-            '저장된 작업이 하나도 없는데\n' + U.dayLabel(bak.at) + ' 백업(' + bak.n + '건)이 있습니다\n' +
+            (n === 0 ? '저장된 작업이 하나도 없는데\n' : ('지금 작업이 ' + n + '건뿐인데\n')) +
+            U.dayLabel(bak.at) + ' 백업(' + bakN + '건)이 있습니다\n' +
             '복원할까요? (파일로 남은 사진은 함께 살립니다)', '복원',
             async () => {
+              U.toast('복원 중…', 120000);
               const k = await Store.restoreBackup(bak);
-              U.toast('작업 ' + k + '건을 복원했습니다');
+              U.toast('작업 ' + k + '건을 복원했습니다 — 사진 미리보기는 이어서 채워집니다', 3500);
               try { Home.refresh(); } catch (e) {}
             });
           return;
         }
-        Store.backupDaily();            // localStorage (즉시 계층)
-        Store.backupToFileDaily();      // 파일 계층 (DATA + 공용문서, 7세대)
-        Store.mirrorSoon();             // 상시 미러 씨딩 — 첫 저장 전에 죽어도 미러가 있게
+        Store.backupDaily();
+        Store.backupToFileDaily();
+        Store.mirrorSoon();
+        Store.reviveMissingThumbs();    // 복원이 끊겼어도 남은 썸네일을 마저 되살린다(자가치유)
         // 기존 blob 사진을 파일로 이전(P2) — 조용히, 조금씩. 중단돼도 다음 부팅에 이어서.
         Store.migratePhotosToFiles().then((m) => { if (m) console.log('[사진 파일 이전]', m + '장'); });
       }).catch(() => {});
