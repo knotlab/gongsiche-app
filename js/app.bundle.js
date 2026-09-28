@@ -3056,6 +3056,59 @@
     { key: 'seal',  name: '봉함', age: 28, note: '봉함양생', legacy: true }
   ];
 
+  /* ---------- 재령 커스텀(2026-09-28 사용자 지시) ----------
+     설정에서 분류별 재령을 바꾸면 localStorage(K_AGE)에 남고, 부팅 때 SPECS·CUBE 객체의 age 를 **제자리에서** 바꾼다.
+     모든 소비처(플래너·타설일 역산·dueOn·편집기 칩·검수·OCR)가 s.age 를 읽으므로 따로 손댈 곳이 없다.
+     이름(「28일」)과 카톡 문구(「28일강도」)는 업계 용어라 고정 — 재령을 바꿔도 날짜 계산만 따라간다.
+     재령은 분류끼리 겹치면 안 된다(OCR 이 재령 숫자로 분류를 고른다).
+     **28일(수중·봉함)·큐브몰드는 고정**(사용자 지시 「28일강도는 불변」) — 바꿀 수 있는 건 수직·수평·필러뿐. */
+  const K_AGE = 'gsc.spec.age.v1';
+  const ADJUSTABLE = ['vert', 'horiz', 'filler'];
+  const DEF_AGE = {};
+  SPECS.forEach((s) => { DEF_AGE[s.key] = s.age; });
+  DEF_AGE[CUBE.key] = CUBE.age;
+  function ageTarget(k) {
+    for (let i = 0; i < SPECS.length; i++) if (SPECS[i].key === k) return SPECS[i];
+    return k === CUBE.key ? CUBE : null;
+  }
+  function adjustable() { return ADJUSTABLE.map(ageTarget).filter(Boolean); }
+  function applyAge(k, n) {
+    const s = ageTarget(k);
+    if (s && ADJUSTABLE.indexOf(k) >= 0) s.age = n;
+  }
+  function readAges() {
+    try { const j = JSON.parse(localStorage.getItem(K_AGE) || 'null'); return (j && typeof j === 'object') ? j : {}; } catch (e) { return {}; }
+  }
+  function writeAges(map) {
+    try { if (Object.keys(map).length) localStorage.setItem(K_AGE, JSON.stringify(map)); else localStorage.removeItem(K_AGE); } catch (e) {}
+  }
+  function goodAge(n) { return Number.isInteger(n) && n >= 1 && n <= 99; }
+  function ageOf(k) { const s = ageTarget(k); return s ? s.age : (DEF_AGE[k] != null ? DEF_AGE[k] : null); }
+  function defaultAge(k) { return DEF_AGE[k] != null ? DEF_AGE[k] : null; }
+  function isCustomAge(k) { return ageTarget(k) ? ageOf(k) !== DEF_AGE[k] : false; }
+  /* 재령 바꾸기 — { ok, msg }. 1~99 정수, 다른 분류와 겹치면 거부(OCR 판정이 갈려서) */
+  function setAge(k, n) {
+    if (!ageTarget(k)) return { ok: false, msg: '모르는 분류입니다' };
+    if (ADJUSTABLE.indexOf(k) < 0) return { ok: false, msg: '28일·큐브몰드 재령은 고정입니다' };
+    if (!goodAge(n)) return { ok: false, msg: '1~99 사이 정수여야 합니다' };
+    const clash = SPECS.find((s) => s.key !== k && s.age === n);
+    if (clash) return { ok: false, msg: clash.name + '이(가) 이미 ' + n + '일입니다 — 분류마다 재령이 달라야 합니다' };
+    applyAge(k, n);
+    const map = readAges();
+    if (n === DEF_AGE[k]) delete map[k]; else map[k] = n;
+    writeAges(map);
+    return { ok: true };
+  }
+  function resetAges() { ADJUSTABLE.forEach((k) => applyAge(k, DEF_AGE[k])); writeAges({}); }
+  function customAges() { const out = {}; Object.keys(DEF_AGE).forEach((k) => { if (isCustomAge(k)) out[k] = ageOf(k); }); return out; }
+  (function loadAges() {
+    const map = readAges();
+    Object.keys(map).forEach((k) => { const n = Number(map[k]); if (ADJUSTABLE.indexOf(k) >= 0 && goodAge(n)) applyAge(k, n); });
+  })();
+  /* 보고 날짜 규칙 — 수중·봉함(28일)·큐브몰드는 시험일, 수직·수평·필러는 타설일.
+     예전엔 age<=10 으로 갈랐는데 재령을 바꾸면(필러 14) 틀어지므로 분류로 판정한다 */
+  function byTestDay(k) { const s = byKey(k); return !!(s && (s.sub || s.legacy || s.key === CUBE.key)); }
+
   function byKey(k) {
     for (let i = 0; i < SPECS.length; i++) if (SPECS[i].key === k) return SPECS[i];
     if (k === CUBE.key) return CUBE;
@@ -3157,6 +3210,7 @@
   global.Spec = {
     SPECS: SPECS, SUBS: SUBS, byKey: byKey, subByKey: subByKey, hasSubs: hasSubs,
     CUBE: CUBE, forMode: forMode, modeOf: modeOf,
+    ageOf: ageOf, defaultAge: defaultAge, setAge: setAge, adjustable: adjustable, resetAges: resetAges, isCustomAge: isCustomAge, customAges: customAges, byTestDay: byTestDay,
     isHoliday: isHoliday, isSunday: isSunday,
     atMidnight: atMidnight, addDays: addDays, sameDay: sameDay,
     shiftToWorkday: shiftToWorkday, testDayOf: testDayOf,
@@ -3470,7 +3524,8 @@
   };
 
   /* ---------------- ① 일정표 → 작업 후보 ---------------- */
-  const AGE2SPEC = { 1: 'vert', 3: 'horiz', 10: 'filler', 28: 'd28' };
+  /* 재령 숫자 → 분류. 설정에서 바꾼 재령(Spec.setAge)을 그대로 따른다 — 하드코딩 금지 */
+  const specForAge = (n) => { const s = Spec.SPECS.find((x) => x.age === n); return s ? s.key : null; };
 
   function pad2(n) { return (n < 10 ? '0' : '') + n; }
 
@@ -3548,18 +3603,19 @@
         const n = Number(row.age);
         if (isFinite(n)) age = Math.round(n);
       }
-      if (age != null && !AGE2SPEC[age]) return;        // 재령이 적혀 있는데 모르는 값
+      if (age != null && !specForAge(age)) return;      // 재령이 적혀 있는데 모르는 값
 
       if (age == null) {
         // 재령 칸이 없는 양식(필러 실측) — 날짜 간격으로만 판정
         if (!testDay) return;
         const gap = Math.round((new Date(testDay) - new Date(castDay)) / 86400000);
-        if (gap === 0) age = 10;
-        else if (gap === 10 || gap === 11) age = 10;
-        else if (gap === 28 || gap === 29) age = 28;
+        const fA = Spec.ageOf('filler'), dA = Spec.ageOf('d28');
+        if (gap === 0) age = fA;
+        else if (gap === fA || gap === fA + 1) age = fA;
+        else if (gap === dA || gap === dA + 1) age = dA;
         else return;
       }
-      const specKey = AGE2SPEC[age];
+      const specKey = specForAge(age);
 
       let derived = false;
       if (!testDay || testDay === castDay) {
@@ -4596,7 +4652,7 @@
   function autoReportDay(t) {
     const s = Spec.byKey(t && t.specKey);
     if (!s) return '';
-    return (s.age <= 10) ? (t.castDay || '') : testDayOf(t);
+    return Spec.byTestDay(s.key) ? testDayOf(t) : (t.castDay || '');   // 재령을 바꿔도(필러 14) 규칙이 안 틀어지게 분류로 판정
   }
   function reportDayOf(t) {
     return (t && t.reportDay) ? t.reportDay : autoReportDay(t);
@@ -11578,6 +11634,7 @@
   /* 스위치 상태를 현재 설정에 맞춘다. 화면을 다시 그릴 때마다 부른다 —
      한 번만 맞춰 두면 다른 경로로 테마가 바뀌었을 때 스위치가 거짓말을 한다. */
   function syncSettings() {
+    const av = U.$('#opt-age-val'); if (av) av.textContent = ageSummary();
     const dark = U.$('#opt-dark');
     if (dark) dark.checked = (U.theme() === 'dark');
     const seg = U.$('#opt-jugu');
@@ -11722,9 +11779,46 @@
       });
   }
 
+  /* ---------------- 재령 설정(2026-09-28 사용자 지시) ----------------
+     분류별 재령을 바꾸면 Spec 이 localStorage 에 남기고 SPECS 를 제자리에서 바꿔, 플래너·타설일 역산·오늘 작업·검수·OCR 이 전부 따라간다.
+     이미 저장된 작업의 날짜는 안 건드린다(새로 만들 때의 기본값만). */
+  function ageSummary() {
+    const c = Spec.customAges();
+    const keys = Object.keys(c);
+    if (!keys.length) return '기본값';
+    return keys.map((k) => (Spec.byKey(k) || {}).name + ' ' + c[k] + '일').join(' · ');
+  }
+  function afterAgeChange() {
+    syncSettings();
+    renderTasks();
+    try { if (global.Tasks && Tasks.refresh) Tasks.refresh(); } catch (e) {}
+  }
+  function openAgeSheet() {
+    // 28일(수중·봉함)·큐브몰드는 고정(사용자 지시 「28일강도는 불변」) — 수직·수평·필러만 목록에 오른다
+    const items = Spec.adjustable().map((s) => ({
+      label: s.name + ' · ' + s.age + '일' + (Spec.isCustomAge(s.key) ? '  (기본 ' + Spec.defaultAge(s.key) + '일)' : ''),
+      onPick: () => {
+        const v = prompt(s.name + ' 재령(일) — 타설 후 며칠에 깨나요?', String(s.age));
+        if (v == null) { openAgeSheet(); return; }
+        const n = Number(String(v).trim());
+        const r = Spec.setAge(s.key, n);
+        if (!r.ok) { U.toast(r.msg); openAgeSheet(); return; }
+        U.toast(s.name + ' 재령을 ' + n + '일로 바꿨습니다 — 플래너·타설일 기본값이 따라갑니다', 3000);
+        afterAgeChange();
+        openAgeSheet();
+      }
+    }));
+    if (Object.keys(Spec.customAges()).length) {
+      items.push({ label: '기본값으로 되돌리기', cls: 'danger', onPick: () => { Spec.resetAges(); U.toast('재령을 기본값으로 되돌렸습니다'); afterAgeChange(); } });
+    }
+    U.sheet('재령 설정 (28일은 고정)', items);
+  }
+
   function bindSettings() {
     const bakRow = U.$('#opt-bak-row');
     if (bakRow) bakRow.addEventListener('click', openBackupSheet);
+    const ageRow = U.$('#opt-age-row');
+    if (ageRow) ageRow.addEventListener('click', openAgeSheet);
     // 안드로이드 크롬 PWA 설치(사용자 지시 — 안드로이드도 PWA 로). 브라우저가 설치 가능하다고 알리는
     // beforeinstallprompt 를 붙들어 뒀다가 설정 줄을 누르면 그때 설치창을 띄운다. 이벤트가 안 오면(이미 설치·
     // 네이티브 앱·아이폰) 줄 자체가 안 보인다.
