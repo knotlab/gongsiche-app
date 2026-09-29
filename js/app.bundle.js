@@ -7380,6 +7380,9 @@
   }
 
   /* mode 'records' = 기록서만(사진·강도값 파일 없이 시험 대장 xlsm 만 — 한 권이면 xlsm 그대로, 여러 권이면 「N월 D일 기록서.zip」, 2026-09-29 사용자 지시) */
+  /* 폴더 라벨(「9.29 수직」) 을 파일명 접두로 — '/' 는 폴더 구분자라 공백으로 */
+  const fileTag = (folder) => (String(folder || '').replace(/[\/]+/g, ' ').trim() + ' ');
+
   async function exportDayZip(rows, mode) {
     const recordsOnly = mode === 'records';
     U.toast(recordsOnly ? '기록서 만드는 중…' : '압축파일 만드는 중…', 60000);
@@ -7498,7 +7501,8 @@
           colsArr.push([c.sup || ''].concat(c.vals, [c.corr != null ? '보정평균 ' + U.fix2(c.corr) : '']));
         });
         const xlsx = Share.makeXlsx(heads, colsArr);
-        entries.push({ name: folder + '/강도값.xlsx', data: new Uint8Array(await xlsx.arrayBuffer()) });
+        // 파일명에 폴더 라벨(날짜·분류)을 붙인다 — 엑셀은 같은 이름의 파일 둘을 동시에 못 연다(사용자 지시 2026-09-29)
+        entries.push({ name: folder + '/' + fileTag(folder) + '강도값.xlsx', data: new Uint8Array(await xlsx.arrayBuffer()) });
       }
       // 폴더별 강도값.html — 엑셀 없이도 값·사진 확인과 복사가 되는 독립 페이지(사진만 있는 작업도 실린다)
       for (const folder of Object.keys(pages)) {
@@ -7523,7 +7527,7 @@
                               sets: c.blocks || c.sets.map((s) => ({ vals: s.vals })), pairs: pairs });
             }
             const bytes = await Record.buildBytes(kind, recCards);
-            const rec = { name: folder + '/' + Record.fileName(kind), data: bytes, kind: kind, folder: folder };
+            const rec = { name: folder + '/' + fileTag(folder) + Record.fileName(kind), data: bytes, kind: kind, folder: folder };   // 「9.29 수직 거푸집 탈형 …」 — 폴더가 달라도 파일명이 겹치면 엑셀이 둘째를 못 연다
             entries.push(rec); recEntries.push(rec);
           } catch (e) { console.warn('[zip] 기록서 실패', folder, e); recFail = true; }
         }
