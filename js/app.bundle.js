@@ -3474,6 +3474,10 @@
         (m, a, p, lab) => 'IF(U' + p + '&lt;&gt;"", U' + p + ' &amp; ' + lab + ', "")');
       xml = xml.split('" (수직)"').join('" (' + esc(o.label) + ')"');
     }
+    // 평균(*0.97) 수식 TRUNC((G11+…+G19)/9*0.97,11) 은 값이 9개(거푸집 3개) 미만이면 빈 칸을 0 으로 쳐서 평균이 틀린다(사용자 지적: 봉함 2개 → 6.79).
+    // 입력된 강도값(O열) 개수로 나누게 바꾼다. 값이 없는 블록은 0(showZeros=0 이라 안 보임 — 빈 문자열이면 판정 IF(J>=5) 가 "합격" 으로 새므로 숫자 0 이어야 한다)
+    xml = xml.replace(/TRUNC\(\(G(\d+)\+(?:G\d+\+)*G(\d+)\)\/\d+\*0\.97,(\d+)\)/g,
+      (m, a, b, d) => 'IF(COUNT(O' + a + ':O' + b + ')=0,0,TRUNC(SUM(G' + a + ':G' + b + ')/COUNT(O' + a + ':O' + b + ')*0.97,' + d + '))');
     if (K.testCell && o.test) {
       const serial = excelSerial(o.test);
       if (serial != null) xml = setCell(xml, K.testCell, '<v>' + serial + '</v>');
