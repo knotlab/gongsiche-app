@@ -3256,7 +3256,7 @@
    여기서는 템플릿의 XML 파트를 문자열로 손질해 시트 쌍(대장 + 사진대지)을 동마다 복제하고 Share.makeZip 으로 다시 담는다.
    · 대장: O열 강도값, C11 시험일(거푸집만 — 봉함은 수식), A열 라벨 접미 「 (수직)」→분류별, 시공사 칸(M열)에 서명 그림
    · 사진대지: 회차 i → 열 그룹 i, 전경=위 틀·판넬=아래 틀, JPEG 실제 비율로 틀 안에 가운데 맞춤
-   · 오른쪽 정보 블록(P~X열)은 작업에 적힌 것(업체·규격·물량·타설부위·타설일·시험일 — 플래너/OCR 이 잡는다)만 채우고 나머지는 비워 둔다 — 사용자가 엑셀에서 마저 채운다(수식이 왼쪽 상단을 채운다)
+   · 오른쪽 정보 블록(P~X열): 동·타설부위·타설일·시험일은 항상, 업체·규격·물량은 작업에 적힌 것만(플래너/OCR 이 잡는다) — 나머지는 사용자가 엑셀에서 채운다(수식이 왼쪽 상단을 채운다)
    외부 리소스 0(템플릿·서명은 tpl/ 에서 fetch 해 메모리 캐시). 실패는 던진다 — 호출부(tasks.exportDayZip)가 잡아 그 폴더 기록서만 뺀다. */
 (function (global) {
   'use strict';
@@ -3467,7 +3467,13 @@
   function patchMainSheet(xml, o) {
     const K = o.K;
     xml = commonSheet(xml, o);
-    if (K.label && o.label) xml = xml.split('" (수직)"').join('" (' + esc(o.label) + ')"');
+    if (K.label && o.label) {
+      // 원 양식의 탈형부위 라벨 수식 IF(AND(A13<>"",P2<>""),IF(A13=P2,U2&" (수직)",""),"") 은 업체(P)가 비면 라벨까지 통째로 비운다 —
+      // 시험 종류는 앱이 아는 것이라 라벨은 무조건 붙어야 한다(사용자 지시 2026-09-29): 타설위치(U)만 보게 IF(U2<>"",U2&" (대기)","") 로 바꾼다
+      xml = xml.replace(/IF\(AND\(A(\d+)&lt;&gt;"", P(\d+)&lt;&gt;""\), IF\(A\1=P\2, U\2 &amp; (" \([^"]*\)"), ""\), ""\)/g,
+        (m, a, p, lab) => 'IF(U' + p + '&lt;&gt;"", U' + p + ' &amp; ' + lab + ', "")');
+      xml = xml.split('" (수직)"').join('" (' + esc(o.label) + ')"');
+    }
     if (K.testCell && o.test) {
       const serial = excelSerial(o.test);
       if (serial != null) xml = setCell(xml, K.testCell, '<v>' + serial + '</v>');
@@ -3486,9 +3492,9 @@
       if (n) {
         signed.push(j);
         // 정보 블록(P~X열 2+j 행) — 작업에 적힌 것만(플래너/OCR 이 잡은 업체·규격·물량·타설부위). 비어 있으면 그대로 비워 사용자가 엑셀에서 채운다
+        // 앱이 아는 것(동·타설부위·타설일·시험일·28일)은 항상, 업체·규격·물량은 적혀 있을 때만 — 그래야 라벨(타설위치 + 접미)이 늘 찍힌다(사용자 지시)
         const info = o.info || {};
-        const hasInfo = ['vendor', 'mix', 'qty', 'part'].some((k) => info[k] && String(info[k]).trim());   // 하나도 없으면 정보 행은 통째로 비워 둔다(28일 상수도)
-        (hasInfo ? (K.info || []) : []).forEach(([col, key]) => {
+        (K.info || []).forEach(([col, key]) => {
           const ref = col + (2 + j);
           if (key === 'cast' || key === 'test') { const sn = info[key] ? excelSerial(info[key]) : null; if (sn != null) xml = setCell(xml, ref, '<v>' + sn + '</v>'); return; }
           if (key === 'qty') { const s = numStr(info.qty); if (s != null) xml = setCell(xml, ref, '<v>' + s + '</v>'); return; }
@@ -3555,7 +3561,7 @@
       const n = Math.max(1, Math.ceil(sets.length / per), Math.ceil(pairs.length / per));
       for (let c = 0; c < n; c++) {
         const name = c ? uniq(raw, base.sfx + ' (' + (c + 1) + ')').name : base.name;
-        out.push({ name: name, test: card.test || '', label: RECORD_LABEL[card.specKey] || '', info: card.info || null,
+        out.push({ name: name, test: card.test || '', label: RECORD_LABEL[card.specKey] || '', info: Object.assign({ dong: card.name || '', test: card.test || '' }, card.info || {}),
                    sets: sets.slice(c * per, c * per + per), pairs: pairs.slice(c * per, c * per + per) });
       }
     });
