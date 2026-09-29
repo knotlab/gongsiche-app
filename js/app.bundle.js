@@ -161,6 +161,91 @@
     sheet(title, [{ label: okLabel, cls: danger ? 'danger' : 'strong', onPick: onOk }], onCancel);
   }
 
+  /* ---- 다이얼 시트(2026-09-29) — 세로 휠 여러 개를 나란히 돌려 고른다(규격 KS 호칭 등) ----
+     columns: [{label, items:[값…], fmt?}]  current: 열마다 현재 값(없으면 첫 항목)
+     onOk(sel): 「확인」 — 열마다 고른 값 배열.  opts.extra: [{label, sub, onPick}] 휠 아래 추가 항목(「직접 입력」 등)
+     같은 #sheet-back·.sheet 를 쓰므로 뒤로가기(main.goBack → U.sheet.close)·배경 탭으로 닫힌다.
+     휠은 scroll-snap(항목 44px) — 위아래 빈 칸으로 첫/끝 항목도 가운데 온다. 가운데 강조선 .dial-line */
+  const DIAL_H = 44, DIAL_ROWS = 5;
+  function dialSheet(title, columns, current, onOk, opts) {
+    const back = $('#sheet-back'), box = $('#sheet');
+    box.innerHTML = '';
+    if (title) box.appendChild(el('div', 'sheet-title', title));
+    const row = el('div', 'dial-row');
+    const wheels = [];
+    const pad = DIAL_H * ((DIAL_ROWS - 1) / 2);
+    (columns || []).forEach((c, ci) => {
+      const col = el('div', 'dial-col');
+      if (c.label) col.appendChild(el('div', 'dial-lbl', c.label));
+      const wrap = el('div', 'dial-wrap');
+      const wheel = el('div', 'dial');
+      wheel.style.height = (DIAL_H * DIAL_ROWS) + 'px';
+      const spacer = () => { const d = el('div', 'dial-pad'); d.style.height = pad + 'px'; return d; };
+      wheel.appendChild(spacer());
+      const items = c.items || [];
+      const fmt = c.fmt || ((v) => (v === '' || v == null) ? '—' : String(v));
+      items.forEach((v) => wheel.appendChild(el('div', 'dial-item', fmt(v))));
+      wheel.appendChild(spacer());
+      wrap.appendChild(wheel);
+      wrap.appendChild(el('div', 'dial-line'));
+      col.appendChild(wrap);
+      row.appendChild(col);
+      let idx = items.indexOf(current && current[ci]);
+      if (idx < 0) idx = 0;
+      const w = { wheel: wheel, items: items, idx: idx };
+      const mark = () => {
+        const kids = wheel.querySelectorAll('.dial-item');
+        for (let i = 0; i < kids.length; i++) kids[i].classList.toggle('on', i === w.idx);
+      };
+      wheel.addEventListener('scroll', () => {
+        const i = Math.max(0, Math.min(items.length - 1, Math.round(wheel.scrollTop / DIAL_H)));
+        if (i !== w.idx) { w.idx = i; mark(); }
+      }, { passive: true });
+      // 항목을 직접 탭해도 그 자리로 돈다(휠을 살살 못 돌리는 장갑 손)
+      wheel.addEventListener('click', (e) => {
+        const it = e.target.closest ? e.target.closest('.dial-item') : null;
+        if (!it) return;
+        const kids = Array.prototype.slice.call(wheel.querySelectorAll('.dial-item'));
+        const i = kids.indexOf(it);
+        if (i >= 0) wheel.scrollTo({ top: i * DIAL_H, behavior: 'smooth' });
+      });
+      w.mark = mark;
+      wheels.push(w);
+    });
+    box.appendChild(row);
+
+    (opts && opts.extra || []).forEach((it) => {
+      const b = el('button', 'sheet-item ' + (it.cls || ''));
+      b.appendChild(document.createTextNode(it.label));
+      if (it.sub) b.appendChild(el('small', '', it.sub));
+      b.addEventListener('click', () => { close(); if (it.onPick) it.onPick(); });
+      box.appendChild(b);
+    });
+
+    const ok = el('button', 'sheet-item strong', (opts && opts.okLabel) || '확인');
+    ok.addEventListener('click', () => {
+      const sel = wheels.map((w) => w.items[w.idx]);
+      close();
+      if (onOk) onOk(sel);
+    });
+    box.appendChild(ok);
+    const cancel = el('button', 'sheet-item sheet-cancel', '취소');
+    cancel.addEventListener('click', () => { close(); if (opts && opts.onCancel) opts.onCancel(); });
+    box.appendChild(cancel);
+
+    back.classList.remove('hidden');
+    back.addEventListener('click', onBack);
+    // 보인 뒤에야 scrollTop 이 먹는다 — 현재 값 자리로 맞춘다
+    wheels.forEach((w) => { w.wheel.scrollTop = w.idx * DIAL_H; w.mark(); });
+    function onBack(e) { if (e.target === back) { close(); if (opts && opts.onCancel) opts.onCancel(); } }
+    function close() {
+      back.classList.add('hidden');
+      back.removeEventListener('click', onBack);
+      box.innerHTML = '';
+    }
+    sheet.close = close;   // 뒤로가기(main.goBack)가 이걸 부른다
+  }
+
   /* ---- 진동 ---- */
   function buzz(ms) {
     try { if (navigator.vibrate) navigator.vibrate(ms || 8); } catch (e) {}
@@ -457,7 +542,7 @@
     mode: mode, setMode: setMode, modeName: modeName,
     normQty: normQty,
     $: $, $$: $$, el: el, icon: icon,
-    toast: toast, sheet: sheet, confirmSheet: confirmSheet, buzz: buzz,
+    toast: toast, sheet: sheet, confirmSheet: confirmSheet, dialSheet: dialSheet, buzz: buzz,
     copyText: copyText,
     pad2: pad2, fix2: fix2,
     fmtBytes: fmtBytes,
@@ -478,7 +563,7 @@
    photos  : { id, full:Blob, thumb:Blob, w, h, createdAt }
    todos   : { id, day:'YYYY-MM-DD', text, done, order, createdAt, updatedAt }
    tasks   : { id, day:'YYYY-MM-DD'(작업일=목록에 뜨는 날), testDay(시험일=보고 표기),
-               specKey, castDay:'YYYY-MM-DD', dong, supervisor, supPhone, part(메모),
+               specKey, castDay:'YYYY-MM-DD', dong, supervisor, supPhone, place(타설부위, 동 포함), part(메모),
                photos:[photoId],
                sets:[{ id, name, values:[{v,d}], factor }],
                order, createdAt, updatedAt }
@@ -1044,7 +1129,8 @@
       dong: (t.dong || '').trim(),          // 동수 — 목록 제목이자 카톡 문구의 주어
       supervisor: (t.supervisor || '').trim(),
       supPhone: (t.supPhone || '').trim(),
-      part: (t.part || '').trim(),           // 타설부위 · 메모(순수 텍스트)
+      place: String(t.place || '').trim().slice(0, 80),   // 타설부위 — 동 포함 표기(「214동 옥탑」, Task.placeOf — 2026-09-29). 예전 작업은 빈 값
+      part: (t.part || '').trim(),           // 메모(순수 텍스트) — 옛 플래너가 부위를 여기 넣은 것도 그대로 둔다(이관 없음)
       // 규격·업체·물량(2026-09-29) — 전부 선택 입력, 주 경로는 플래너·일정표 OCR. 기록서 정보 블록의 원천
       mix: String(t.mix || '').trim().slice(0, 40),
       vendor: String(t.vendor || '').trim().slice(0, 40),
@@ -3503,7 +3589,10 @@
           if (key === 'cast' || key === 'test') { const sn = info[key] ? excelSerial(info[key]) : null; if (sn != null) xml = setCell(xml, ref, '<v>' + sn + '</v>'); return; }
           if (key === 'qty') { const s = numStr(info.qty); if (s != null) xml = setCell(xml, ref, '<v>' + s + '</v>'); return; }
           if (key === 'age') { xml = setCell(xml, ref, strCell('28일'), 'inlineStr'); return; }
-          const v = key === 'place' ? [info.dong, info.part].filter((x) => x && String(x).trim()).join(' ').trim() : (info[key] || '');
+          // 타설위치 = place(동 포함 — 메모는 안 싣는다). 업체 = **그 세트에 적은 회사 텍스트** 우선, 없으면 작업의 업체(사용자 지시 2026-09-29 — 세트마다 업체가 다르다)
+          const v = key === 'place' ? String(info.place || info.dong || '').trim()
+                  : key === 'vendor' ? (String((o.names || [])[j] || '').trim() || info.vendor || '')
+                  : (info[key] || '');
           if (v) xml = setCell(xml, ref, strCell(v), 'inlineStr');
         });
       }
@@ -3523,6 +3612,12 @@
     // <f> 본문도 XML 텍스트다 — 동을 직접 입력해 「A&B동」 처럼 & < > 가 들면 esc 없이는 파싱이 깨진다(definedNames 와 같은 처리, 감사 지적)
     xml = xml.split("'0'!").join(esc(qname(o.mainName)) + '!');
     xml = xml.replace(/shapeId="3073"/g, 'shapeId="' + (o.k * 1024 + 1) + '"').replace(/shapeId="3074"/g, 'shapeId="' + (o.k * 1024 + 2) + '"');
+    // 원 양식 5~8번째 틀(Q~AF열)엔 「2025.10.27」·「312동 4F 바닥」 이 글자로 박혀 있다(앞 4틀만 수식) — 앞 틀을 따르는 수식으로 바꿔 지저분한 잔재를 없앤다(사용자 지시 2026-09-29)
+    xml = setCell(xml, 'R3', '<f>B3</f>', 'str');
+    xml = setCell(xml, 'T3', '<f>D3</f>', 'str');
+    xml = setCell(xml, 'R4', '<f>B4</f>', 'str');
+    // 사진대지의 수식 캐시값(<v>)은 전부 버린다 — 잔재 문자열이 캐시로 남아 재계산 전 뷰어에 보이지 않게(fullCalcOnLoad 로 열 때 다시 계산)
+    xml = xml.replace(/(<f[^>]*>[^<]*<\/f>)<v>[^<]*<\/v>/g, (m, f1) => f1);
     return xml;
   }
   function patchDrawing(xml, k, anchors) {
@@ -3559,13 +3654,14 @@
     const per = K.blocks.length;
     (cards || []).forEach((card) => {
       const sets = (card.sets || []).map((s) => (s.vals || s.values || []).map((v) => (v && typeof v === 'object') ? v.v : v));
+      const names = (card.sets || []).map((s) => String((s && s.name) || '').trim());   // 세트에 적은 회사 텍스트 → 블록별 업체(완성본 211동처럼 P2·P3 가 다른 업체)
       const pairs = (card.pairs || []).map((p) => (p.photos || []).filter((b) => b && b.length));
       const raw = sheetName(card.name);
       const base = uniq(raw, '');   // 같은 동이 또 오면 「214 (2)」 — 분할 접미는 그 위에 붙는다(「214 (2) (2)」)
       const n = Math.max(1, Math.ceil(sets.length / per), Math.ceil(pairs.length / per));
       for (let c = 0; c < n; c++) {
         const name = c ? uniq(raw, base.sfx + ' (' + (c + 1) + ')').name : base.name;
-        out.push({ name: name, test: card.test || '', label: RECORD_LABEL[card.specKey] || '', info: Object.assign({ dong: card.name || '', test: card.test || '' }, card.info || {}),
+        out.push({ name: name, test: card.test || '', label: RECORD_LABEL[card.specKey] || '', info: Object.assign({ dong: card.name || '', test: card.test || '' }, card.info || {}), names: names.slice(c * per, c * per + per),
                    sets: sets.slice(c * per, c * per + per), pairs: pairs.slice(c * per, c * per + per) });
       }
     });
@@ -3617,7 +3713,7 @@
 
       // ---- 대장 ----
       const mainDrawNo = drawN + 1;   // 서명이 붙을 때만 실제로 쓴다
-      const pm = patchMainSheet(T.main, { K: K, label: sh.label, test: sh.test, sets: sh.sets, info: sh.info, first: i === 0, codeName: codes[0], drawingRid: 'rId2' });
+      const pm = patchMainSheet(T.main, { K: K, label: sh.label, test: sh.test, sets: sh.sets, names: sh.names, info: sh.info, first: i === 0, codeName: codes[0], drawingRid: 'rId2' });
       put('xl/worksheets/sheet' + mainNo + '.xml', pm.xml);
       put('xl/printerSettings/printerSettings' + mainNo + '.bin', T.ps[0]);
       let mainRels = T.mainRels.replace(/printerSettings\d+\.bin/, 'printerSettings' + mainNo + '.bin');
@@ -4060,7 +4156,7 @@
       '- dong: 그 행의 동수 — 적힌 그대로. 숫자동 뒤 A/B 글자, "특화동"·"(특화동)" 표기,',
       '  "209,210동"처럼 여러 동이 나열된 것도 그대로 담아라.',
       '  "A9"·"B2" 같은 블록명도 동으로 취급해라.',
-      '- part: 부위 — 제목칸에서 동 표기를 뺀 나머지(예: "2PH1 벽체", "15F 벽체", "필로티").',
+      '- part: 부위 — 제목칸 원문에서 동 표기를 뺀 나머지(예: "옥탑", "15F 벽체", "옥탑 및 214동 ph2"). 다른 동이 부위 안에 또 나와도 그대로 담아라.',
       '- mix: 규격/배합 표기 — "25-30-180" 또는 "25-30-180(초유지)" 처럼 적힌 그대로. 없으면 null.',
       '- vendor: 레미콘 업체명 — 회사명 그대로(예 "(주)삼표산업(서부)"). 없으면 null.',
       '- qty: 타설물량 — ㎥ 단위 표기는 빼고 숫자만(예 "198㎥" → 198). 없으면 null.',
@@ -4143,7 +4239,8 @@
     };
   }
 
-  /* rows(구조화 JSON) → { dong,dongMain,specKey,age,castDay,testDay,derived,offAge,hasSpecial,mix,vendor,qty }[] */
+  /* rows(구조화 JSON) → { dong,dongMain,place,specKey,age,castDay,testDay,derived,offAge,hasSpecial,mix,vendor,qty }[]
+     dong = 대표 동(첫 동), place = 타설부위(여러 동이면 전체 나열, 단일이면 동 그대로) */
   function scheduleItems(rows) {
     const out = [];
     const seen = Object.create(null);
@@ -4192,21 +4289,24 @@
       if (!ex.list.length) return;
       const dongMain = ex.list[0];                       // 담당 감리는 첫 동 기준(사용자 지시)
       const special = ex.special || !!row.special;
-      let dong, hasSpecial = false;
+      let dong, place, hasSpecial = false;
       if (ex.list.length === 1) {
         dong = special ? (dongMain + ' 특화동') : dongMain;
+        place = dong;
       } else {
-        dong = ex.list.join(', ');
+        // 여러 동 = 앞에 적힌 동이 대표(2026-09-29 사용자 지시): dong 은 첫 동, 타설부위(place)에 전체 나열을 남긴다
+        dong = dongMain;
+        place = Task.placeOf(dongMain, ex.list.join(', ') + (special ? ' 특화동' : ''));
         // 다중동 행에 특화동이 섞이면 어느 동인지 확정할 수 없다 — 자동 배정을 막고
         // 미리보기에서 사람이 잡게 표식만 남긴다(본동 감리로 잘못 배정되던 구멍).
         if (special) hasSpecial = true;
       }
 
-      const key = dong + '|' + specKey + '|' + castDay + '|' + testDay;
+      const key = place + '|' + specKey + '|' + castDay + '|' + testDay;   // 중복 접기는 전체 동 나열 기준(예전 dong 과 같은 뜻)
       if (seen[key]) return;                              // 같은 것이 여러 행이면 하나만
       seen[key] = 1;
       const x = extras(row);
-      out.push({ dong: dong, dongMain: dongMain, specKey: specKey, age: age,
+      out.push({ dong: dong, dongMain: dongMain, place: place, specKey: specKey, age: age,
                  castDay: castDay, testDay: testDay,
                  derived: derived, offAge: offAge, hasSpecial: hasSpecial,
                  mix: x.mix, vendor: x.vendor, qty: x.qty });
@@ -4270,16 +4370,27 @@
       if (!row) return;
       const combined = ((row.dong || '') + ' ' + (row.part || '')).replace(/\s+/g, ' ').trim();
       const ex = extractDong(combined);
-      const dong = buildDongStr(ex);
-      if (!dong) return;
-      const part = ex.rest.replace(/^[\s·,，\-]+|[\s·,，\-]+$/g, '').slice(0, 40);
+      const dongs = buildDongStr(ex);                     // 정규화된 동 나열(「209동, 210동」·「215동 특화동」)
+      if (!dongs) return;
+      // 여러 동 = 앞에 적힌 동이 대표(2026-09-29 사용자 지시): dong 은 첫 동(특화동·A/B 접미는 첫 동의 일부라 유지),
+      // place(타설부위) 는 원문 전체 정리본에 대표 동을 접두 — 「205동 옥탑 및 214동 ph2」·「209동, 210동 옥탑」
+      const dong = (ex.list.length === 1) ? dongs : ex.list[0];
+      let rest = ex.rest.replace(/^[\s·,，\-]+|[\s·,，\-]+$/g, '');
+      // 모델이 part 칸에도 동을 한 번 더 적어 오면(dong「205동」+part「205동 옥탑 …」) 합친 원문 앞머리에 같은 동이 두 번 선다
+      // → 앞머리에 선 「같은 동 나열」만 걷어낸다(감사 지적 2026-09-29). 다른 동이 앞에 오면(「214동 ph2 및 …」) 원문 그대로
+      for (let n = 0; n < 3 && /^(?:\d{2,3}|[A-Ba-b]-?\d)/.test(rest); n++) {
+        const ex2 = extractDong(rest);
+        if (buildDongStr(ex2) !== dongs || rest.slice(rest.length - ex2.rest.length) !== ex2.rest) break;   // 앞머리(= 나머지가 접미) 가 아니면 손대지 않음
+        rest = ex2.rest.replace(/^[\s·,，\-]+/, '');
+      }
+      const place = Task.placeOf(dong, (dongs + ' ' + rest).trim()).slice(0, 80);
       const sup = String(row.sup || '').trim();
 
-      const key = dong + '|' + sup;
+      const key = place + '|' + sup;   // 대표 동만 보면 같은 감리의 「209동 옥탑」·「209, 210동 지하」 행이 접힌다(감사 지적) — scheduleItems 와 같이 place 기준
       if (seen[key]) return;
       seen[key] = 1;
       const x = extras(row);
-      items.push({ dong: dong, sup: sup, part: part, mix: x.mix, vendor: x.vendor, qty: x.qty });
+      items.push({ dong: dong, sup: sup, place: place, mix: x.mix, vendor: x.vendor, qty: x.qty });
     });
 
     return items;
@@ -5071,10 +5182,41 @@
       id: null, day: day, testDay: day, specKey: key, dong: '',
       jugu: U.jugu(),                  // 만들 때의 주구가 이 작업의 소속이다
       castDay: defaultCast(key, day),
-      supervisor: '', part: '', mix: '', vendor: '', qty: '',   // part=타설부위·메모, mix=규격, vendor=업체, qty=물량(㎥)
+      supervisor: '', place: '', part: '', mix: '', vendor: '', qty: '',   // place=타설부위(동 포함), part=메모, mix=규격, vendor=업체, qty=물량(㎥)
       photos: [], values: [],
       factor: (Spec.byKey(key) && Spec.byKey(key).factor) || Calc.DEFAULT_FACTOR
     };
+  }
+
+  /* 타설부위 표기(2026-09-29 사용자 지시) — 부위는 **동을 한 번 더 앞에 쓴다**: 동 「214동」+ 「옥탑」 → 「214동 옥탑」.
+     여러 동을 같이 타설하면 앞에 적힌 동이 대표라 dong 은 첫 동, place 는 원문 전체(「205동 옥탑 및 214동 ph2」).
+     text 가 비면 동만, 이미 동으로 시작하면 그대로, 동이 비면 text 그대로. 편집기·플래너·OCR·기록서가 전부 이 한 곳을 거친다. */
+  /* text 가 동 d 로 시작하는가 — 낱말 경계까지 본다(「214동」 은 「214동B 옥탑」 의 접두가 아니다, 감사 지적) */
+  function startsWithDong(t, d) {
+    if (!d || t.indexOf(d) !== 0) return false;
+    const rest = t.slice(d.length);
+    return rest === '' || /^[\s,，·]/.test(rest);
+  }
+
+  function placeOf(dong, text) {
+    const d = String(dong || '').trim();
+    const t = String(text || '').replace(/\s+/g, ' ').trim();
+    if (!d) return t;
+    if (!t) return d;
+    if (startsWithDong(t, d)) return t;
+    return d + ' ' + t;
+  }
+
+  /* 목록·문구용 부위 요약 — place 에서 제목(동수)과 겹치는 대표 동 접두를 걷어낸 나머지.
+     「214동 옥탑」(dong 214동) → 「옥탑」, 「205동 옥탑 및 214동 ph2」 → 「옥탑 및 214동 ph2」, 동만(「214동」) → ''(제목이 이미 동).
+     접두가 안 맞으면(옛 데이터·직접 입력) place 그대로. 메모(part)는 별개라 호출부가 따로 붙인다(라운드 3 감사 — 플래너가
+     부위를 place 에 넣게 되면서 홈·작업탭·카톡 제목·AI 컨텍스트에서 부위가 사라졌던 회귀). */
+  function placeBrief(t) {
+    const place = String((t && t.place) || '').replace(/\s+/g, ' ').trim();
+    if (!place) return '';
+    const d = String((t && t.dong) || '').trim();
+    if (d && startsWithDong(place, d)) return place.slice(d.length).replace(/^[\s,，·]+/, '').trim();
+    return place;
   }
 
   /* 실제 재령(타설일 → 시험일 일수). 휴일 이월이나 조기 시험 때문에 표준과 다를 수 있다. */
@@ -5163,7 +5305,9 @@
     const s = Spec.byKey(t.specKey);
     const bits = [];
     bits.push('[' + (s ? s.name : '분류없음') + ']');
-    if (t.part) bits.push(t.part);
+    const pb = placeBrief(t);
+    if (pb) bits.push(pb);          // 타설부위(동 접두 제외)
+    if (t.part) bits.push(t.part);  // 메모
     const all = allSets(t);
     all.forEach((p, i) => {
       const st = setStats(p.set);
@@ -5386,7 +5530,7 @@
   global.Task = {
     today: today, list: list, mine: mine, get: get, save: save, remove: remove,
     isDone: isDone, counts: counts, draft: draft, defaultCast: defaultCast,
-    testDayOf: testDayOf, dongText: dongText, dongOf: dongOf, juguOf: juguOf,
+    testDayOf: testDayOf, dongText: dongText, dongOf: dongOf, juguOf: juguOf, placeOf: placeOf, placeBrief: placeBrief,
     hasSubs: hasSubs, subOf: subOf, subPhotos: subPhotos, pieces: pieces,
     pendingSubs: pendingSubs, doneNote: doneNote,
     setsOf: setsOf, allSets: allSets, setName: setName, setStats: setStats,
@@ -6498,7 +6642,7 @@
     const q = searchQ.trim().toLowerCase();
     if (!q) return rows;
     return rows.filter((t) => {
-      const s = (t.dong || '') + ' ' + (t.part || '') + ' ' +
+      const s = (t.dong || '') + ' ' + (t.place || '') + ' ' + (t.part || '') + ' ' +
                 (t.supervisor || '') + ' ' + Task.label(t);
       return s.toLowerCase().indexOf(q) >= 0;
     });
@@ -6741,7 +6885,9 @@
 
     // 사진 장수·계산값은 여기 안 적는다(사용자 지시)
     const meta = [];
-    if (t.part) meta.push(t.part);
+    const pb = Task.placeBrief(t);
+    if (pb) meta.push(pb);          // 타설부위(동 접두는 제목과 겹쳐 뺌)
+    if (t.part) meta.push(t.part);  // 메모
     if (t.castDay) meta.push('타설 ' + Spec.shortDate(new Date(t.castDay + 'T00:00:00')));
     body.appendChild(U.el('div', 'task-meta', meta.join(' · ')));
     row.appendChild(body);
@@ -7292,10 +7438,10 @@
           // 강도값.html 카드 — 세트 열 + 회차별 사진(썸네일은 data URI 로 심어 압축을 안 풀어도 보인다, 크게 보기는 같은 폴더의 원본)
           const card = { dong: base, sup: supText(t), cast: t.castDay || '', test: Task.testDayOf(t) || '', specKey: pc.key, sets: [], pairs: [],
                          // 기록서 정보 블록(업체·규격·물량·타설부위 — 플래너/OCR 이 잡아 둔 것). 없으면 기록서엔 빈 칸으로 남는다
-                         info: { vendor: t.vendor || '', mix: t.mix || '', qty: t.qty || '', part: t.part || '', dong: Task.dongOf(t) || '', cast: t.castDay || '', test: Task.testDayOf(t) || '' },
+                         info: { vendor: t.vendor || '', mix: t.mix || '', qty: t.qty || '', place: t.place || Task.placeOf(Task.dongOf(t), ''), dong: Task.dongOf(t) || '', cast: t.castDay || '', test: Task.testDayOf(t) || '' },   // place=타설위치(동 포함, 비면 동만) — 메모(part)는 안 싣는다
                          // 기록서 대장 블록용 — **세트 순서 그대로(빈 세트 포함)**. 봉함은 블록 j ↔ 회차 j(pairsOf 가 빈 세트도 회차로 센다)라
                          // 값 든 것만 추린 card.sets 를 쓰면 값과 사진이 다른 회차에 실린다(감사 지적). 빈 블록은 record.js 가 값·서명 없이 둔다
-                         blocks: allSets.map((s) => ({ vals: (s.values || []).map((v) => v.v) })) };
+                         blocks: allSets.map((s) => ({ vals: (s.values || []).map((v) => v.v), name: String(s.name || '').trim() })) };   // name = 세트의 회사 텍스트 → 기록서 블록 업체
 
           if (ids.length) {
             let photos = [];
@@ -7554,7 +7700,7 @@
   function hasSubstance() {
     if (!tk) return false;
     if (tk.id) return true;
-    if ((tk.dong || "").trim() || (tk.part || "").trim()) return true;
+    if ((tk.dong || "").trim() || (tk.place || "").trim() || (tk.part || "").trim()) return true;   // 타설부위·메모도 내용
     if ((tk.mix || "").trim() || (tk.vendor || "").trim() || (tk.qty || "").trim()) return true;   // 규격·업체·물량도 내용이다
     if (photoIdsOf(tk).length) return true;
     try { if (Task.filledSets(tk).length) return true; } catch (e) {}
@@ -7586,6 +7732,8 @@
   const planNames = (mode) => ((mode || U.mode()) === 'bang' ? PLAN_NAMES_BANG : PLAN_NAMES);
   const plAllSpecs = (mode) => planNames(mode).map((n) => n.key);
   const plMine = () => plBuf.filter((it) => (it.mode || 'spec') === U.mode());
+  /* 대기 항목의 타설부위 — 예전 버퍼(영속)엔 part 로 담겨 있어 그것도 동 접두 규칙으로 읽는다 */
+  const plPlace = (it) => it.place || Task.placeOf(it.dong, it.part || '');
   let plDong = '', plSup = '', plPhone = '';
   let plBuf = [];
   /* 플래너 「올린 묶음」에서 작업·방통을 열면 플래너를 잠시 닫고(둘 다 오버레이라 겹친다), 그 화면이 닫힐 때 플래너로 돌아온다 */
@@ -7623,6 +7771,8 @@
     const dt = $('#plan-dong-txt'), st = $('#plan-sup-txt');
     if (dt) { dt.textContent = plDong || '동 선택'; dt.classList.toggle('ph', !plDong); }
     if (st) { st.textContent = plSup || '감리 선택'; st.classList.toggle('ph', !plSup); }
+    // 타설부위는 동을 앞에 한 번 더 쓴다(Task.placeOf) — 칸이 비어 있으면 동수를 흐린 글씨로만 보여 준다(값은 안 넣음)
+    const pp = $('#plan-part'); if (pp) pp.placeholder = plDong || '';
   }
 
   /* 동·감리 픽커 — 싱크는 빈 칸일 때만(전 화면 공통 규칙), 직접 입력 지원 */
@@ -7679,13 +7829,16 @@
     return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : U.dayKey(Date.now());
   }
 
+  /* 부제·방통 메모용 — place 에서 대표 동 접두를 뺀 부위 텍스트(제목이 이미 동이라 두 번 안 보이게) */
+  function plBrief(it) { return Task.placeBrief({ dong: it.dong, place: plPlace(it) }); }
+
   function planAdd() {
     if (!plDong) { U.toast('동을 먼저 고르세요'); return; }
     plBuf.push({
       id: U.uid(), mode: U.mode(), castDay: planCastDay(), dong: plDong,
       supervisor: plSup, supPhone: plPhone,
       floor: ($('#plan-floor') ? $('#plan-floor').value.replace(/\D/g, '').slice(0, 3) : ''),   // 방통 모드: 층(선택)
-      part: ($('#plan-part') ? $('#plan-part').value.trim() : ''),   // 타설부위
+      place: Task.placeOf(plDong, $('#plan-part') ? $('#plan-part').value : ''),   // 타설부위(동 포함 — 「214동 옥탑」, 2026-09-29). 메모(part)는 플래너에 없다
       // 규격·업체·물량(선택, 2026-09-29) — 올린 작업 전부에 실린다
       mix: ($('#plan-mix') ? $('#plan-mix').value.trim().slice(0, 40) : ''),
       vendor: ($('#plan-vendor') ? $('#plan-vendor').value.trim().slice(0, 40) : ''),
@@ -7718,7 +7871,7 @@
       const card = U.el('div', 'bang-saved-item');
       const main = U.el('div', 'bang-si-main');
       main.appendChild(U.el('span', 'bang-si-sup', it.dong));
-      const sub = [it.supervisor || '감리 미지정', Spec.md(it.castDay) + ' 타설', it.floor ? it.floor + '층' : '', it.part || '',
+      const sub = [it.supervisor || '감리 미지정', Spec.md(it.castDay) + ' 타설', it.floor ? it.floor + '층' : '', plBrief(it),
         it.mix || '', it.vendor || '', it.qty ? it.qty + '㎥' : '']   // 있으면 「규격 · 업체 · N㎥」 덧붙임
         .filter(Boolean).join(' · ');
       main.appendChild(U.el('span', 'bang-si-sub', sub));
@@ -7785,7 +7938,7 @@
       else { g.bangs.push(rec); g.castDay = g.castDay || rec.day || ''; }
       g.dong = g.dong || (rec.dong || '');
       g.sup = g.sup || (rec.supervisor || '');
-      g.part = g.part || (kind === 'task' ? (rec.part || '') : (rec.memo || ''));
+      g.part = g.part || (kind === 'task' ? (rec.place || rec.part || '') : (rec.memo || ''));   // 옛 플래너 작업은 부위가 part 에 있다(이관 없음) — 폴백   // 부위 표시 = 작업은 place(동 포함), 방통은 memo(부위 텍스트)
     };
     tasks.forEach((t) => put(Task.batchKey(t), t, 'task'));
     bangs.forEach((b) => put(Task.batchKeyBang(b), b, 'bang'));
@@ -7864,7 +8017,7 @@
         if (bangs.some((b) => dk(b.dong) === dk(it.dong) && b.day === it.castDay)) skip++;
         else {
           try {
-            await Store.putBang({ day: it.castDay, dong: it.dong, floor: it.floor || '', memo: it.part || '',
+            await Store.putBang({ day: it.castDay, dong: it.dong, floor: it.floor || '', memo: plBrief(it),   // 방통 화면은 메모 한 칸뿐 — 부위 텍스트를 거기 싣는다
               supervisor: it.supervisor || '', supPhone: it.supPhone || '', jugu: U.jugu(),
               photos: [], w: null, s1: null, s2: null, planId: planId });
             ok++;
@@ -7878,7 +8031,7 @@
           try {
             await Store.putTask({ day: testDay, testDay: testDay, specKey: 'cube', castDay: it.castDay,
               dong: it.dong, jugu: U.jugu(), supervisor: it.supervisor || '', supPhone: it.supPhone || '',
-              part: it.part || '', mix: it.mix || '', vendor: it.vendor || '', qty: it.qty || '',
+              place: plPlace(it), part: '', mix: it.mix || '', vendor: it.vendor || '', qty: it.qty || '',   // 타설부위(동 포함)·메모 없음
               photos: [], sets: [], planId: planId });
             ok++;
           } catch (e) { console.error('[planner cube]', e); }
@@ -7904,7 +8057,7 @@
           day: p.testDay, testDay: p.testDay, specKey: p.spec.key, castDay: it.castDay,
           dong: it.dong, jugu: U.jugu(),
           supervisor: it.supervisor || '', supPhone: it.supPhone || '',
-          part: it.part || '', mix: it.mix || '', vendor: it.vendor || '', qty: it.qty || '',
+          place: plPlace(it), part: '', mix: it.mix || '', vendor: it.vendor || '', qty: it.qty || '',   // 타설부위(동 포함)·메모 없음
           photos: [], sets: [], planId: planId
         });
         ok++;
@@ -7980,7 +8133,7 @@
         id: U.uid(), castDay: castDay, dong: it.dong,
         supervisor: c ? Contacts.label(c) : (it.sup || ''),
         supPhone: c ? (c.phone || '') : '',
-        part: it.part || '',
+        place: it.place || Task.placeOf(it.dong, ''),   // 계획표 원문 전체(대표 동 접두 — 「205동 옥탑 및 214동 ph2」)
         mix: it.mix || '', vendor: it.vendor || '', qty: it.qty || '',   // 계획표의 규격·업체·물량(OCR)
         specs: plAllSpecs()
       });
@@ -7998,6 +8151,7 @@
     on('#plan-add', planAdd);
     on('#plan-up-all', uploadPlanAll);
     on('#plan-ocr', planScan);
+    bindMixDial('#plan-mix');
   }
 
   /* 내보내기 성공 뒤 「사진」 체크 표시 제안(사용자 지시) — 보낸 작업을 목록에서 표시로 구분한다.
@@ -8017,6 +8171,43 @@
         refreshLists();
         U.toast('사진 체크를 표시했습니다');
       });
+  }
+
+  /* ---------------- 규격 KS 다이얼(2026-09-29 사용자 지시 「KS 에서 선택, 기본값 25-30-180 흐린 글씨, 다이얼 돌려서」) ----------------
+     KS F 4009 레미콘 호칭 = 굵은골재 최대치수 - 호칭강도 - 슬럼프 (+ 구분). 편집기 #tk-mix·플래너 #plan-mix 가 같은 시트를 쓴다.
+     칸은 readonly(키보드 안 뜸) — 탭하면 U.dialSheet, 「직접 입력」 은 prompt. 파싱 안 되는 값(자유 입력)은 기본 위치 */
+  const MIX_COLS = [
+    { label: '골재', items: [20, 25, 40], def: 25 },
+    { label: '강도', items: [18, 21, 24, 27, 30, 35, 40, 45, 50], def: 30 },
+    { label: '슬럼프', items: [80, 100, 120, 150, 180, 210], def: 180 },
+    { label: '구분', items: ['', '표준', '초유지', '무근', '저수축', '고강도'], def: '' }   // 현장 완성본에 실제로 있던 표기
+  ];
+  function parseMix(v) {
+    const m = /^(\d+)\s*-\s*(\d+)\s*-\s*(\d+)\s*(?:\(\s*([^)]*?)\s*\))?$/.exec(String(v || '').trim());
+    const got = m ? [+m[1], +m[2], +m[3], m[4] || ''] : [];
+    return MIX_COLS.map((c, i) => (m && c.items.indexOf(got[i]) >= 0) ? got[i] : c.def);
+  }
+  function mixText(sel) { return sel[0] + '-' + sel[1] + '-' + sel[2] + (sel[3] ? '(' + sel[3] + ')' : ''); }
+  function openMixDial(inp, onDone) {
+    const cur = parseMix(inp.value);
+    U.dialSheet('규격 (KS 레미콘 호칭)', MIX_COLS, cur, (sel) => {
+      inp.value = mixText(sel);
+      if (onDone) onDone();
+    }, { extra: [{ label: '직접 입력', sub: '목록에 없는 표기', onPick: () => {
+      const v = prompt('규격 (예: 25-30-180)', inp.value || '');
+      if (v === null) return;
+      inp.value = v.trim().slice(0, 40);
+      if (onDone) onDone();
+    } }] });
+  }
+  function bindMixDial(sel) {
+    const inp = $(sel);
+    if (!inp) return;
+    inp.readOnly = true;
+    inp.classList.add('dial-in');
+    const openIt = () => { inp.blur(); openMixDial(inp, () => { if (sel === '#tk-mix') markDirty(); }); };   // 포커스를 빼야 Esc(뒤로가기)가 시트를 닫는다(입력창 안 ESC 는 무시 규칙)
+    inp.addEventListener('click', openIt);
+    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openIt(); } });
   }
 
   /* ---------------- 열기 ---------------- */
@@ -8048,7 +8239,8 @@
     renderSpecs();
     $('#tk-cast').value = tk.castDay || '';
     $('#tk-day').value = Task.testDayOf(tk);
-    $('#tk-part').value = tk.part || '';
+    if ($('#tk-place')) $('#tk-place').value = tk.place || '';   // 타설부위(동 포함) — placeholder 는 renderDong 이 동수로
+    $('#tk-part').value = tk.part || '';   // 메모
     // 규격·업체·물량(선택, 2026-09-29)
     if ($('#tk-mix')) $('#tk-mix').value = tk.mix || '';
     if ($('#tk-vendor')) $('#tk-vendor').value = tk.vendor || '';
@@ -8249,6 +8441,7 @@
     if (!el || !tk) return;
     el.textContent = tk.dong || '동 선택';
     el.classList.toggle('ph', !tk.dong);
+    const pl = $('#tk-place'); if (pl) pl.placeholder = tk.dong || '';   // 부위 칸이 비면 동수를 흐린 글씨로(저장 땐 collect 가 동을 접두)
   }
 
   /* 추천 칩 — 후보를 그 자리에 늘어놓고 누르면 바로 붙는다.
@@ -8278,7 +8471,9 @@
      이미 감리가 있으면 동만 바꿔도 감리를 안 건드린다 — 커스텀 짝(다른 동 감리에게 보고 등)을 허용. */
   function pickDong(dong) {
     if (!tk) return;
+    const prev = (tk.dong || '').trim();
     tk.dong = dong || '';
+    swapPlaceDong(prev, tk.dong);
     markDirty();
     renderDong();
     renderReport();
@@ -8293,6 +8488,17 @@
       chips($('#tk-sup-hint'), '담당 감리',
         sups.map((c) => ({ label: Contacts.label(c), onPick: () => pickSup(c, true) })));
     }
+  }
+
+  /* 동을 바꾸면 타설부위의 접두도 따라간다 — 비어 있으면 그대로(placeholder·collect 가 새 동을 붙인다),
+     「옛 동」 또는 「옛 동 …」 으로 시작하면 그 자리만 새 동으로 갈아 끼운다(사용자가 쓴 나머지 텍스트 유지) */
+  function swapPlaceDong(prev, next) {
+    const inp = $('#tk-place');
+    if (!inp) return;
+    const v = inp.value.trim();
+    if (!v || !prev) return;
+    if (v !== prev && v.indexOf(prev + ' ') !== 0) return;
+    inp.value = (next + v.slice(prev.length)).trim();
   }
 
   function openDongPicker() {
@@ -8564,7 +8770,9 @@
     if (!set) { U.toast('세트를 찾지 못했습니다'); return; }
 
     const bits = [Task.label(rec) + (sub ? (' ' + (Spec.subByKey(sub)||{}).name) : '')];
-    if (rec.part) bits.push(rec.part);
+    const pb = Task.placeBrief(rec);
+    if (pb) bits.push(pb);            // 타설부위(동 접두 제외)
+    if (rec.part) bits.push(rec.part);   // 메모
     if (sets.length > 1) bits.push(Task.setName(set, idx));
 
     Nav.showTask(false);
@@ -8878,7 +9086,8 @@
     tk.testDay = $('#tk-day').value || Task.testDayOf(tk);
     const wd = $('#tk-workday');
     if (wd && wd.value) tk.day = wd.value;
-    tk.part = $('#tk-part').value.trim();   // 타설부위 · 메모(순수 텍스트)
+    if ($('#tk-place')) tk.place = Task.placeOf(tk.dong, $('#tk-place').value);   // 타설부위 — 저장 때 대표 동 접두 보장(「옥탑」→「214동 옥탑」)
+    tk.part = $('#tk-part').value.trim();   // 메모(순수 텍스트)
     // 규격·업체·물량 — 선택 입력. 물량은 숫자·점만 남긴다
     if ($('#tk-mix')) tk.mix = $('#tk-mix').value.trim().slice(0, 40);
     if ($('#tk-vendor')) tk.vendor = $('#tk-vendor').value.trim().slice(0, 40);
@@ -9016,7 +9225,7 @@
     if (copyTitle) { try { copied = await U.copyText(title); } catch (e) {} }
 
     // 파일명도 보고 날짜 기준 — 목록 날짜(day)와 다를 수 있다
-    const base = U.safeName((rec.part || Task.label(rec)), '공시체') + '_' +
+    const base = U.safeName((Task.placeBrief(rec) || rec.part || Task.label(rec)), '공시체') + '_' +
                  (Task.reportDayOf(rec) || rec.day || '').replace(/-/g, '');
     let how = 'download';
     try {
@@ -9045,6 +9254,8 @@
     $('#tk-export').addEventListener('click', () => { exportTask(); });
 
     $('#tk-part').addEventListener('input', () => { markDirty(); });
+    if ($('#tk-place')) $('#tk-place').addEventListener('input', () => { markDirty(); });
+    bindMixDial('#tk-mix');   // 규격은 KS 다이얼(탭 → 시트)
     // 규격·업체·물량 — 타이핑마다 자동저장 대기(값은 collect 가 읽는다)
     ['#tk-mix', '#tk-vendor', '#tk-qty'].forEach((id) => {
       const el = $(id);
@@ -9907,7 +10118,8 @@
         // 타설일·시험일·감리·강도값, 그리고 앱이 규칙대로 만든 표기까지.
         bits.push(tasks.slice(0, 8).map((t) => {
           const p = [];
-          p.push('- ' + Task.label(t) + (t.part ? (' ' + t.part) : ''));
+          const pb = Task.placeBrief(t);
+          p.push('- ' + Task.label(t) + (pb ? (' ' + pb) : '') + (t.part ? (' ' + t.part) : ''));   // 부위 → 메모
           if (t.castDay) p.push('타설 ' + Spec.md(t.castDay));
           const test = Task.testDayOf(t);
           if (test) p.push('시험 ' + Spec.md(test));
@@ -10321,6 +10533,7 @@
       const linesTxt = fresh.map((it) => {
         const s = Spec.byKey(it.specKey);
         return it.dong + ' ' + (s ? s.name : it.age + '일') +
+               ((it.place && it.place !== it.dong) ? ' · 부위 ' + it.place : '') +   // 여러 동이면 대표 동 + 전체 나열(사람이 확정)
                ' · 타설 ' + Spec.md(it.castDay) + ' → 시험 ' + Spec.md(it.testDay) +
                ' · ' + (it.sup ? Contacts.label(it.sup) : '감리 미지정') +
                (it.hasSpecial ? ' (특화동 포함 — 감리 확인!)' : '') +
@@ -10343,7 +10556,7 @@
 
               supervisor: sup ? Contacts.label(sup) : '',
               supPhone: sup ? sup.phone : '',
-              part: '', photos: [], sets: [],
+              place: it.place || Task.placeOf(it.dong, ''), part: '', photos: [], sets: [],   // 타설부위(동 포함)·메모 없음
               mix: it.mix || '', vendor: it.vendor || '', qty: it.qty || ''   // 일정표에 열이 있을 때만(2026-09-29)
             });
             ok++;
@@ -12655,7 +12868,9 @@
       // 사진 장수·계산값은 여기 안 적는다(사용자 지시) — 목록은 "뭘 깨야 하나"만 본다.
       // 끝났는지는 오른쪽 체크 표시로 이미 안다.
       const meta = [];
-      if (t.part) meta.push(t.part);
+      const pb = Task.placeBrief(t);
+      if (pb) meta.push(pb);          // 타설부위(동 접두는 제목과 겹쳐 뺌)
+      if (t.part) meta.push(t.part);  // 메모
       if (t.castDay) meta.push('타설 ' + Spec.shortDate(new Date(t.castDay + 'T00:00:00')));
       body.appendChild(U.el('div', 'task-meta', meta.join(' · ')));
       row.appendChild(body);

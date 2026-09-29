@@ -1453,6 +1453,30 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
 .sheet-sep{height:1px;background:var(--line);margin:4px 8px}
 .sheet-cancel{margin-top:6px;background:var(--surface-2);font-weight:700}
 
+/* ---------- 다이얼 시트(U.dialSheet) — 세로 휠 나란히, 항목 44px(--tap), 가운데 강조선 ---------- */
+.dial-row{display:flex;gap:6px;padding:4px 0 8px}
+.dial-col{flex:1 1 0;min-width:0}
+.dial-lbl{text-align:center;font-size:12px;font-weight:700;color:var(--text-2);margin-bottom:4px}
+.dial-wrap{position:relative;border-radius:var(--r-md);background:var(--surface-2);overflow:hidden}
+.dial{
+  overflow-y:auto;overflow-x:hidden;scroll-snap-type:y mandatory;-webkit-overflow-scrolling:touch;
+  overscroll-behavior:contain;scrollbar-width:none;
+}
+.dial::-webkit-scrollbar{display:none}
+.dial-item{
+  height:var(--tap);line-height:var(--tap);text-align:center;scroll-snap-align:center;
+  font-size:17px;font-weight:600;color:var(--text-2);opacity:.6;cursor:pointer;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:0 4px;
+}
+.dial-item.on{color:var(--accent);opacity:1;font-weight:800;font-size:19px}
+.dial-line{
+  position:absolute;left:6px;right:6px;top:calc(50% - var(--tap) / 2);height:var(--tap);
+  border-top:2px solid var(--accent);border-bottom:2px solid var(--accent);border-radius:var(--r-sm);
+  pointer-events:none;opacity:.55;
+}
+/* 다이얼로만 채우는 칸(규격) — readonly 지만 누르는 것이라 손가락 커서 */
+.field input.dial-in{cursor:pointer}
+
 /* ---------- 토스트 ---------- */
 /* 키패드를 가리지 않도록 위쪽(헤더 아래)에 띄운다 */
 .toast-wrap{

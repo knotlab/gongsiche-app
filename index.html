@@ -561,16 +561,18 @@
       <div class="sup-hint hidden" id="tk-sup-hint"></div>
     </div>
 
-    <label class="field" id="tk-part-field">
-      <span class="field-label">타설부위 · 메모 <span class="lbl-sub">자유 기록</span></span>
-      <input type="text" id="tk-part" maxlength="60"
+    <!-- 타설부위 — 동을 앞에 한 번 더 쓴다(「214동 옥탑」, Task.placeOf). 비면 동수가 흐린 글씨(placeholder)로, 저장 땐 동을 접두. 기록서 타설위치(U열)의 원천 -->
+    <label class="field" id="tk-place-field">
+      <span class="field-label">타설부위 <span class="lbl-sub">동 포함</span></span>
+      <input type="text" id="tk-place" maxlength="60"
              autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
     </label>
-    <!-- 규격·업체·물량 — 전부 선택(주 경로는 플래너·일정표 OCR). 기록서 정보 블록의 원천 -->
+    <!-- 규격·업체·물량 — 전부 선택(주 경로는 플래너·일정표 OCR). 기록서 정보 블록의 원천.
+         규격은 KS 다이얼(readonly + 탭 → U.dialSheet, taskui.bindMixDial) — 기본값 25-30-180 은 placeholder 흐린 글씨 -->
     <div class="two-col">
       <label class="field">
-        <span class="field-label">규격 <span class="lbl-sub">선택</span></span>
-        <input type="text" id="tk-mix" maxlength="40" placeholder="25-30-180"
+        <span class="field-label">규격 <span class="lbl-sub">KS 선택</span></span>
+        <input type="text" id="tk-mix" maxlength="40" placeholder="25-30-180" readonly
                autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
       </label>
       <label class="field">
@@ -582,6 +584,12 @@
     <label class="field field-qty">
       <span class="field-label">물량(㎥) <span class="lbl-sub">선택</span></span>
       <input type="text" id="tk-qty" inputmode="decimal" maxlength="12"
+             autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+    </label>
+    <!-- 메모 — 순수 자유 기록(타설부위와 분리, 2026-09-29). 예전 작업이 여기 적어 둔 부위도 그대로 남는다 -->
+    <label class="field" id="tk-part-field">
+      <span class="field-label">메모 <span class="lbl-sub">자유 기록</span></span>
+      <input type="text" id="tk-part" maxlength="60"
              autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
     </label>
 
@@ -743,16 +751,17 @@
       <span class="field-label">담당 감리</span>
       <button class="pick-box" id="plan-sup"><span id="plan-sup-txt">감리 선택</span></button>
     </div>
+    <!-- 타설부위(place) — 동을 앞에 한 번 더(「214동 옥탑」). 동을 고르면 동수가 흐린 글씨로, 담을 때 Task.placeOf 가 접두 -->
     <label class="field">
-      <span class="field-label">타설부위 <span class="lbl-sub">선택</span></span>
+      <span class="field-label">타설부위 <span class="lbl-sub">동 포함</span></span>
       <input type="text" id="plan-part" maxlength="60"
              autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
     </label>
-    <!-- 규격·업체·물량(선택) — 계획표 OCR 이 채우고, 올린 작업 전부에 실린다 -->
+    <!-- 규격·업체·물량(선택) — 계획표 OCR 이 채우고, 올린 작업 전부에 실린다. 규격은 KS 다이얼(편집기와 같은 시트) -->
     <div class="two-col">
       <label class="field">
-        <span class="field-label">규격 <span class="lbl-sub">선택</span></span>
-        <input type="text" id="plan-mix" maxlength="40" placeholder="25-30-180"
+        <span class="field-label">규격 <span class="lbl-sub">KS 선택</span></span>
+        <input type="text" id="plan-mix" maxlength="40" placeholder="25-30-180" readonly
                autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
       </label>
       <label class="field">
