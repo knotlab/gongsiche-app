@@ -898,6 +898,10 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
   background:var(--surface-2);color:var(--text);border:1px solid var(--line);
   font-weight:800;
 }
+/* 파일 내보내기 + 기록서만 — 한 줄에 둘(2026-09-29). 긴 제목은 말줄임, 기록서만은 내용 폭 */
+.bat-bar .zip-row{flex:1 0 100%;display:flex;gap:8px;min-width:0}
+.bat-bar .zip-row .btn-zip{flex:1 1 0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bat-bar .zip-row .btn-record{flex:0 0 auto;padding:0 14px}
 .btn.off{opacity:.45}
 #view-batch .topbar .mini-btn{flex:0 0 auto}
 
@@ -908,6 +912,7 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
 .field-sub{margin-top:-4px;margin-bottom:8px}
 .field-sub .field-label{font-size:12px}
 .field-sub input{padding:8px 11px;font-size:14px;max-width:60%}
+.field-qty input{max-width:50%}   /* 물량(㎥) 칸 — 높이는 일반 .field(44px) 그대로, 폭만 절반 */
 .field-label{display:block;font-size:13px;font-weight:700;color:var(--text-2);margin-bottom:6px}
 .field-label b{color:var(--accent)}
 .field input[type=text],.field input[type=date],.field input[type=datetime-local],.field textarea{

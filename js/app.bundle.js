@@ -443,10 +443,19 @@
   }
   function modeName(m) { return MODES[m || mode()] || '공시체'; }
 
+  /* ---------- 타설물량 정규화(2026-09-29) — 편집기·플래너·OCR·저장소가 공용 ----------
+     예전엔 숫자·점만 남기는 한 줄(`replace(/[^\d.]/g,'')`)이라 「200 m3」→「2003」, 「1.2.3」 그대로였다(감사 지적).
+     천단위 콤마를 걷어낸 뒤 **첫 숫자 토큰**(소수 허용)만 취한다: 「약 198 m3」→「198」, 「1,200.5㎥」→「1200.5」. 없으면 ''. */
+  function normQty(v) {
+    const m = String(v === null || v === undefined ? '' : v).replace(/,/g, '').match(/\d*\.?\d+/);   // '.5' 도 소수(감사 지적)
+    return m ? m[0].slice(0, 12) : '';
+  }
+
   global.U = {
     theme: theme, setTheme: setTheme,
     jugu: jugu, setJugu: setJugu,
     mode: mode, setMode: setMode, modeName: modeName,
+    normQty: normQty,
     $: $, $$: $$, el: el, icon: icon,
     toast: toast, sheet: sheet, confirmSheet: confirmSheet, buzz: buzz,
     copyText: copyText,
@@ -1035,7 +1044,11 @@
       dong: (t.dong || '').trim(),          // 동수 — 목록 제목이자 카톡 문구의 주어
       supervisor: (t.supervisor || '').trim(),
       supPhone: (t.supPhone || '').trim(),
-      part: (t.part || '').trim(),
+      part: (t.part || '').trim(),           // 타설부위 · 메모(순수 텍스트)
+      // 규격·업체·물량(2026-09-29) — 전부 선택 입력, 주 경로는 플래너·일정표 OCR. 기록서 정보 블록의 원천
+      mix: String(t.mix || '').trim().slice(0, 40),
+      vendor: String(t.vendor || '').trim().slice(0, 40),
+      qty: U.normQty(t.qty),               // 공용 정규화(U.normQty — 편집기·플래너·OCR 과 같은 규칙)
       planId: String(t.planId || '').trim(),   // 플래너 묶음 번호(2026-09-17) — 없으면 동+타설일 자동 묶음(Task.batchKey)
       jugu: (t.jugu === '1' || t.jugu === '24') ? t.jugu : '',   // 비면 동 번호로 추정(Task.juguOf)
       photoMark: !!t.photoMark,            // 목록의 「사진」 배지 — 표시 전용(완료 판정과 무관)
@@ -2560,26 +2573,31 @@
     return (c ^ 0xFFFFFFFF) >>> 0;
   }
 
-  /* entries: [{ name: '폴더/파일.jpg', data: Uint8Array }] → ZIP Blob */
-  function makeZip(entries) {
+  /* entries: [{ name: '폴더/파일.jpg', data: Uint8Array }] → ZIP 바이트 조각(Uint8Array) 목록 — 본문·중앙 디렉터리·EOCD 순 */
+  function zipChunks(entries) {
     const enc = new TextEncoder();
     const now = new Date();
     const dosTime = ((now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1)) & 0xFFFF;
     const dosDate = (((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate()) & 0xFFFF;
 
-    const parts = [];        // Blob 조각들 (본문)
+    const parts = [];        // 본문 조각들
     const centrals = [];     // 중앙 디렉터리 조각들
-    let offset = 0;
+    let offset = 0, centralSize = 0;
 
     const u16 = (v) => new Uint8Array([v & 255, (v >>> 8) & 255]);
     const u32 = (v) => new Uint8Array([v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255]);
+    const cat = (arr) => {
+      const out = new Uint8Array(arr.reduce((n, a) => n + a.length, 0));
+      let p = 0; arr.forEach((a) => { out.set(a, p); p += a.length; });
+      return out;
+    };
 
     entries.forEach((e) => {
       const nameU8 = enc.encode(e.name);
       const data = e.data;
       const crc = crc32(data);
       // 로컬 파일 헤더
-      const local = new Blob([
+      const local = cat([
         u32(0x04034B50), u16(20), u16(0x0800), u16(0),      // sig, ver, UTF-8 플래그, STORE
         u16(dosTime), u16(dosDate),
         u32(crc), u32(data.length), u32(data.length),
@@ -2587,23 +2605,35 @@
       ]);
       parts.push(local, data);
       // 중앙 디렉터리 항목
-      centrals.push(new Blob([
+      const central = cat([
         u32(0x02014B50), u16(20), u16(20), u16(0x0800), u16(0),
         u16(dosTime), u16(dosDate),
         u32(crc), u32(data.length), u32(data.length),
         u16(nameU8.length), u16(0), u16(0), u16(0), u16(0),
         u32(0), u32(offset), nameU8
-      ]));
+      ]);
+      centrals.push(central);
+      centralSize += central.length;
       offset += 30 + nameU8.length + data.length;
     });
 
-    const centralBlob = new Blob(centrals);
-    const eocd = new Blob([
+    const eocd = cat([
       u32(0x06054B50), u16(0), u16(0),
       u16(entries.length), u16(entries.length),
-      u32(centralBlob.size), u32(offset), u16(0)
+      u32(centralSize), u32(offset), u16(0)
     ]);
-    return new Blob(parts.concat([centralBlob, eocd]), { type: 'application/zip' });
+    return parts.concat(centrals, [eocd]);
+  }
+  /* → ZIP Blob(파일로 내보낼 때) */
+  function makeZip(entries) {
+    return new Blob(zipChunks(entries), { type: 'application/zip' });
+  }
+  /* → ZIP Uint8Array 한 덩어리 — 바깥 ZIP 의 항목으로 다시 담을 때(기록서 xlsm) Blob→arrayBuffer 재복사를 피한다 */
+  function makeZipBytes(entries) {
+    const chunks = zipChunks(entries);
+    const out = new Uint8Array(chunks.reduce((n, a) => n + a.length, 0));
+    let p = 0; chunks.forEach((a) => { out.set(a, p); p += a.length; });
+    return out;
   }
 
   /* ---------------- 엑셀(.xlsx) 생성 ----------------
@@ -2759,7 +2789,7 @@
 
   global.Share = {
     exportItems: exportItems,
-    makeZip: makeZip, parseZip: parseZip, makeXlsx: makeXlsx,
+    makeZip: makeZip, makeZipBytes: makeZipBytes, parseZip: parseZip, makeXlsx: makeXlsx,
     exportFile: exportFile, shareFile: shareFile,
     isNative: () => !!cap(),
     hasWebShare: () => !!(navigator.share),
@@ -3219,6 +3249,510 @@
 })(window);
 
 ;
+/* ===== js/record.js ===== */
+/* 기록서(시험 대장 xlsm) 생성 — 파일 내보내기에 동봉 (2026-09-29 사용자 지시)
+   양식은 www/tpl/gf09-form.xlsm(거푸집 탈형 — 수직·수평·필러) · gf09-seal.xlsm(봉함양생 — 28일 봉함 칸).
+   tools/make-record-tpl.js 가 원본 xlsm 을 STORE zip 으로 재포장한 것(calcChain 제거·fullCalcOnLoad·원 양식 식별 메타 세척도 거기서).
+   여기서는 템플릿의 XML 파트를 문자열로 손질해 시트 쌍(대장 + 사진대지)을 동마다 복제하고 Share.makeZip 으로 다시 담는다.
+   · 대장: O열 강도값, C11 시험일(거푸집만 — 봉함은 수식), A열 라벨 접미 「 (수직)」→분류별, 시공사 칸(M열)에 서명 그림
+   · 사진대지: 회차 i → 열 그룹 i, 전경=위 틀·판넬=아래 틀, JPEG 실제 비율로 틀 안에 가운데 맞춤
+   · 오른쪽 정보 블록(P~X열)은 작업에 적힌 것(업체·규격·물량·타설부위·타설일·시험일 — 플래너/OCR 이 잡는다)만 채우고 나머지는 비워 둔다 — 사용자가 엑셀에서 마저 채운다(수식이 왼쪽 상단을 채운다)
+   외부 리소스 0(템플릿·서명은 tpl/ 에서 fetch 해 메모리 캐시). 실패는 던진다 — 호출부(tasks.exportDayZip)가 잡아 그 폴더 기록서만 뺀다. */
+(function (global) {
+  'use strict';
+
+  // 라벨 접미 — 사용자 지시: 템플릿의 「 (수직)」 을 수직=「(대기)」·수평=「(수평)」·필러=「(필러)」 로 치환. 봉함 양식엔 이 문자열이 없다
+  const RECORD_LABEL = { vert: '대기', horiz: '수평', filler: '필러' };
+
+  const KINDS = {
+    // 거푸집 양식은 3행 블록이 8개(11~34행)지만 템플릿이 A열 라벨 수식·정보 블록 참조(A{r+2}=P, B{r+2}=Q)를 배선한 건
+    // 앞 5개뿐(26·29·32행은 C·J·L 수식만) — 6번째 세트부터는 「(2)」 시트로 넘긴다(감사 지적, 템플릿 grep 으로 확인)
+    form: { tpl: 'tpl/gf09-form.xlsm', file: '거푸집 탈형 압축강도 시험 대장.xlsm',
+            blocks: [11, 14, 17, 20, 23], rowsPer: 3, cap: 3, label: true, testCell: 'C11',
+            info: [['P', 'vendor'], ['Q', 'mix'], ['R', 'qty'], ['S', 'cast'], ['T', 'dong'], ['U', 'place'], ['V', 'cast']] },
+    seal: { tpl: 'tpl/gf09-seal.xlsm', file: '봉함양생 강도 시험 대장.xlsm',
+            blocks: [11, 22], rowsPer: 9, cap: 9, label: false, testCell: null,
+            info: [['P', 'vendor'], ['Q', 'cast'], ['R', 'mix'], ['S', 'qty'], ['T', 'dong'], ['U', 'place'], ['V', 'age'], ['W', 'test']] },
+  };
+
+  const EMU_PX = 9525, EMU_PT = 12700;
+  // 열 폭(문자 단위)→픽셀. 최대 숫자폭(MDW)은 양식 기본 글꼴 맑은 고딕 11pt 기준 8px —
+  // 완성본의 사진 틀 6126480 EMU(=643px) 가 열 4개 폭 합(85+349+85+125=644px)과 맞아떨어진다(7px 로는 562px 로 어긋남)
+  const MDW = 8;
+  const SIGN_COL = 12;              // M 열(0-based)
+  const GROUP_COLS = 4;             // 사진대지 한 틀 = 열 4개
+  const FRAME_ROWS = [1, 5];        // 위 틀 2행·아래 틀 6행(0-based)
+  const PHOTO_PAD = 3, SIGN_PAD = 2; // 틀 테두리에서 띄우는 픽셀
+  const CODE_BASE = 200;            // 복제 시트 codeName = Sheet{200+n}
+  const BUTTON_BASE = 20;           // 사진대지 매크로 버튼 k = 20+i → shapeId k*1024+1, +2
+  const RID_BASE = 100;             // workbook.xml.rels 의 시트 rId = rId{100+n}(기존 비-시트 rel 과 안 겹치게)
+
+  /* ---------------- 순수 헬퍼 ---------------- */
+  const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  // 수식 안 시트 이름: 늘 작은따옴표로 감싸고 안의 ' 는 ''
+  const qname = (name) => "'" + String(name).replace(/'/g, "''") + "'";
+
+  /* 시트 이름: 「214동」→「214」, 「214동B」→「214B」, 「215동 특화동」→「215 특화동」. 금지문자 []:*?/\ 제거, 31자 제한 */
+  function sheetName(raw) {
+    let s = String(raw || '').trim().replace(/^(\d+)동/, '$1');
+    s = s.replace(/[\[\]:*?\/\\]/g, '').replace(/\s+/g, ' ').trim();
+    s = s.replace(/^'+|'+$/g, '');                   // 엑셀은 이름 양끝의 ' 를 거부한다
+    if (s.length > 25) s = s.slice(0, 25).trim().replace(/'+$/, '').trim();   // 잘린 끝이 ' 면 또 거부된다(감사 지적)
+    if (!s) s = '기록';
+    return s;                                        // 뒤에 「 (2)」·사진대지 「.」 를 붙여도 31자 안
+  }
+
+  /* 엑셀 날짜 일련번호(1899-12-30 기준 일수). 'YYYY-MM-DD' → 정수, 못 읽으면 null */
+  function excelSerial(dateStr) {
+    const m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(String(dateStr || ''));
+    if (!m) return null;
+    const ms = Date.UTC(+m[1], +m[2] - 1, +m[3]) - Date.UTC(1899, 11, 30);
+    return Math.round(ms / 86400000);
+  }
+
+  /* JPEG 폭·높이 — SOF 마커(C0~CF, C4·C8·CC 제외) 파싱. 아니면 null */
+  function jpegSize(u8) {
+    if (!u8 || u8.length < 4 || u8[0] !== 0xFF || u8[1] !== 0xD8) return null;
+    let i = 2;
+    while (i + 9 < u8.length) {
+      if (u8[i] !== 0xFF) { i++; continue; }
+      const m = u8[i + 1];
+      if (m === 0xFF) { i++; continue; }
+      if (m === 0xD8 || (m >= 0xD0 && m <= 0xD7) || m === 0x01) { i += 2; continue; }  // 길이 없는 마커
+      if (m === 0xD9 || m === 0xDA) return null;                                       // 끝·스캔 시작 — SOF 를 못 찾음
+      const len = (u8[i + 2] << 8) | u8[i + 3];
+      if (len < 2) return null;
+      if (m >= 0xC0 && m <= 0xCF && m !== 0xC4 && m !== 0xC8 && m !== 0xCC) {
+        const h = (u8[i + 5] << 8) | u8[i + 6];
+        const w = (u8[i + 7] << 8) | u8[i + 8];
+        return (w > 0 && h > 0) ? { w: w, h: h } : null;
+      }
+      i += 2 + len;
+    }
+    return null;
+  }
+
+  // 열 폭(문자) → px: Excel 규칙 Truncate(((256*width + Truncate(128/MDW)) / 256) * MDW)
+  const colPx = (width) => Math.trunc(((256 * width + Math.trunc(128 / MDW)) / 256) * MDW);
+  const ptPx = (pt) => pt * 96 / 72;
+
+  /* 상자(boxW×boxH px) 안에 imgW×imgH 를 비율 유지로 맞춰 가운데 — pad 만큼 안쪽으로 */
+  function fitRect(boxW, boxH, imgW, imgH, pad) {
+    const p = pad || 0;
+    const aw = Math.max(1, boxW - 2 * p), ah = Math.max(1, boxH - 2 * p);
+    const s = Math.min(aw / imgW, ah / imgH);
+    const w = Math.max(1, Math.floor(imgW * s)), h = Math.max(1, Math.floor(imgH * s));
+    return { x: Math.round((boxW - w) / 2), y: Math.round((boxH - h) / 2), w: w, h: h };
+  }
+
+  /* 시트 XML 의 열 폭·행 높이 조회기 */
+  function colReader(xml) {
+    const def = +((/defaultColWidth="([\d.]+)"/.exec(xml) || [])[1]) || 8.43;
+    const ranges = [];
+    (xml.match(/<col\b[^>]*\/>/g) || []).forEach((c) => {
+      const min = +((/ min="(\d+)"/.exec(c) || [])[1]), max = +((/ max="(\d+)"/.exec(c) || [])[1]);
+      const w = +((/ width="([\d.]+)"/.exec(c) || [])[1]);
+      if (min && max && w) ranges.push({ min: min, max: max, w: w });
+    });
+    return (c0) => { const c = c0 + 1; const r = ranges.find((x) => c >= x.min && c <= x.max); return r ? r.w : def; };
+  }
+  function rowReader(xml) {
+    const def = +((/defaultRowHeight="([\d.]+)"/.exec(xml) || [])[1]) || 17.4;
+    const hts = {};
+    (xml.match(/<row\b[^>]*>/g) || []).forEach((r) => {
+      const n = +((/ r="(\d+)"/.exec(r) || [])[1]), ht = (/ ht="([\d.]+)"/.exec(r) || [])[1];
+      if (n && ht) hts[n] = +ht;
+    });
+    return (r0) => (hts[r0 + 1] != null ? hts[r0 + 1] : def);   // 0-based 행 → pt
+  }
+  // px 거리를 셀 인덱스+오프셋으로(start 부터 sizeAt(px) 를 더해 가며)
+  function walk(start, px, sizeAt) {
+    let i = start, rem = px, guard = 0;
+    while (guard++ < 10000) { const s = sizeAt(i); if (rem < s) break; rem -= s; i++; }
+    return { idx: i, off: Math.max(0, Math.round(rem)) };
+  }
+
+  const colIdx = (letters) => { let n = 0; for (const ch of letters) n = n * 26 + (ch.charCodeAt(0) - 64); return n - 1; };
+
+  /* 셀 하나에 값 넣기. 템플릿의 빈 스타일 셀(<c r="O12" s="11"/>)이면 그 자리에 <v> 만 넣어 스타일을 지킨다.
+     이미 내용이 있으면 내용을 갈고(t 속성 제거), 셀이 없으면 행 안 열 순서 자리에 새로 만든다 */
+  function setCell(xml, ref, inner, type) {
+    const tAttr = type ? ' t="' + type + '"' : '';
+    const open = (attrs) => '<c r="' + ref + '"' + attrs.replace(/ t="[^"]*"/, '') + tAttr + '>';
+    const re1 = new RegExp('<c r="' + ref + '"([^>]*?)/>');
+    if (re1.test(xml)) return xml.replace(re1, (m, a) => open(a) + inner + '</c>');
+    const re2 = new RegExp('<c r="' + ref + '"([^>]*)>[\\s\\S]*?</c>');
+    if (re2.test(xml)) return xml.replace(re2, (m, a) => open(a) + inner + '</c>');
+    const row = +ref.replace(/^[A-Z]+/, ''), col = colIdx(ref.replace(/\d+$/, ''));
+    const cellXml = '<c r="' + ref + '"' + tAttr + '>' + inner + '</c>';
+    // 자기닫힘 행(<row r="N" …/>)이면 그 자리에 셀 하나짜리 행으로 — 예전 정규식은 이걸 여는 태그로 잡아 다음 행까지 삼켰다(감사 지적)
+    const reSelf = new RegExp('<row r="' + row + '"([^>]*?)/>');
+    if (reSelf.test(xml)) return xml.replace(reSelf, (mm, a) => '<row r="' + row + '"' + a + '>' + cellXml + '</row>');
+    const reRow = new RegExp('(<row r="' + row + '"(?:\\s[^>]*[^/])?>)([\\s\\S]*?)(</row>)');
+    const m = reRow.exec(xml);
+    if (!m) {
+      // 행 자체가 없으면 sheetData 안 행 순서 자리에 새 행
+      const rows = xml.match(/<row\b[^>]*>[\s\S]*?<\/row>|<row\b[^>]*\/>/g) || [];
+      const after = rows.find((r) => +((/ r="(\d+)"/.exec(r) || [])[1]) > row);
+      const rowXml = '<row r="' + row + '">' + cellXml + '</row>';
+      if (after) return xml.replace(after, rowXml + after);
+      return xml.replace('</sheetData>', rowXml + '</sheetData>');
+    }
+    const cells = m[2].match(/<c\b[^>]*?(?:\/>|>[\s\S]*?<\/c>)/g) || [];
+    const at = cells.findIndex((c) => colIdx(((/ r="([A-Z]+)/.exec(c) || [])[1]) || 'A') > col);
+    if (at < 0) cells.push(cellXml); else cells.splice(at, 0, cellXml);
+    return xml.replace(reRow, () => m[1] + cells.join('') + m[3]);
+  }
+
+  const numStr = (v) => { if (v === null || v === undefined || v === '') return null; const n = Number(v); return isFinite(n) ? String(n) : null; };
+  const strCell = (v) => '<is><t>' + esc(String(v)) + '</t></is>';   // 인라인 문자열(스타일 유지, sharedStrings 안 건드림)
+
+  /* 그림 조각(xdr:pic) — rId 로 미디어를 가리킨다 */
+  function picXml(id, name, rId, cx, cy) {
+    return '<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="' + id + '" name="' + esc(name) + '"/><xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr>' +
+      '<xdr:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="' + rId + '"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>' +
+      '<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="' + cx + '" cy="' + cy + '"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic>';
+  }
+  const markerXml = (tag, c, cOff, r, rOff) =>
+    '<xdr:' + tag + '><xdr:col>' + c + '</xdr:col><xdr:colOff>' + cOff + '</xdr:colOff><xdr:row>' + r + '</xdr:row><xdr:rowOff>' + rOff + '</xdr:rowOff></xdr:' + tag + '>';
+  const WSDR_OPEN = '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">';
+
+  /* 사진대지 틀 하나에 사진 앉히기 → twoCellAnchor(editAs="oneCell") XML.
+     group=열 그룹(0..7), frameRow=틀 행(0-based), img={w,h} */
+  function photoAnchor(colW, rowH, group, frameRow, img, id, rId) {
+    const c0 = group * GROUP_COLS;
+    const cols = []; for (let c = c0; c < c0 + GROUP_COLS; c++) cols.push(colPx(colW(c)));
+    const boxW = cols.reduce((a, b) => a + b, 0), boxH = ptPx(rowH(frameRow));
+    const r = fitRect(boxW, boxH, img.w, img.h, PHOTO_PAD);
+    const from = walk(c0, r.x, (c) => colPx(colW(c)));
+    const to = walk(c0, r.x + r.w, (c) => colPx(colW(c)));
+    const y1 = r.y + r.h;
+    const toRow = y1 >= boxH ? { idx: frameRow + 1, off: 0 } : { idx: frameRow, off: y1 };
+    return '<xdr:twoCellAnchor editAs="oneCell">' +
+      markerXml('from', from.idx, from.off * EMU_PX, frameRow, Math.round(r.y * EMU_PX)) +
+      markerXml('to', to.idx, to.off * EMU_PX, toRow.idx, Math.round(toRow.off * EMU_PX)) +
+      picXml(id, '사진 ' + id, rId, r.w * EMU_PX, r.h * EMU_PX) + '<xdr:clientData/></xdr:twoCellAnchor>';
+  }
+
+  /* 대장 시공사 칸(M{r}:M{r+n-1}) 서명 → oneCellAnchor */
+  function signAnchor(colW, rowH, row0, nRows, img, id, rId) {
+    const boxW = colPx(colW(SIGN_COL));
+    let boxH = 0; for (let r = row0; r < row0 + nRows; r++) boxH += ptPx(rowH(r));
+    const r = fitRect(boxW, boxH, img.w, img.h, SIGN_PAD);
+    const from = walk(row0, r.y, (rr) => ptPx(rowH(rr)));
+    return '<xdr:oneCellAnchor>' +
+      markerXml('from', SIGN_COL, Math.round(r.x * EMU_PX), from.idx, Math.round(from.off * EMU_PX)) +
+      '<xdr:ext cx="' + (r.w * EMU_PX) + '" cy="' + (r.h * EMU_PX) + '"/>' +
+      picXml(id, '서명 ' + id, rId, r.w * EMU_PX, r.h * EMU_PX) + '<xdr:clientData/></xdr:oneCellAnchor>';
+  }
+
+  /* PNG 폭·높이(IHDR) */
+  function pngSize(u8) {
+    if (!u8 || u8.length < 24 || u8[0] !== 0x89 || u8[1] !== 0x50) return null;
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    return { w: dv.getUint32(16), h: dv.getUint32(20) };
+  }
+
+  /* 시트 공통 손질: tabSelected 는 첫 시트만, codeName, xr:uid 제거(복제 시트끼리 겹치지 않게 — 선택 속성) */
+  function commonSheet(xml, o) {
+    xml = xml.replace(/ tabSelected="1"/g, '');
+    if (o.first) xml = xml.replace('<sheetView ', '<sheetView tabSelected="1" ');
+    if (o.codeName) xml = xml.replace(/codeName="[^"]*"/, 'codeName="' + esc(o.codeName) + '"');
+    xml = xml.replace(/ xr:uid="\{[^"]*\}"/g, '');
+    return xml;
+  }
+
+  /* 대장 시트: o = { K, label, test, sets:[[값…]], first, codeName, drawingRid }
+     반환 { xml, signed:[블록 인덱스…] } */
+  function patchMainSheet(xml, o) {
+    const K = o.K;
+    xml = commonSheet(xml, o);
+    if (K.label && o.label) xml = xml.split('" (수직)"').join('" (' + esc(o.label) + ')"');
+    if (K.testCell && o.test) {
+      const serial = excelSerial(o.test);
+      if (serial != null) xml = setCell(xml, K.testCell, '<v>' + serial + '</v>');
+    }
+    const signed = [];
+    (o.sets || []).forEach((vals, j) => {
+      if (j >= K.blocks.length) return;
+      const r0 = K.blocks[j];
+      let n = 0;
+      (vals || []).slice(0, K.cap).forEach((v, m) => {
+        const s = numStr(v);
+        if (s == null) return;
+        xml = setCell(xml, 'O' + (r0 + m), '<v>' + s + '</v>');
+        n++;
+      });
+      if (n) {
+        signed.push(j);
+        // 정보 블록(P~X열 2+j 행) — 작업에 적힌 것만(플래너/OCR 이 잡은 업체·규격·물량·타설부위). 비어 있으면 그대로 비워 사용자가 엑셀에서 채운다
+        const info = o.info || {};
+        const hasInfo = ['vendor', 'mix', 'qty', 'part'].some((k) => info[k] && String(info[k]).trim());   // 하나도 없으면 정보 행은 통째로 비워 둔다(28일 상수도)
+        (hasInfo ? (K.info || []) : []).forEach(([col, key]) => {
+          const ref = col + (2 + j);
+          if (key === 'cast' || key === 'test') { const sn = info[key] ? excelSerial(info[key]) : null; if (sn != null) xml = setCell(xml, ref, '<v>' + sn + '</v>'); return; }
+          if (key === 'qty') { const s = numStr(info.qty); if (s != null) xml = setCell(xml, ref, '<v>' + s + '</v>'); return; }
+          if (key === 'age') { xml = setCell(xml, ref, strCell('28일'), 'inlineStr'); return; }
+          const v = key === 'place' ? [info.dong, info.part].filter((x) => x && String(x).trim()).join(' ').trim() : (info[key] || '');
+          if (v) xml = setCell(xml, ref, strCell(v), 'inlineStr');
+        });
+      }
+    });
+    if (signed.length && o.drawingRid) {
+      const tag = '<drawing r:id="' + o.drawingRid + '"/>';
+      if (/<headerFooter\b[^>]*\/>/.test(xml)) xml = xml.replace(/<headerFooter\b[^>]*\/>/, (m) => m + tag);
+      else if (/<headerFooter\b/.test(xml)) xml = xml.replace('</headerFooter>', () => '</headerFooter>' + tag);
+      else xml = xml.replace('</worksheet>', () => tag + '</worksheet>');
+    }
+    return { xml: xml, signed: signed };
+  }
+
+  /* 사진대지 시트: o = { mainName, k(버튼 번호), first, codeName } — 수식 '0'! 을 대장 이름으로, 컨트롤 shapeId 재번호 */
+  function patchPhotoSheet(xml, o) {
+    xml = commonSheet(xml, o);
+    // <f> 본문도 XML 텍스트다 — 동을 직접 입력해 「A&B동」 처럼 & < > 가 들면 esc 없이는 파싱이 깨진다(definedNames 와 같은 처리, 감사 지적)
+    xml = xml.split("'0'!").join(esc(qname(o.mainName)) + '!');
+    xml = xml.replace(/shapeId="3073"/g, 'shapeId="' + (o.k * 1024 + 1) + '"').replace(/shapeId="3074"/g, 'shapeId="' + (o.k * 1024 + 2) + '"');
+    return xml;
+  }
+  function patchDrawing(xml, k, anchors) {
+    xml = xml.replace(/id="3073"/g, 'id="' + (k * 1024 + 1) + '"').replace(/id="3074"/g, 'id="' + (k * 1024 + 2) + '"')
+             .replace(/_x0000_s3073/g, '_x0000_s' + (k * 1024 + 1)).replace(/_x0000_s3074/g, '_x0000_s' + (k * 1024 + 2));
+    return xml.replace('</xdr:wsDr>', () => anchors.join('') + '</xdr:wsDr>');
+  }
+  function patchVml(xml, k) {
+    return xml.replace(/data="3"/, 'data="' + k + '"')
+              .replace(/_x0000_s3073/g, '_x0000_s' + (k * 1024 + 1)).replace(/_x0000_s3074/g, '_x0000_s' + (k * 1024 + 2));
+  }
+
+  const RELS_OPEN = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">';
+  const REL = (id, type, target) => '<Relationship Id="' + id + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/' + type + '" Target="' + esc(target) + '"/>';
+  const CT_WS = 'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml';
+  const CT_DR = 'application/vnd.openxmlformats-officedocument.drawing+xml';
+  const CT_CP = 'application/vnd.ms-excel.controlproperties+xml';
+
+  /* 카드 → 시트 쌍 목록(세트·회차를 블록 수로 잘라 같은 동의 두 번째 쌍은 「214 (2)」) */
+  function planSheets(K, cards) {
+    // 엑셀은 시트 이름을 **대소문자 무시**로 비교한다(「214B」와 「214b」는 같은 이름 = 손상 파일) — 소문자 키로 겹침을 본다(감사 지적)
+    const used = new Set();
+    const taken = (n) => used.has(n.toLowerCase());
+    // 동 이름 + 접미(중복 「 (2)」·분할 「 (2)」)를 붙인 최종 이름. 사진대지 「.」까지 더해 31자를 넘지 않게 **동 이름 쪽**을 자른다
+    // (접미를 자르면 겹침 판정이 깨진다) — 예전엔 sheetName 이 25자로 자른 뒤 접미를 재검사 안 해 「…카 (3) (2).」 34자가 나왔다(감사 지적)
+    const compose = (raw, sfx) => { const room = 30 - sfx.length; return ((raw.length > room ? raw.slice(0, room).trim() : raw).replace(/'+$/, '').trim() || '기록') + sfx; };
+    const uniq = (raw, sfx) => {
+      let n = compose(raw, sfx), s = sfx, i = 1;
+      while (taken(n) || taken(n + '.')) { s = sfx + ' (' + (++i) + ')'; n = compose(raw, s); }
+      used.add(n.toLowerCase()); used.add((n + '.').toLowerCase());
+      return { name: n, sfx: s };
+    };
+    const out = [];
+    const per = K.blocks.length;
+    (cards || []).forEach((card) => {
+      const sets = (card.sets || []).map((s) => (s.vals || s.values || []).map((v) => (v && typeof v === 'object') ? v.v : v));
+      const pairs = (card.pairs || []).map((p) => (p.photos || []).filter((b) => b && b.length));
+      const raw = sheetName(card.name);
+      const base = uniq(raw, '');   // 같은 동이 또 오면 「214 (2)」 — 분할 접미는 그 위에 붙는다(「214 (2) (2)」)
+      const n = Math.max(1, Math.ceil(sets.length / per), Math.ceil(pairs.length / per));
+      for (let c = 0; c < n; c++) {
+        const name = c ? uniq(raw, base.sfx + ' (' + (c + 1) + ')').name : base.name;
+        out.push({ name: name, test: card.test || '', label: RECORD_LABEL[card.specKey] || '', info: card.info || null,
+                   sets: sets.slice(c * per, c * per + per), pairs: pairs.slice(c * per, c * per + per) });
+      }
+    });
+    return out;
+  }
+
+  /* 통합문서 조립(순수 — 입력: 템플릿 파트 Map, 서명 PNG, 카드) → zip entries [{name, data}] */
+  function assemble(kind, parts, sign, cards) {
+    const K = KINDS[kind];
+    if (!K) throw new Error('모르는 기록서 종류: ' + kind);
+    const dec = new TextDecoder(), enc = new TextEncoder();
+    const text = (name) => { const p = parts.get(name); if (!p) throw new Error('템플릿에 ' + name + ' 이 없습니다'); return dec.decode(p); };
+    const T = {
+      main: text('xl/worksheets/sheet1.xml'), photo: text('xl/worksheets/sheet2.xml'),
+      mainRels: text('xl/worksheets/_rels/sheet1.xml.rels'),
+      drawing: text('xl/drawings/drawing1.xml'), vml: text('xl/drawings/vmlDrawing1.vml'),
+      ctrl: [parts.get('xl/ctrlProps/ctrlProp1.xml'), parts.get('xl/ctrlProps/ctrlProp2.xml')],
+      ps: [parts.get('xl/printerSettings/printerSettings1.bin'), parts.get('xl/printerSettings/printerSettings2.bin')],
+      workbook: text('xl/workbook.xml'), wbRels: text('xl/_rels/workbook.xml.rels'),
+      ct: text('[Content_Types].xml'), app: text('docProps/app.xml'),
+    };
+    if (!T.ctrl[0] || !T.ctrl[1] || !T.ps[0] || !T.ps[1]) throw new Error('템플릿 파트가 모자랍니다');
+    // 인쇄 영역은 템플릿에서 읽는다(대장 $A$1:$N$37 · 사진대지는 양식마다 다름)
+    const areas = [];
+    T.workbook.replace(/<definedName name="_xlnm\.Print_Area" localSheetId="(\d+)">[^<]*?!([^<]+)<\/definedName>/g, (m, id, rng) => { areas[+id] = rng; return m; });
+    if (!areas[0] || !areas[1]) throw new Error('템플릿 인쇄 영역을 못 읽었습니다');
+    const codeMain = (/codeName="([^"]*)"/.exec(T.main) || [])[1] || 'Sheet11';
+    const codePhoto = (/codeName="([^"]*)"/.exec(T.photo) || [])[1] || 'Sheet1';
+    const mainColW = colReader(T.main), mainRowH = rowReader(T.main);
+    const photoColW = colReader(T.photo), photoRowH = rowReader(T.photo);
+    const signImg = pngSize(sign) || { w: 360, h: 240 };
+
+    const out = new Map();
+    const drop = /^(xl\/worksheets\/sheet[12]\.xml|xl\/worksheets\/_rels\/sheet[12]\.xml\.rels|xl\/drawings\/drawing1\.xml|xl\/drawings\/vmlDrawing1\.vml|xl\/ctrlProps\/ctrlProp[12]\.xml|xl\/printerSettings\/printerSettings[12]\.bin|xl\/calcChain\.xml)$/;
+    parts.forEach((data, name) => { if (!drop.test(name)) out.set(name, data); });
+    const put = (name, data) => out.set(name, typeof data === 'string' ? enc.encode(data) : data);
+
+    const plan = planSheets(K, cards);
+    if (!plan.length) throw new Error('기록서에 넣을 작업이 없습니다');   // 시트 0장 통합문서는 엑셀이 못 연다(감사 지적)
+    const sheets = [];        // { name, file, area }
+    const drawings = [], ctrls = [];
+    let drawN = 0, vmlN = 0, ctrlN = 0, imgN = 0, codeN = 0, signUsed = false;
+
+    plan.forEach((sh, i) => {
+      const mainNo = 2 * i + 1, photoNo = 2 * i + 2;
+      const k = BUTTON_BASE + i;
+      const photoName = sh.name + '.';
+      const codes = i === 0 ? [codeMain, codePhoto] : ['Sheet' + (CODE_BASE + (++codeN)), 'Sheet' + (CODE_BASE + (++codeN))];
+
+      // ---- 대장 ----
+      const mainDrawNo = drawN + 1;   // 서명이 붙을 때만 실제로 쓴다
+      const pm = patchMainSheet(T.main, { K: K, label: sh.label, test: sh.test, sets: sh.sets, info: sh.info, first: i === 0, codeName: codes[0], drawingRid: 'rId2' });
+      put('xl/worksheets/sheet' + mainNo + '.xml', pm.xml);
+      put('xl/printerSettings/printerSettings' + mainNo + '.bin', T.ps[0]);
+      let mainRels = T.mainRels.replace(/printerSettings\d+\.bin/, 'printerSettings' + mainNo + '.bin');
+      if (pm.signed.length) {
+        drawN = mainDrawNo;
+        const anchors = pm.signed.map((j, n) => signAnchor(mainColW, mainRowH, K.blocks[j] - 1, K.rowsPer, signImg, 2 + n, 'rId1'));
+        put('xl/drawings/drawing' + drawN + '.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + WSDR_OPEN + anchors.join('') + '</xdr:wsDr>');
+        put('xl/drawings/_rels/drawing' + drawN + '.xml.rels', RELS_OPEN + REL('rId1', 'image', '../media/sign.png') + '</Relationships>');
+        mainRels = mainRels.replace('</Relationships>', () => REL('rId2', 'drawing', '../drawings/drawing' + drawN + '.xml') + '</Relationships>');
+        drawings.push(drawN);
+        signUsed = true;
+      }
+      put('xl/worksheets/_rels/sheet' + mainNo + '.xml.rels', mainRels);
+      sheets.push({ name: sh.name, file: 'sheet' + mainNo + '.xml', area: areas[0] });
+
+      // ---- 사진대지 ----
+      const pd = ++drawN, pv = ++vmlN, c1 = ++ctrlN, c2 = ++ctrlN;
+      put('xl/worksheets/sheet' + photoNo + '.xml', patchPhotoSheet(T.photo, { mainName: sh.name, k: k, first: false, codeName: codes[1] }));
+      put('xl/printerSettings/printerSettings' + photoNo + '.bin', T.ps[1]);
+      put('xl/worksheets/_rels/sheet' + photoNo + '.xml.rels', RELS_OPEN +
+        REL('rId1', 'printerSettings', '../printerSettings/printerSettings' + photoNo + '.bin') +
+        REL('rId2', 'drawing', '../drawings/drawing' + pd + '.xml') +
+        REL('rId3', 'vmlDrawing', '../drawings/vmlDrawing' + pv + '.vml') +
+        REL('rId4', 'ctrlProp', '../ctrlProps/ctrlProp' + c1 + '.xml') +
+        REL('rId5', 'ctrlProp', '../ctrlProps/ctrlProp' + c2 + '.xml') + '</Relationships>');
+      put('xl/ctrlProps/ctrlProp' + c1 + '.xml', T.ctrl[0]);
+      put('xl/ctrlProps/ctrlProp' + c2 + '.xml', T.ctrl[1]);
+      ctrls.push(c1, c2);
+      put('xl/drawings/vmlDrawing' + pv + '.vml', patchVml(T.vml, k));
+      const anchors = [], rels = [];
+      sh.pairs.forEach((photos, g) => {
+        photos.slice(0, FRAME_ROWS.length).forEach((bytes, p) => {
+          const n = ++imgN;
+          const rId = 'rId' + (rels.length + 1);
+          put('xl/media/image' + n + '.jpg', bytes);
+          rels.push(REL(rId, 'image', '../media/image' + n + '.jpg'));
+          const img = jpegSize(bytes) || { w: 4, h: 3 };
+          anchors.push(photoAnchor(photoColW, photoRowH, g, FRAME_ROWS[p], img, 100 + anchors.length + 1, rId));
+        });
+      });
+      put('xl/drawings/drawing' + pd + '.xml', patchDrawing(T.drawing, k, anchors));
+      if (rels.length) put('xl/drawings/_rels/drawing' + pd + '.xml.rels', RELS_OPEN + rels.join('') + '</Relationships>');
+      drawings.push(pd);
+      sheets.push({ name: photoName, file: 'sheet' + photoNo + '.xml', area: areas[1] });
+    });
+    if (signUsed) put('xl/media/sign.png', sign);
+
+    // ---- workbook.xml ----
+    let wb = T.workbook;   // x15ac:absPath(원 양식의 사내 경로)·작성자 메타는 make-record-tpl.js 가 이미 지웠다(한 곳에서만)
+    wb = wb.replace(/ activeTab="\d+"/, '');
+    // 치환 문자열은 전부 함수로 — 동 이름에 $ 가 있어도 치환 패턴($1·$&)으로 안 읽힌다
+    const sheetsXml = '<sheets>' + sheets.map((s, n) =>
+      '<sheet name="' + esc(s.name) + '" sheetId="' + (n + 1) + '" r:id="rId' + (RID_BASE + n + 1) + '"/>').join('') + '</sheets>';
+    wb = wb.replace(/<sheets>[\s\S]*?<\/sheets>/, () => sheetsXml);
+    const keepNames = (/<definedNames>([\s\S]*?)<\/definedNames>/.exec(wb) || ['', ''])[1]
+      .replace(/<definedName name="_xlnm\.Print_Area"[^>]*>[^<]*<\/definedName>/g, '');
+    const printAreas = sheets.map((s, n) => '<definedName name="_xlnm.Print_Area" localSheetId="' + n + '">' + esc(qname(s.name)) + '!' + s.area + '</definedName>').join('');
+    const dn = '<definedNames>' + keepNames + printAreas + '</definedNames>';
+    wb = /<definedNames>/.test(wb) ? wb.replace(/<definedNames>[\s\S]*?<\/definedNames>/, () => dn) : wb.replace('</sheets>', () => '</sheets>' + dn);
+    put('xl/workbook.xml', wb);
+
+    // ---- workbook.xml.rels: 시트 관계만 새로 ----
+    let wr = T.wbRels.replace(/<Relationship\b[^>]*Type="[^"]*\/worksheet"[^>]*\/>/g, '');
+    wr = wr.replace('</Relationships>', () => sheets.map((s, n) => REL('rId' + (RID_BASE + n + 1), 'worksheet', 'worksheets/' + s.file)).join('') + '</Relationships>');
+    put('xl/_rels/workbook.xml.rels', wr);
+
+    // ---- [Content_Types].xml ----
+    let ct = T.ct.replace(/<Override PartName="\/xl\/(worksheets\/sheet\d+\.xml|drawings\/drawing\d+\.xml|ctrlProps\/ctrlProp\d+\.xml|calcChain\.xml)"[^>]*\/>/g, '');
+    const defs = [['jpg', 'image/jpeg'], ['jpeg', 'image/jpeg'], ['png', 'image/png']];
+    defs.forEach(([ext, type]) => {
+      if (!new RegExp('<Default Extension="' + ext + '"', 'i').test(ct)) {
+        const d = '<Default Extension="' + ext + '" ContentType="' + type + '"/>';
+        ct = /<Default\b/.test(ct) ? ct.replace(/<Default\b/, () => d + '<Default') : ct.replace(/(<Types\b[^>]*>)/, (m) => m + d);   // Default 가 없으면 Types 바로 뒤
+      }
+    });
+    const ov = (part, type) => '<Override PartName="' + part + '" ContentType="' + type + '"/>';
+    ct = ct.replace('</Types>', () => sheets.map((s) => ov('/xl/worksheets/' + s.file, CT_WS)).join('') +
+      drawings.map((n) => ov('/xl/drawings/drawing' + n + '.xml', CT_DR)).join('') +
+      ctrls.map((n) => ov('/xl/ctrlProps/ctrlProp' + n + '.xml', CT_CP)).join('') + '</Types>');
+    put('[Content_Types].xml', ct);
+
+    // ---- docProps/app.xml: 시트 이름 목록 ----
+    let app = T.app.replace(/<HeadingPairs>[\s\S]*?<\/HeadingPairs>/, '').replace(/<TitlesOfParts>[\s\S]*?<\/TitlesOfParts>/, '');
+    const hp = '<HeadingPairs><vt:vector size="2" baseType="variant"><vt:variant><vt:lpstr>워크시트</vt:lpstr></vt:variant><vt:variant><vt:i4>' + sheets.length + '</vt:i4></vt:variant></vt:vector></HeadingPairs>' +
+      '<TitlesOfParts><vt:vector size="' + sheets.length + '" baseType="lpstr">' + sheets.map((s) => '<vt:lpstr>' + esc(s.name) + '</vt:lpstr>').join('') + '</vt:vector></TitlesOfParts>';
+    app = app.replace('</Properties>', () => hp + '</Properties>');
+    put('docProps/app.xml', app);
+
+    // [Content_Types].xml 을 맨 앞에
+    const entries = [{ name: '[Content_Types].xml', data: out.get('[Content_Types].xml') }];
+    out.forEach((data, name) => { if (name !== '[Content_Types].xml') entries.push({ name: name, data: data }); });
+    return entries;
+  }
+
+  /* ---------------- 템플릿·서명 로드(메모리 캐시) ---------------- */
+  const bytesCache = Object.create(null), tplCache = Object.create(null);
+  function fetchBytes(url) {
+    if (!bytesCache[url]) {
+      bytesCache[url] = fetch(url).then((r) => { if (!r.ok) throw new Error(url + ' HTTP ' + r.status); return r.arrayBuffer(); })
+        .then((b) => new Uint8Array(b))
+        .catch((e) => { delete bytesCache[url]; throw e; });
+    }
+    return bytesCache[url];
+  }
+  function loadTpl(kind) {
+    const K = KINDS[kind];
+    if (!K) return Promise.reject(new Error('모르는 기록서 종류: ' + kind));
+    if (!tplCache[kind]) {
+      tplCache[kind] = fetchBytes(K.tpl).then((u8) => {
+        const list = global.Share.parseZip(u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength));
+        const map = new Map();
+        list.forEach((e) => map.set(e.name, e.data));
+        if (!map.has('xl/workbook.xml')) throw new Error('템플릿이 비었습니다: ' + K.tpl);
+        return map;
+      }).catch((e) => { delete tplCache[kind]; throw e; });
+    }
+    return tplCache[kind];
+  }
+
+  /* Record.buildBytes(kind, cards) → Promise<Uint8Array> — 바깥 ZIP(Share.makeZip)에 그대로 넣는다(Blob→arrayBuffer 재복사 없음)
+     cards: [{ name(동 텍스트), test('YYYY-MM-DD'), specKey, sets:[{ vals:[number] }], pairs:[{ photos:[Uint8Array(JPEG)] }] }]
+       · sets 는 **작업의 세트 순서 그대로(빈 세트 포함)** — 봉함은 블록 j ↔ 사진 회차 j 라 값 든 것만 추리면 값과 사진이 어긋난다 */
+  async function buildBytes(kind, cards) {
+    const parts = await loadTpl(kind);
+    const sign = await fetchBytes('tpl/sign.png');
+    const entries = assemble(kind, parts, sign, cards);
+    return global.Share.makeZipBytes(entries);
+  }
+  /* Record.build(kind, cards) → Promise<Blob> (파일로 받을 때) */
+  async function build(kind, cards) {
+    return new Blob([await buildBytes(kind, cards)], { type: 'application/vnd.ms-excel.sheet.macroEnabled.12' });
+  }
+
+  const kindOf = (specKey) => (RECORD_LABEL[specKey] ? 'form' : specKey === 'seal' ? 'seal' : null);
+  const fileName = (kind) => (KINDS[kind] ? KINDS[kind].file : '');
+
+  global.Record = {
+    build: build, buildBytes: buildBytes, kindOf: kindOf, fileName: fileName, LABEL: RECORD_LABEL,
+    _t: { sheetName: sheetName, excelSerial: excelSerial, jpegSize: jpegSize, pngSize: pngSize, colPx: colPx, fitRect: fitRect,
+          setCell: setCell, patchMainSheet: patchMainSheet, patchPhotoSheet: patchPhotoSheet, patchDrawing: patchDrawing, patchVml: patchVml,
+          planSheets: planSheets, assemble: assemble, loadTpl: loadTpl, KINDS: KINDS },
+  };
+})(window);
+
+;
 /* ===== js/vision.js ===== */
 /* ============ vision.js — Gemini 비전 공용 모듈 ============
    예전엔 OCR(일정표·성적판)이 온디바이스 ML Kit + ONNX 였고, AI 검수(audit.js)만
@@ -3482,12 +4016,15 @@
       '- age: 재령(일 수 — 1·3·10·28 중 하나). 재령 칸이 없는 표면 null.',
       '- kind: 그 행이 "탈형" 행이면 "탈형", 아니면 "타설" 또는 "시험".',
       '- note: 그 밖에 참고할 만한 문구(없으면 빈 문자열).',
+      '- mix(선택): 규격/배합 표기 — "25-30-180" 또는 "25-30-180(초유지)" 처럼 적힌 그대로. 그런 열이 없으면 null.',
+      '- vendor(선택): 레미콘 업체명 — 회사명 그대로. 그런 열이 없으면 null.',
+      '- qty(선택): 타설물량 — ㎥ 단위 표기는 빼고 숫자만. 그런 열이 없으면 null.',
       '',
       '표 밖의 글자는 무시해라. 아래 JSON 형태로만 답하라.',
       '설명 문장·마크다운 코드블록 금지. 모르는 값은 null 로 둬라(추측해서 채우지 마라).',
       '',
       '{"rows":[{"dong":"209동, 210동","special":false,"cast":"2026-08-15",' +
-      '"test":"2026-08-16","age":1,"kind":"타설","note":""}]}'
+      '"test":"2026-08-16","age":1,"kind":"타설","note":"","mix":null,"vendor":null,"qty":null}]}'
     ].join('\n'),
 
     board: [
@@ -3514,12 +4051,16 @@
       '  "209,210동"처럼 여러 동이 나열된 것도 그대로 담아라.',
       '  "A9"·"B2" 같은 블록명도 동으로 취급해라.',
       '- part: 부위 — 제목칸에서 동 표기를 뺀 나머지(예: "2PH1 벽체", "15F 벽체", "필로티").',
+      '- mix: 규격/배합 표기 — "25-30-180" 또는 "25-30-180(초유지)" 처럼 적힌 그대로. 없으면 null.',
+      '- vendor: 레미콘 업체명 — 회사명 그대로(예 "(주)삼표산업(서부)"). 없으면 null.',
+      '- qty: 타설물량 — ㎥ 단위 표기는 빼고 숫자만(예 "198㎥" → 198). 없으면 null.',
       '- date(최상위): 계획표 머리(제목·상단)에 적힌 타설 날짜를 YYYY-MM-DD 로(예 "2026. 9. 17 (수)" → "2026-09-17"). 표 밖이라도 이 날짜만은 읽어라. 없으면 null.',
       '',
-      '규격·펌프카·반입반출 같은 다른 칸은 무시해라. 표 밖 글자도 무시해라.',
+      '펌프카·반입반출 같은 다른 칸은 무시해라. 표 밖 글자도 무시해라.',
       '아래 JSON 형태로만 답하라. 설명 문장·마크다운 코드블록 금지. 모르는 값은 null.',
       '',
-      '{"date":"2026-09-17","rows":[{"sup":"최태식","dong":"215동 특화동","part":"15F 벽체"}]}'
+      '{"date":"2026-09-17","rows":[{"sup":"최태식","dong":"215동 특화동","part":"15F 벽체",' +
+      '"mix":"25-30-180(초유지)","vendor":"(주)삼표산업(서부)","qty":198}]}'
     ].join('\n')
   };
 
@@ -3581,7 +4122,18 @@
 
   function normDong(s) { return buildDongStr(extractDong(s)); }
 
-  /* rows(구조화 JSON) → { dong,dongMain,specKey,age,castDay,testDay,derived,offAge,hasSpecial }[] */
+  /* 규격·업체·물량(2026-09-29) — 모델 값을 앱 규칙으로 다듬는다. 없으면 빈 문자열
+     mix/vendor 는 trim 40자, qty 는 숫자·점만 12자(「198㎥」→「198」) */
+  function trimText(v, n) { return (v === null || v === undefined) ? '' : String(v).trim().slice(0, n); }
+  function extras(row) {
+    return {
+      mix: trimText(row && row.mix, 40),
+      vendor: trimText(row && row.vendor, 40),
+      qty: U.normQty(row && row.qty)   // 첫 숫자 토큰만(「198 m3」→「198」 — 예전 숫자·점 걸러내기는 「1983」을 만들었다)
+    };
+  }
+
+  /* rows(구조화 JSON) → { dong,dongMain,specKey,age,castDay,testDay,derived,offAge,hasSpecial,mix,vendor,qty }[] */
   function scheduleItems(rows) {
     const out = [];
     const seen = Object.create(null);
@@ -3643,9 +4195,11 @@
       const key = dong + '|' + specKey + '|' + castDay + '|' + testDay;
       if (seen[key]) return;                              // 같은 것이 여러 행이면 하나만
       seen[key] = 1;
+      const x = extras(row);
       out.push({ dong: dong, dongMain: dongMain, specKey: specKey, age: age,
                  castDay: castDay, testDay: testDay,
-                 derived: derived, offAge: offAge, hasSpecial: hasSpecial });
+                 derived: derived, offAge: offAge, hasSpecial: hasSpecial,
+                 mix: x.mix, vendor: x.vendor, qty: x.qty });
     });
 
     return out;
@@ -3714,7 +4268,8 @@
       const key = dong + '|' + sup;
       if (seen[key]) return;
       seen[key] = 1;
-      items.push({ dong: dong, sup: sup, part: part });
+      const x = extras(row);
+      items.push({ dong: dong, sup: sup, part: part, mix: x.mix, vendor: x.vendor, qty: x.qty });
     });
 
     return items;
@@ -4506,7 +5061,8 @@
       id: null, day: day, testDay: day, specKey: key, dong: '',
       jugu: U.jugu(),                  // 만들 때의 주구가 이 작업의 소속이다
       castDay: defaultCast(key, day),
-      supervisor: '', part: '', photos: [], values: [],
+      supervisor: '', part: '', mix: '', vendor: '', qty: '',   // part=타설부위·메모, mix=규격, vendor=업체, qty=물량(㎥)
+      photos: [], values: [],
       factor: (Spec.byKey(key) && Spec.byKey(key).factor) || Calc.DEFAULT_FACTOR
     };
   }
@@ -6221,6 +6777,8 @@
       zb.classList.toggle('off', zb.disabled);
       zb.textContent = n ? ('파일 내보내기 — ' + zipTitle()) : '파일 내보내기';
     }
+    const rb = U.$('#tasks-record');   // 기록서만 — 강도값이 있어야 대장이 나온다
+    if (rb) { const hv = n ? rows.some((t) => Task.filledSets(t).length > 0) : false; rb.disabled = !hv; rb.classList.toggle('off', rb.disabled); }
     btn.textContent = (n && p) ? ('날짜별 ' + gd) : '날짜별';
     if (btnSup) btnSup.textContent = (n && p) ? ('감리별 ' + gs) : '감리별';
     info.textContent = n
@@ -6654,10 +7212,22 @@
   const mmdd = (d) => (d ? String(d).slice(5).replace('-', '') : '0000');
   // 압축파일 이름 — 「8월 25일 강도시험분.zip」 꼴(사용자 지시)
   const zipTitle = () => (base.getMonth() + 1) + '월 ' + base.getDate() + '일 강도시험분.zip';
+  const recordsTitle = () => (base.getMonth() + 1) + '월 ' + base.getDate() + '일 기록서.zip';
+  /* 기록서(xlsm) 안에 넣을 사진은 긴 변 1000px 로 줄인 사본 — 폴더의 원본 .jpg 와 두 번 실리는 분량을 절반 밑으로(감사 지적: 폰 용량·피크 메모리). 실패하면 원본 그대로 */
+  async function shrinkJpeg(u8) {
+    try {
+      const img = await U.processImage(new Blob([u8], { type: 'image/jpeg' }), { maxSide: 1000, thumbSide: 48, quality: 0.8 });
+      const b = img && img.full;
+      if (b && b.size && b.size < u8.length) return new Uint8Array(await b.arrayBuffer());
+    } catch (e) {}
+    return u8;
+  }
 
-  async function exportDayZip(rows) {
-    U.toast('압축파일 만드는 중…', 60000);
-    const zipName = zipTitle();
+  /* mode 'records' = 기록서만(사진·강도값 파일 없이 시험 대장 xlsm 만 — 한 권이면 xlsm 그대로, 여러 권이면 「N월 D일 기록서.zip」, 2026-09-29 사용자 지시) */
+  async function exportDayZip(rows, mode) {
+    const recordsOnly = mode === 'records';
+    U.toast(recordsOnly ? '기록서 만드는 중…' : '압축파일 만드는 중…', 60000);
+    const zipName = recordsOnly ? recordsTitle() : zipTitle();
     const entries = [];
     const used = Object.create(null);          // 같은 동·날짜가 겹치면 _2, _3 …
     const uniq = (name) => {
@@ -6681,9 +7251,10 @@
         const dtag = (Spec.md(Task.reportDayOf(t) || t.day) || '').replace('/', '.');
         const fname = (k) => (dtag ? dtag + ' ' : '') + ZIP_FOLDER[k];
         // 28일은 수중/봉함 칸이 각각 제 폴더로, 단일재령·구버전(water/seal)은 분류 폴더로
+        // key = 분류 키(단일재령은 t.specKey, 28일은 칸 키 water|seal) — 기록서 양식 고르기(Record.kindOf)에 쓴다
         const pieces = Task.hasSubs(t)
-          ? Spec.SUBS.map((s) => ({ folder: fname(s.key), box: Task.subOf(t, s.key) }))
-          : [{ folder: ZIP_FOLDER[t.specKey] ? fname(t.specKey) : '', box: { photos: (t.photos || []), sets: Task.setsOf(t) } }];
+          ? Spec.SUBS.map((s) => ({ folder: fname(s.key), box: Task.subOf(t, s.key), key: s.key }))
+          : [{ folder: ZIP_FOLDER[t.specKey] ? fname(t.specKey) : '', box: { photos: (t.photos || []), sets: Task.setsOf(t) }, key: t.specKey }];
         // 사진·열 이름은 동만(사용자 지시) — 날짜는 폴더가 이미 말해 준다
         const nameBase = U.safeName(Task.dongOf(t) || '동미지정', '동미지정');
 
@@ -6709,7 +7280,12 @@
           const suf = key.slice((pc.folder + '/' + nameBase).length);           // '' 또는 '_2'
           const base = (Task.dongOf(t) || '동미지정') + (suf ? ' (' + suf.slice(1) + ')' : '');
           // 강도값.html 카드 — 세트 열 + 회차별 사진(썸네일은 data URI 로 심어 압축을 안 풀어도 보인다, 크게 보기는 같은 폴더의 원본)
-          const card = { dong: base, sup: supText(t), cast: t.castDay || '', test: Task.testDayOf(t) || '', sets: [], pairs: [] };
+          const card = { dong: base, sup: supText(t), cast: t.castDay || '', test: Task.testDayOf(t) || '', specKey: pc.key, sets: [], pairs: [],
+                         // 기록서 정보 블록(업체·규격·물량·타설부위 — 플래너/OCR 이 잡아 둔 것). 없으면 기록서엔 빈 칸으로 남는다
+                         info: { vendor: t.vendor || '', mix: t.mix || '', qty: t.qty || '', part: t.part || '', dong: Task.dongOf(t) || '', cast: t.castDay || '', test: Task.testDayOf(t) || '' },
+                         // 기록서 대장 블록용 — **세트 순서 그대로(빈 세트 포함)**. 봉함은 블록 j ↔ 회차 j(pairsOf 가 빈 세트도 회차로 센다)라
+                         // 값 든 것만 추린 card.sets 를 쓰면 값과 사진이 다른 회차에 실린다(감사 지적). 빈 블록은 record.js 가 값·서명 없이 둔다
+                         blocks: allSets.map((s) => ({ vals: (s.values || []).map((v) => v.v) })) };
 
           if (ids.length) {
             let photos = [];
@@ -6727,9 +7303,11 @@
                 if (!b) continue;
                 const n = (cnt[lab] = (cnt[lab] || 0) + 1);
                 const name = uniqEntry(key + lab + '_' + n + '.jpg');
-                entries.push({ name: name, data: new Uint8Array(await b.arrayBuffer()) });
+                const data = new Uint8Array(await b.arrayBuffer());
+                entries.push({ name: name, data: data });
                 const th = (p.thumb instanceof Blob) ? p.thumb : (p.thumb ? new Blob([p.thumb], { type: 'image/jpeg' }) : null);
-                pcard.photos.push({ name: name.slice(pc.folder.length + 1), thumb: await blobToDataUrl(th) });
+                // bytes = 같은 JPEG 를 기록서 사진대지가 그대로 재사용(다시 인코딩하지 않는다)
+                pcard.photos.push({ name: name.slice(pc.folder.length + 1), thumb: await blobToDataUrl(th), bytes: data });
               }
               card.pairs.push(pcard);
             }
@@ -6770,14 +7348,55 @@
       for (const folder of Object.keys(pages)) {
         entries.push({ name: folder + '/강도값.html', data: new TextEncoder().encode(valuesHtml(folder, pages[folder])) });
       }
+      // 폴더별 기록서(시험 대장 xlsm, 2026-09-29 사용자 지시) — 수직·수평·필러는 거푸집 탈형 양식, 봉함은 봉함양생 양식
+      // (수중·큐브몰드는 양식이 없다). 실패하면 **그 폴더의 기록서만** 빠지고 ZIP 은 그대로 낸다 + 토스트 한 줄.
+      let recFail = false;
+      const recEntries = [];   // 기록서만 모아 두는 목록(recordsOnly 에서 쓴다)
+      if (global.Record) {
+        for (const folder of Object.keys(pages)) {
+          const cards = pages[folder];
+          const kind = Record.kindOf(cards[0] && cards[0].specKey);   // 폴더 = 분류 하나
+          if (!kind) continue;
+          try {
+            // 사진은 폴더의 .jpg 와 xlsm 안(xl/media)에 **두 번** 담긴다(스펙: 재인코딩 없이 재사용) — 기록서가 붙는 폴더는 ZIP 이 사진 분량만큼 커진다
+            const recCards = [];
+            for (const c of cards) {
+              const pairs = [];
+              for (const pr of c.pairs) { const ph = []; for (const p of pr.photos) if (p.bytes) ph.push(await shrinkJpeg(p.bytes)); pairs.push({ photos: ph }); }
+              recCards.push({ name: c.dong, test: c.test, specKey: c.specKey, info: c.info,
+                              sets: c.blocks || c.sets.map((s) => ({ vals: s.vals })), pairs: pairs });
+            }
+            const bytes = await Record.buildBytes(kind, recCards);
+            const rec = { name: folder + '/' + Record.fileName(kind), data: bytes, kind: kind, folder: folder };
+            entries.push(rec); recEntries.push(rec);
+          } catch (e) { console.warn('[zip] 기록서 실패', folder, e); recFail = true; }
+        }
+      }
+      const recNote = recFail ? ' · 기록서는 만들지 못했습니다' : '';
 
+      if (recordsOnly) {
+        // 기록서만 — 한 권이면 xlsm 을 그대로(「9.29 수직 거푸집 탈형 압축강도 시험 대장.xlsm」), 여러 권이면 폴더째 zip
+        if (!recEntries.length) { U.toast(recFail ? '기록서를 만들지 못했습니다' : '기록서를 만들 작업이 없습니다 — 수직·수평·필러·봉함 강도값이 있어야 합니다'); return; }
+        let blob, outName;
+        if (recEntries.length === 1) {
+          const r = recEntries[0];
+          blob = new Blob([r.data], { type: 'application/vnd.ms-excel.sheet.macroEnabled.12' });
+          outName = r.folder.replace(/[\\/]+/g, ' ') + ' ' + Record.fileName(r.kind);
+        } else { blob = Share.makeZip(recEntries); outName = zipName; }
+        const how2 = await Share.exportFile(blob, outName, outName);
+        if (how2 === 'cancel') U.toast('내보내기를 취소했습니다');
+        else if (how2 === 'fail') U.toast('공유에 실패했습니다');
+        else if (how2 === 'download') U.toast(outName + ' 파일로 저장했습니다' + recNote);
+        else U.toast(outName + ' — 보낼 앱을 선택하세요' + recNote);
+        return;
+      }
       if (!entries.length) { U.toast('내보낼 사진·강도값이 없습니다'); return; }
       const zip = Share.makeZip(entries);
       const how = await Share.exportFile(zip, zipName, zipName);
       if (how === 'cancel') U.toast('내보내기를 취소했습니다');
       else if (how === 'fail') U.toast('공유에 실패했습니다');
-      else if (how === 'download') U.toast(zipName + ' 파일로 저장했습니다');
-      else U.toast(zipName + ' — 보낼 앱을 선택하세요');
+      else if (how === 'download') U.toast(zipName + ' 파일로 저장했습니다' + recNote);
+      else U.toast(zipName + ' — 보낼 앱을 선택하세요' + recNote);
     } catch (e) {
       console.error('[zip]', e);
       U.toast('압축파일을 만들지 못했습니다');
@@ -6856,6 +7475,13 @@
       if (!rows.length) { U.toast('작업을 선택하세요'); return; }
       exportDayZip(rows);
     });
+    // 기록서만 따로(2026-09-29 사용자 지시) — 같은 수집 로직, 산출물만 시험 대장 xlsm
+    const rb = U.$('#tasks-record');
+    if (rb) rb.addEventListener('click', () => {
+      const rows = selected();
+      if (!rows.length) { U.toast('작업을 선택하세요'); return; }
+      exportDayZip(rows, 'records');
+    });
 
     // 홈뿐 아니라 여기서도 등록한다. 보고 있는 날짜에 그대로 만든다.
     U.$('#tasks-add').addEventListener('click', () => {
@@ -6909,7 +7535,9 @@
     clearTimeout(autoT);
     const owner = tk;
     autoT = setTimeout(() => {
-      if (!owner || tk !== owner || !dirty || !hasSubstance()) return;
+      if (!owner || tk !== owner || !dirty) return;
+      collect();   // 입력칸 → tk 로 먼저 옮겨야 규격·업체·물량·메모만 친 새 초안도 「내용 있음」으로 잡힌다(감사 지적 — 예전엔 닫기·이탈에서만 살았다)
+      if (!hasSubstance()) return;
       save(true);
     }, AUTOSAVE_MS);
   }
@@ -6917,6 +7545,7 @@
     if (!tk) return false;
     if (tk.id) return true;
     if ((tk.dong || "").trim() || (tk.part || "").trim()) return true;
+    if ((tk.mix || "").trim() || (tk.vendor || "").trim() || (tk.qty || "").trim()) return true;   // 규격·업체·물량도 내용이다
     if (photoIdsOf(tk).length) return true;
     try { if (Task.filledSets(tk).length) return true; } catch (e) {}
     return false;
@@ -7046,13 +7675,18 @@
       id: U.uid(), mode: U.mode(), castDay: planCastDay(), dong: plDong,
       supervisor: plSup, supPhone: plPhone,
       floor: ($('#plan-floor') ? $('#plan-floor').value.replace(/\D/g, '').slice(0, 3) : ''),   // 방통 모드: 층(선택)
-      part: ($('#plan-part') ? $('#plan-part').value.trim() : ''),
+      part: ($('#plan-part') ? $('#plan-part').value.trim() : ''),   // 타설부위
+      // 규격·업체·물량(선택, 2026-09-29) — 올린 작업 전부에 실린다
+      mix: ($('#plan-mix') ? $('#plan-mix').value.trim().slice(0, 40) : ''),
+      vendor: ($('#plan-vendor') ? $('#plan-vendor').value.trim().slice(0, 40) : ''),
+      qty: ($('#plan-qty') ? U.normQty($('#plan-qty').value) : ''),
       specs: plAllSpecs()
     });
     plSave();
-    // 연속 입력 대비 — 날짜는 유지, 동·감리·부위만 비운다
+    // 연속 입력 대비 — 날짜는 유지, 동·감리·부위·규격·업체·물량만 비운다
     plDong = ''; plSup = ''; plPhone = '';
     if ($('#plan-part')) $('#plan-part').value = '';
+    ['#plan-mix', '#plan-vendor', '#plan-qty'].forEach((id) => { if ($(id)) $(id).value = ''; });
     if ($('#plan-floor')) $('#plan-floor').value = '';
     renderPlanPick(); renderPlanBuf();
     U.buzz(6);
@@ -7074,7 +7708,8 @@
       const card = U.el('div', 'bang-saved-item');
       const main = U.el('div', 'bang-si-main');
       main.appendChild(U.el('span', 'bang-si-sup', it.dong));
-      const sub = [it.supervisor || '감리 미지정', Spec.md(it.castDay) + ' 타설', it.floor ? it.floor + '층' : '', it.part || '']
+      const sub = [it.supervisor || '감리 미지정', Spec.md(it.castDay) + ' 타설', it.floor ? it.floor + '층' : '', it.part || '',
+        it.mix || '', it.vendor || '', it.qty ? it.qty + '㎥' : '']   // 있으면 「규격 · 업체 · N㎥」 덧붙임
         .filter(Boolean).join(' · ');
       main.appendChild(U.el('span', 'bang-si-sub', sub));
       // 분류 체크박스 — 기본 전부 켬, 끈 분류는 올릴 때 뺀다(사용자 지시)
@@ -7233,7 +7868,8 @@
           try {
             await Store.putTask({ day: testDay, testDay: testDay, specKey: 'cube', castDay: it.castDay,
               dong: it.dong, jugu: U.jugu(), supervisor: it.supervisor || '', supPhone: it.supPhone || '',
-              part: it.part || '', photos: [], sets: [], planId: planId });
+              part: it.part || '', mix: it.mix || '', vendor: it.vendor || '', qty: it.qty || '',
+              photos: [], sets: [], planId: planId });
             ok++;
           } catch (e) { console.error('[planner cube]', e); }
         }
@@ -7258,7 +7894,8 @@
           day: p.testDay, testDay: p.testDay, specKey: p.spec.key, castDay: it.castDay,
           dong: it.dong, jugu: U.jugu(),
           supervisor: it.supervisor || '', supPhone: it.supPhone || '',
-          part: it.part || '', photos: [], sets: [], planId: planId
+          part: it.part || '', mix: it.mix || '', vendor: it.vendor || '', qty: it.qty || '',
+          photos: [], sets: [], planId: planId
         });
         ok++;
       } catch (e) { console.error('[planner]', e); }
@@ -7334,6 +7971,7 @@
         supervisor: c ? Contacts.label(c) : (it.sup || ''),
         supPhone: c ? (c.phone || '') : '',
         part: it.part || '',
+        mix: it.mix || '', vendor: it.vendor || '', qty: it.qty || '',   // 계획표의 규격·업체·물량(OCR)
         specs: plAllSpecs()
       });
       added++;
@@ -7401,6 +8039,10 @@
     $('#tk-cast').value = tk.castDay || '';
     $('#tk-day').value = Task.testDayOf(tk);
     $('#tk-part').value = tk.part || '';
+    // 규격·업체·물량(선택, 2026-09-29)
+    if ($('#tk-mix')) $('#tk-mix').value = tk.mix || '';
+    if ($('#tk-vendor')) $('#tk-vendor').value = tk.vendor || '';
+    if ($('#tk-qty')) $('#tk-qty').value = tk.qty || '';
     const pm = $('#tk-photomark');
     if (pm) pm.checked = !!tk.photoMark;
     clearHints();          // 앞서 연 작업의 추천 칩이 남아 있으면 안 된다
@@ -8226,7 +8868,11 @@
     tk.testDay = $('#tk-day').value || Task.testDayOf(tk);
     const wd = $('#tk-workday');
     if (wd && wd.value) tk.day = wd.value;
-    tk.part = $('#tk-part').value.trim();   // 순수 메모
+    tk.part = $('#tk-part').value.trim();   // 타설부위 · 메모(순수 텍스트)
+    // 규격·업체·물량 — 선택 입력. 물량은 숫자·점만 남긴다
+    if ($('#tk-mix')) tk.mix = $('#tk-mix').value.trim().slice(0, 40);
+    if ($('#tk-vendor')) tk.vendor = $('#tk-vendor').value.trim().slice(0, 40);
+    if ($('#tk-qty')) tk.qty = U.normQty($('#tk-qty').value);
     return tk;                    // supervisor/supPhone 은 감리 선택에서 채운다
   }
 
@@ -8389,6 +9035,11 @@
     $('#tk-export').addEventListener('click', () => { exportTask(); });
 
     $('#tk-part').addEventListener('input', () => { markDirty(); });
+    // 규격·업체·물량 — 타이핑마다 자동저장 대기(값은 collect 가 읽는다)
+    ['#tk-mix', '#tk-vendor', '#tk-qty'].forEach((id) => {
+      const el = $(id);
+      if (el) el.addEventListener('input', () => { markDirty(); });
+    });
     // 「사진」 배지 체크 — 표시 전용, 아무 기능에도 영향 없음(사용자 지시)
     const pmBox = $('#tk-photomark');
     if (pmBox) pmBox.addEventListener('change', () => {
@@ -9663,7 +10314,8 @@
                ' · 타설 ' + Spec.md(it.castDay) + ' → 시험 ' + Spec.md(it.testDay) +
                ' · ' + (it.sup ? Contacts.label(it.sup) : '감리 미지정') +
                (it.hasSpecial ? ' (특화동 포함 — 감리 확인!)' : '') +
-               (it.offAge ? ' (재령 확인!)' : '');
+               (it.offAge ? ' (재령 확인!)' : '') +
+               (it.mix ? ' · 규격 ' + it.mix : '') + (it.vendor ? ' · ' + it.vendor : '') + (it.qty ? ' · ' + it.qty + '㎥' : '');   // 읽은 규격·업체·물량도 사람이 확정(감사 지적)
       }).join('\n');
       const title = '읽은 작업 ' + fresh.length + '건' +
                     (dup ? ' · 중복 ' + dup + '건 제외' : '') + '\n' + linesTxt;
@@ -9681,7 +10333,8 @@
 
               supervisor: sup ? Contacts.label(sup) : '',
               supPhone: sup ? sup.phone : '',
-              part: '', photos: [], sets: []
+              part: '', photos: [], sets: [],
+              mix: it.mix || '', vendor: it.vendor || '', qty: it.qty || ''   // 일정표에 열이 있을 때만(2026-09-29)
             });
             ok++;
           } catch (e) { console.error('[ocr task]', e); }

@@ -488,7 +488,11 @@
     <button class="btn btn-kakao off" id="tasks-send" disabled>날짜별</button>
     <button class="btn btn-kakao off" id="tasks-send-sup" disabled>감리별</button>
     <!-- 파일(압축) 내보내기 — 시트 안이 아니라 여기 전용 버튼(사용자 지시) -->
-    <button class="btn btn-zip off" id="tasks-zip" disabled>파일 내보내기</button>
+    <div class="zip-row">
+      <button class="btn btn-zip off" id="tasks-zip" disabled>파일 내보내기</button>
+      <!-- 기록서(시험 대장 xlsm)만 따로 — 파일 내보내기엔 이미 동봉된다(2026-09-29 사용자 지시) -->
+      <button class="btn btn-zip btn-record off" id="tasks-record" disabled>기록서만</button>
+    </div>
   </div>
 </section>
 
@@ -558,8 +562,26 @@
     </div>
 
     <label class="field" id="tk-part-field">
-      <span class="field-label">메모 <span class="lbl-sub">자유 기록</span></span>
+      <span class="field-label">타설부위 · 메모 <span class="lbl-sub">자유 기록</span></span>
       <input type="text" id="tk-part" maxlength="60"
+             autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+    </label>
+    <!-- 규격·업체·물량 — 전부 선택(주 경로는 플래너·일정표 OCR). 기록서 정보 블록의 원천 -->
+    <div class="two-col">
+      <label class="field">
+        <span class="field-label">규격 <span class="lbl-sub">선택</span></span>
+        <input type="text" id="tk-mix" maxlength="40" placeholder="25-30-180"
+               autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+      </label>
+      <label class="field">
+        <span class="field-label">업체 <span class="lbl-sub">선택</span></span>
+        <input type="text" id="tk-vendor" maxlength="40"
+               autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+      </label>
+    </div>
+    <label class="field field-qty">
+      <span class="field-label">물량(㎥) <span class="lbl-sub">선택</span></span>
+      <input type="text" id="tk-qty" inputmode="decimal" maxlength="12"
              autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
     </label>
 
@@ -722,8 +744,26 @@
       <button class="pick-box" id="plan-sup"><span id="plan-sup-txt">감리 선택</span></button>
     </div>
     <label class="field">
-      <span class="field-label">부위 메모 <span class="lbl-sub">선택</span></span>
+      <span class="field-label">타설부위 <span class="lbl-sub">선택</span></span>
       <input type="text" id="plan-part" maxlength="60"
+             autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+    </label>
+    <!-- 규격·업체·물량(선택) — 계획표 OCR 이 채우고, 올린 작업 전부에 실린다 -->
+    <div class="two-col">
+      <label class="field">
+        <span class="field-label">규격 <span class="lbl-sub">선택</span></span>
+        <input type="text" id="plan-mix" maxlength="40" placeholder="25-30-180"
+               autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+      </label>
+      <label class="field">
+        <span class="field-label">업체 <span class="lbl-sub">선택</span></span>
+        <input type="text" id="plan-vendor" maxlength="40"
+               autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+      </label>
+    </div>
+    <label class="field field-qty">
+      <span class="field-label">물량(㎥) <span class="lbl-sub">선택</span></span>
+      <input type="text" id="plan-qty" inputmode="decimal" maxlength="12"
              autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
     </label>
     <button class="btn btn-calc" id="plan-add">
