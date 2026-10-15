@@ -236,9 +236,39 @@
       </div>
     </div>
 
+    <!-- 감리 휴무 상황판 — 홈 기준 날짜의 휴무 감리(빨강) + 상황판 사진 올리기. leave.js. 모든 모드에서 보인다(.todo-card 아님) -->
+    <div class="card leave-card" id="home-leave">
+      <button class="leave-main" id="leave-main" type="button">
+        <span class="leave-line" id="leave-line">휴무 감리 없음</span>
+        <span class="leave-sub" id="leave-sub"></span>
+      </button>
+      <button class="leave-up" id="leave-up" type="button">
+        <svg class="ic" aria-hidden="true"><use href="#ic-scan"/></svg>상황판
+      </button>
+    </div>
 
-    <!-- 물성 모드 — 아직 빈 화면(사용자 지시: 준비 중) -->
-    <div class="card prop-card hidden" id="home-prop"><b>물성시험</b><span>준비 중입니다</span></div>
+
+    <!-- 물성 모드(2026-10-15) — 그날 물성시험 목록 + 버튼. 오늘 작업 카드(.todo-card)는 물성 모드에서 숨고 이 카드가 그 자리를 쓴다. prop.js renderHomeList -->
+    <div class="card prop-home hidden" id="home-prop">
+      <div class="todo-head">
+        <span id="prop-home-title">오늘 물성시험</span>
+        <b id="prop-home-count">0건</b>
+      </div>
+      <div class="task-list" id="prop-home-list"></div>
+      <div class="task-btns">
+        <button class="task-add" id="prop-add">
+          <svg class="ic" aria-hidden="true"><use href="#ic-plus"/></svg>물성시험
+        </button>
+        <!-- 판넬 사진 → OCR → 물성시험 자동 등록 -->
+        <button class="task-add" id="prop-scan">
+          <svg class="ic" aria-hidden="true"><use href="#ic-scan"/></svg>판넬 스캔
+        </button>
+        <!-- 플래너는 #home-plan 으로 넘긴다 — 같은 화면이 물성 모드면 「물성 플래너」(분류 체크 「물성」 하나, taskui.openPlanner) -->
+        <button class="task-add" id="prop-plan">
+          <svg class="ic" aria-hidden="true"><use href="#ic-note"/></svg>플래너
+        </button>
+      </div>
+    </div>
 
     <!-- 작업 -->
     <div class="card todo-card">
@@ -331,7 +361,22 @@
     </button>
   </header>
 
-  <div class="card prop-card hidden" id="calc-prop"><b>물성시험</b><span>준비 중입니다</span></div>
+  <!-- 물성 모드 = 외기온도판(2026-10-15) — 판넬 비고란에 그대로 옮겨 적는 숫자라 가장 크게. prop.js renderTemp -->
+  <div class="card prop-temp hidden" id="calc-prop">
+    <div class="prop-temp-cap">현재 외기 온도</div>
+    <div class="prop-temp-big" aria-live="polite"><b id="prop-temp-val">–</b><span>℃</span></div>
+    <div class="prop-temp-sub" id="prop-temp-sub"></div>
+    <div class="prop-temp-sub" id="prop-temp-range"></div>
+    <div class="prop-temp-ago" id="prop-temp-ago"></div>
+    <div class="prop-temp-btns">
+      <button class="btn" id="prop-temp-refresh">
+        <svg class="ic" aria-hidden="true"><use href="#ic-refresh"/></svg>새로고침
+      </button>
+      <button class="btn btn-calc" id="prop-temp-scan">
+        <svg class="ic" aria-hidden="true"><use href="#ic-scan"/></svg>판넬 스캔
+      </button>
+    </div>
+  </div>
 
   <div class="link-bar hidden" id="calc-link">
     <div class="link-txt">
@@ -446,8 +491,6 @@
     </button>
   </header>
 
-  <div class="card prop-card hidden" id="tasks-prop"><b>물성시험</b><span>준비 중입니다</span></div>
-
   <div class="day-nav tasks-nav">
     <button class="day-arrow" id="tasks-prev" aria-label="이전 날">
       <svg class="ic" aria-hidden="true"><use href="#ic-back"/></svg>
@@ -482,7 +525,7 @@
   </button>
 
   <!-- 내보내기는 두 갈래다(사용자 지시).
-       날짜별 = 같은 날 같은 분류끼리 「7/22 필러」 · 감리별 = 「201동 수직입니다」 -->
+       날짜별 = 같은 날 같은 분류끼리 「7/22 타설 필러」 · 감리별 = 「201동 7/22 타설 수직입니다」 -->
   <div class="bat-bar">
     <span class="bat-info" id="tasks-info">작업을 선택하세요</span>
     <button class="btn btn-kakao off" id="tasks-send" disabled>날짜별</button>
@@ -577,7 +620,7 @@
       </label>
       <label class="field">
         <span class="field-label">업체 <span class="lbl-sub">선택</span></span>
-        <input type="text" id="tk-vendor" maxlength="40"
+        <input type="text" id="tk-vendor" maxlength="120"
                autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
       </label>
     </div>
@@ -720,6 +763,75 @@
   <input type="file" id="bang-file-pick" accept="image/*" multiple hidden>
 </section>
 
+<!-- ═══════════ 물성시험 편집기 (2026-10-15) — 홈 「물성」 모드의 목록·판넬 스캔·플래너 칩에서 진입. prop.js ═══════════ -->
+<section class="view hidden editor" id="view-prop" data-view="prop">
+  <header class="topbar">
+    <button class="icon-btn" id="prop-back" aria-label="뒤로">
+      <svg class="ic" aria-hidden="true"><use href="#ic-back"/></svg>
+    </button>
+    <h1 id="prop-heading">물성시험</h1>
+    <button class="icon-btn hidden" id="prop-delete" aria-label="삭제">
+      <svg class="ic" aria-hidden="true"><use href="#ic-trash"/></svg>
+    </button>
+  </header>
+
+  <div class="ed-scroll" id="prop-scroll">
+    <label class="field">
+      <span class="field-label">타설일 <span class="lbl-sub">시험일과 같음</span></span>
+      <input type="date" id="prop-day">
+    </label>
+    <div class="field">
+      <span class="field-label">동수</span>
+      <button class="pick-box" id="prop-dong"><span id="prop-dong-txt">동 선택</span></button>
+    </div>
+    <div class="field">
+      <span class="field-label">담당 감리</span>
+      <button class="pick-box" id="prop-sup"><span id="prop-sup-txt">감리 선택</span></button>
+    </div>
+    <!-- 타설부위 — 동을 앞에 한 번 더 쓴다(Task.placeOf). 비면 동수가 흐린 글씨, 저장 땐 동을 접두 -->
+    <label class="field">
+      <span class="field-label">타설부위 <span class="lbl-sub">동 포함</span></span>
+      <input type="text" id="prop-place" maxlength="60"
+             autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+    </label>
+    <!-- 규격은 KS 다이얼(편집기와 같은 시트 — TaskUI.openMixDial) -->
+    <div class="two-col">
+      <label class="field">
+        <span class="field-label">규격 <span class="lbl-sub">KS 선택</span></span>
+        <input type="text" id="prop-mix" maxlength="40" placeholder="25-30-180" readonly
+               autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+      </label>
+      <label class="field">
+        <span class="field-label">업체 <span class="lbl-sub">선택</span></span>
+        <input type="text" id="prop-vendor" maxlength="80"
+               autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+      </label>
+    </div>
+    <label class="field">
+      <span class="field-label">메모 <span class="lbl-sub">자유 기록</span></span>
+      <input type="text" id="prop-memo" maxlength="60"
+             autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+    </label>
+
+    <!-- 시험 카드들 — 시험마다 사진 2장(판넬·전경)과 값 8칸. prop.js renderTests -->
+    <div class="field">
+      <span class="field-label">시험 <b id="prop-tests-n">0</b>회 <span class="lbl-sub">사진은 판넬·전경 2장이 한 묶음</span></span>
+      <div id="prop-tests"></div>
+      <button class="btn btn-calc" id="prop-add-test">
+        <svg class="ic" aria-hidden="true"><use href="#ic-plus"/></svg>시험 추가
+      </button>
+    </div>
+  </div>
+
+  <div class="ed-actions">
+    <button class="btn btn-primary" id="prop-save">저장</button>
+  </div>
+
+  <!-- 웹 폴백용 파일 입력(네이티브 카메라가 없을 때만) -->
+  <input type="file" id="prop-file-shoot" accept="image/*" capture="environment" hidden>
+  <input type="file" id="prop-file-pick" accept="image/*" multiple hidden>
+</section>
+
 <!-- ═══════════ 공시체 플래너 (전용 화면 — 대기 목록 + 계획표 OCR) ═══════════ -->
 <section class="view hidden editor" id="view-plan" data-view="plan">
   <header class="topbar">
@@ -757,7 +869,8 @@
       <input type="text" id="plan-part" maxlength="60"
              autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
     </label>
-    <!-- 규격·업체·물량(선택) — 계획표 OCR 이 채우고, 올린 작업 전부에 실린다. 규격은 KS 다이얼(편집기와 같은 시트) -->
+    <!-- 규격·업체·물량(선택) — 계획표 OCR 이 채우고, 올린 작업 전부에 실린다. 규격은 KS 다이얼(편집기와 같은 시트).
+         업체 · 물량은 업체마다 쉼표로 — 올릴 때 업체당 빈 계산 세트가 미리 만들어진다(360㎥ 넘으면 28일은 LOT 로 나뉨) -->
     <div class="two-col">
       <label class="field">
         <span class="field-label">규격 <span class="lbl-sub">KS 선택</span></span>
@@ -765,14 +878,14 @@
                autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
       </label>
       <label class="field">
-        <span class="field-label">업체 <span class="lbl-sub">선택</span></span>
-        <input type="text" id="plan-vendor" maxlength="40"
+        <span class="field-label">물량(㎥) <span class="lbl-sub">합계 · 선택</span></span>
+        <input type="text" id="plan-qty" inputmode="decimal" maxlength="12"
                autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
       </label>
     </div>
-    <label class="field field-qty">
-      <span class="field-label">물량(㎥) <span class="lbl-sub">선택</span></span>
-      <input type="text" id="plan-qty" inputmode="decimal" maxlength="12"
+    <label class="field">
+      <span class="field-label">업체 · 물량 <span class="lbl-sub">업체마다 쉼표로 · 선택</span></span>
+      <input type="text" id="plan-vendor" maxlength="120" placeholder="삼표안양 300, 우진 300"
              autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
     </label>
     <button class="btn btn-calc" id="plan-add">
@@ -899,6 +1012,7 @@
       var N = window.Nav;
       if (N && (N.isTaskOpen() || N.isSupOpen() || N.isAIOpen() || N.isAuditOpen() || N.isPlanOpen())) return false;
       if (window.Bangtong && Bangtong.isOpen()) return false;
+      if (window.Prop && ((Prop.isOpen && Prop.isOpen()) || (Prop.isBusy && Prop.isBusy()) || (Prop.hasSelection && Prop.hasSelection()))) return false;   // 물성 편집기·판넬 판독 중·작업탭 선택
       if (window.Powder && Powder.isOpen()) return false;
       var back = document.getElementById('sheet-back');
       if (back && !back.classList.contains('hidden')) return false;
@@ -906,6 +1020,7 @@
       if (window.Calc && Calc.isLinked && Calc.isLinked()) return false;
       if (window.Store && Store.isRestoring && Store.isRestoring()) return false;
       if (window.OCR && OCR.isBusy && OCR.isBusy()) return false;
+      if (window.Leave && Leave.isBusy && Leave.isBusy()) return false;     // 감리 근무상황판 판독 중(OCR 과 별개 플래그)
       if (window.Tasks && Tasks.hasSelection && Tasks.hasSelection()) return false;
     } catch (e) {}
     return true;

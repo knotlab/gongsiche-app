@@ -408,12 +408,17 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
 }
 .report-row input:focus{border-color:var(--accent)}
 .report-row .mini-btn{flex:0 0 auto}
-/* 목록 날짜 · 보고 — 위의 타설일/시험일과 똑같은 2열.
-   폭까지 맞춰야 한 세트로 보인다(높이만 맞췄더니 목록 날짜만 짧아 보였다). */
+/* 목록 날짜 — 위의 타설일/시험일과 똑같은 절반 폭.
+   폭까지 맞춰야 한 세트로 보인다(높이만 맞췄더니 목록 날짜만 짧아 보였다). 보고 칸은 아래 규칙으로 다음 줄에 전체 폭. */
 .workday-line{margin-bottom:10px}
 .workday-line .field-sub{margin-top:0;margin-bottom:0}
 .workday-line .field-sub .field-label{font-size:13px}
 .workday-line .field-sub input{max-width:none;padding:11px 12px;font-size:16px}
+/* 보고 문구가 「201동 10/10 시험 28일강도입니다」 꼴로 길어져(타설/시험 표기) 2열 절반 폭(94~129px)엔 어느 폰에서도 안 들어간다 —
+   목록 날짜는 위 날짜칸과 같은 절반 폭을 지키고, 보고 칸은 다음 줄로 접어 한 줄을 통째로 쓴다 */
+.workday-line{flex-wrap:wrap}
+.workday-line .field-sub:first-child{flex:0 0 calc(50% - 4px)}
+.workday-line .field-sub:last-child{flex:1 1 100%}
 /* 값만 보여주는 칸 — 날짜칸과 같은 높이·라운드, 테두리는 없앤다(누르는 곳이 아니다) */
 /* 보고 문구 — 내보내기가 두 갈래라 둘 다 보여 준다(감리별 · 날짜별) */
 .report-prev{
@@ -426,10 +431,11 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
   flex:0 0 auto;width:38px;
   font-size:11px;font-weight:700;color:var(--text-2);
 }
+/* 말줄임 금지 — 미리보기가 잘리면 날짜·낱말을 확인할 수 없다. 띄어쓰기에서 줄을 바꾸고, 낱말 하나가 더 길면 그 안에서 꺾는다 */
 .report-text{
   flex:1 1 auto;min-width:0;
   font-size:15px;font-weight:800;color:var(--accent);
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  white-space:normal;word-break:keep-all;overflow-wrap:anywhere;
 }
 
 
@@ -719,18 +725,20 @@ body.kb-edit .display{padding-bottom:2px}
 .seg button::after{content:'';position:absolute;left:0;right:0;top:-6px;bottom:-6px}
 .seg button.on{background:var(--accent);color:var(--on-accent)}
 
-/* 모드 세그먼트(홈 상단) + 물성 준비 중 카드 — 2026-09-17. propmode 는 계산·작업 탭 본문을 통째로 숨긴다 */
+/* 모드 세그먼트(홈 상단) — 2026-09-17. 물성 모드(2026-10-15): 계산 탭 = 외기온도판(#calc-prop)만 남기고, 작업 탭 = 날짜 이동·그날 물성시험 목록·막대만 남긴다
+   (공시체 전용 검색·칩·AI 검수·기록서만·일정표 OCR 은 숨김). 새 화면의 스타일은 파일 맨 끝 「물성시험」 절 */
 .mode-card{padding:8px}
 .mode-card .seg{width:100%}
 .mode-card .seg button{flex:1 1 0;min-height:38px;font-size:15px;font-weight:700}
-.prop-card{display:flex;flex-direction:column;align-items:center;gap:6px;padding:28px 16px;text-align:center;color:var(--text-2);font-size:15px}
-.prop-card b{color:var(--text);font-size:17px}
-#view-calc.propmode > :not(.topbar):not(.prop-card),
-#view-tasks.propmode > :not(.topbar):not(.prop-card){display:none !important}
-#view-calc.propmode .prop-card,#view-tasks.propmode .prop-card{margin:12px 14px}
-/* 헤더의 추가·OCR·⋯·전체선택 버튼도 막는다 — 안 그러면 「준비 중」 위로 공시체 편집기가 열린다(감사 지적) */
-#view-calc.propmode .topbar > :not(.topbar-mark):not(h1),
+#view-calc.propmode > :not(.topbar):not(#calc-prop){display:none !important}
+/* 계산 탭 헤더의 성적판 OCR·⋯ 메뉴는 공시체 계산기용 — 막는다(안 그러면 외기온도판 위로 공시체 흐름이 열린다, 감사 지적) */
+#view-calc.propmode .topbar > :not(.topbar-mark):not(h1){display:none !important}
+/* 작업 탭 헤더의 전체선택·+·OCR 도 공시체 흐름용이라 막는다 — 선택은 목록 머리 「물성시험」 줄이, 추가는 홈 「+ 물성시험」이 맡는다 */
 #view-tasks.propmode .topbar > :not(.topbar-mark):not(h1){display:none !important}
+#view-tasks.propmode .search-row,
+#view-tasks.propmode #tasks-chips,
+#view-tasks.propmode #tasks-audit,
+#view-tasks.propmode #tasks-record{display:none !important}
 
 /* 스위치 — 체크박스를 숨기고 트랙+손잡이를 그린다 */
 .sw{flex:0 0 auto;position:relative;width:46px;height:28px}
@@ -846,6 +854,49 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
   margin-left:6px;font-size:12px;font-weight:600;color:var(--text-2);
   white-space:nowrap;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;
 }
+
+/* ---------- 감리 휴무 상황판(2026-10-15, leave.js) ----------
+   빨강 = 그날 쉬는 감리(.sup-off, 굵게) + 뒤 꼬리표(.off-tag). .day-head b 가 구체도로 이기므로 그쪽도 같이 적는다 */
+.sup-off,.day-head b.sup-off,.grp-head>span.sup-off{color:var(--danger);font-weight:800}
+.off-tag{
+  display:inline-block;margin-left:5px;padding:1px 6px;border-radius:var(--r-sm);
+  background:#fef2f2;color:#b91c1c;font-size:11px;font-weight:800;line-height:1.4;white-space:nowrap;
+}
+:root[data-theme="dark"] .off-tag{background:#2a1517;color:#fca5a5}
+/* 긴 감리 이름(「HD 주구중심 B3 정민호 상무」) 뒤의 꼬리표가 말줄임에 잘려 사라지지 않게 — 휴무 표시가 붙은 줄만 줄바꿈을 허용한다 */
+.row-sup.sup-off{white-space:normal;word-break:keep-all;overflow:visible}
+.task-part:has(>.row-sup.sup-off){white-space:normal;word-break:keep-all}
+/* 물성 홈 행처럼 감리가 메타 줄(.task-meta) 끝에 붙는 곳 — 한 줄 말줄임이면 줄 끝의 감리·휴무 표시가 먼저 잘려 사라진다: 휴무 표시가 붙은 줄만 줄바꿈 허용 */
+.task-meta:has(>.sup-off){white-space:normal;word-break:keep-all}
+/* 홈 카드 — 한 줄(휴무자) + 작은 글씨(기준 상황판 날짜) + 오른쪽 올리기 버튼 */
+.leave-card{display:flex;align-items:center;gap:8px;padding:5px 8px 5px 13px}
+.leave-main{
+  flex:1 1 auto;min-width:0;min-height:var(--tap);font-size:13px;
+  display:flex;flex-direction:column;justify-content:center;gap:1px;text-align:left;
+}
+.leave-line{font-size:13px;font-weight:700;color:var(--text-2);line-height:1.45;word-break:keep-all}
+.leave-one{white-space:nowrap}
+.leave-kind{font-weight:600;color:var(--text-2)}
+.leave-sub{font-size:11px;font-weight:600;color:var(--text-2)}   /* opacity 를 겹치면 흰 카드 위 대비가 3.7:1 로 떨어진다 */
+.leave-up{
+  flex:0 0 auto;display:flex;align-items:center;gap:5px;height:var(--tap);padding:0 12px;
+  border-radius:var(--r-md);background:var(--surface-2);color:var(--text-2);font-size:14px;font-weight:700;
+}
+.leave-up:active{filter:brightness(.93)}
+.leave-up .ic{width:var(--ic-sm);height:var(--ic-sm);stroke-width:2.4}
+/* 시트 안 목록(상황판 전체 · 읽은 결과 확인) — 버튼은 아래에 고정, 이 목록만 스크롤.
+   둘 다 줄어들 수 있으면 넘치는 높이를 내용 비율로 나눠 가져 「저장」 버튼 칸이 같이 찌그러져 잘린다(360x640 에서 29px) —
+   버튼 칸(.sheet-scroll)은 줄지 않게 못 박고 남는 높이는 이 목록이 다 먹는다 */
+.leave-list{
+  flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;
+  overscroll-behavior:contain;padding:0 2px 8px;
+}
+.leave-list + .sheet-scroll{flex:0 0 auto}
+.leave-row{padding:8px 10px;border-radius:var(--r-md);background:var(--surface-2);margin-bottom:5px}
+.leave-row-top{display:flex;align-items:center;gap:6px}
+.leave-name{font-size:15px;font-weight:800}
+.leave-note{font-size:11px;font-weight:600;color:var(--text-2)}
+.leave-days{margin-top:1px;font-size:12px;font-weight:600;color:var(--text-2);font-variant-numeric:tabular-nums;word-break:keep-all}
 
 /* ---------- 그룹 헤더(작업 탭 = 감리별) ----------
    예전엔 날짜 헤더라 sticky 로 붙여 뒀는데, 지금은 감리 이름이라
@@ -1580,3 +1631,59 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
 /* 편집기 사진 그리드의 쌍(회차) 머리줄 — 「1회차 · A사」 (2026-09-13, 사진 2장=1회차 ↔ 세트) */
 .photo-pair-head{grid-column:1/-1;font-size:12px;font-weight:700;color:var(--text-2);margin:2px 0 -3px}
 .photo-pair-head.off{color:var(--danger);opacity:.85}
+
+/* ---------- 물성시험 (2026-10-15) — 접두 .prop-, prop.js ----------
+   편집기(#view-prop)·홈 카드(#home-prop)·계산 탭 외기온도판(#calc-prop)·작업 탭 목록. 색·모서리·크기는 :root 토큰으로 */
+.sp-prop{background:#d9f3ee;color:#0f766e}   /* 물성 배지 */
+:root[data-theme="dark"] .sp-prop{background:#12302b;color:#5eead4}
+.prop-empty{white-space:pre-line}
+
+/* 외기온도판 — 판넬 비고란에 그대로 옮겨 적는 숫자라 허용 폰트 중 가장 큰 37px 로 */
+.prop-temp{width:auto;margin:12px 14px;padding:22px 14px 16px;text-align:center}
+.prop-temp-cap{font-size:14px;font-weight:700;color:var(--text-2)}
+.prop-temp-big{display:flex;align-items:baseline;justify-content:center;gap:4px;margin:8px 0 6px}
+.prop-temp-big b{font-size:37px;font-weight:800;line-height:1.05;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.prop-temp-big span{font-size:23px;font-weight:800;color:var(--text-2)}
+.prop-temp-sub{margin-top:2px;font-size:14px;font-weight:600;color:var(--text-2);font-variant-numeric:tabular-nums}
+.prop-temp-sub:empty{display:none}
+.prop-temp-ago{margin-top:10px;font-size:12px;font-weight:600;color:var(--text-2);opacity:.85}
+.prop-temp-btns{display:flex;gap:8px;margin-top:16px}
+.prop-temp-btns .btn{flex:1 1 0;min-width:0;height:var(--tap)}
+.prop-temp-btns .btn-calc{width:auto;margin:0}
+
+/* 편집기 — 시험 카드(머리·사진 2칸·판넬 읽기·값 8칸) */
+.prop-test{padding:10px;margin-bottom:10px;border:1px solid var(--line);border-radius:var(--r);background:var(--surface)}
+.prop-test-head{display:flex;align-items:center;gap:6px;margin-bottom:8px}
+.prop-in{
+  width:100%;min-width:0;min-height:var(--tap);padding:9px 11px;border-radius:var(--r-md);
+  border:1px solid var(--line);background:var(--surface);color:var(--text);
+  font-size:16px;font-family:inherit;font-variant-numeric:tabular-nums;outline:none;
+}
+.prop-in:focus{border-color:var(--accent)}
+.prop-round{flex:0 0 56px;width:56px;text-align:center;font-weight:800}
+.prop-round-u{flex:0 0 auto;font-size:15px;font-weight:700;color:var(--text-2)}
+.prop-vend{flex:1 1 auto}
+.prop-test-del{position:relative;flex:0 0 auto;width:var(--tap);height:var(--tap);display:grid;place-items:center;border-radius:var(--r-md);color:var(--danger)}
+.prop-test-del:active{background:var(--surface-2)}
+.prop-test-del .ic{width:var(--ic-md);height:var(--ic-md)}
+.prop-photos{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:8px}
+.prop-photos .photo-cell,.prop-ph-add{aspect-ratio:4/3}
+.prop-photos .photo-cell{cursor:pointer}
+.prop-ph-add{
+  width:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
+  border:2px dashed var(--line);border-radius:var(--r-md);background:var(--surface-2);color:var(--text-2);
+}
+.prop-ph-add:active{filter:brightness(.95)}
+.prop-ph-add .ic{width:var(--ic-lg);height:var(--ic-lg)}
+.prop-ph-add b{font-size:14px;font-weight:800;color:var(--text)}
+.prop-ph-add small{font-size:12px;font-weight:600}
+.prop-read{width:100%;margin:0 0 10px}
+.prop-vals{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+.prop-val{display:block;min-width:0}
+.prop-val.wide{grid-column:1/-1}
+.prop-val-l{display:block;margin-bottom:4px;font-size:12px;font-weight:700;color:var(--text-2)}
+.prop-val-l i{font-style:normal;font-weight:600;opacity:.8}
+.prop-with-btn{display:flex;gap:8px}
+.prop-with-btn .prop-in{flex:1 1 auto}
+.prop-now{flex:0 0 auto;min-height:var(--tap);padding:0 14px;border-radius:var(--r-md);background:var(--accent-soft);color:var(--accent);font-size:14px;font-weight:800}
+.prop-now:active{filter:brightness(.95)}

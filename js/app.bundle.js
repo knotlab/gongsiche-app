@@ -1020,12 +1020,18 @@
     });
 
     if (Array.isArray(t.sets) && t.sets.length) {
-      return t.sets.map((s) => ({
-        id: (s && s.id) || U.uid(),
-        name: ((s && s.name) || '').trim(),
-        values: vals(s && s.values),
-        factor: fac(s && s.factor)
-      }));
+      return t.sets.map((s) => {
+        const o = {
+          id: (s && s.id) || U.uid(),
+          name: ((s && s.name) || '').trim(),
+          values: vals(s && s.values),
+          factor: fac(s && s.factor)
+        };
+        // 업체·LOT 몫의 타설물량(㎥) — 플래너가 미리 만든 세트에만 있다(기록서 대장 타설물량 칸이 블록마다 쓴다).
+        // 빈 문자열도 보존한다: 「이 세트는 물량 모름」이라 작업 합계로 대신 채우지 않는다는 표식(record.js)
+        if (s && typeof s.qty === 'string') o.qty = U.normQty(s.qty);
+        return o;
+      });
     }
     const legacy = vals(t.values);
     if (!legacy.length) return [];
@@ -1133,7 +1139,7 @@
       part: (t.part || '').trim(),           // 메모(순수 텍스트) — 옛 플래너가 부위를 여기 넣은 것도 그대로 둔다(이관 없음)
       // 규격·업체·물량(2026-09-29) — 전부 선택 입력, 주 경로는 플래너·일정표 OCR. 기록서 정보 블록의 원천
       mix: String(t.mix || '').trim().slice(0, 40),
-      vendor: String(t.vendor || '').trim().slice(0, 40),
+      vendor: String(t.vendor || '').trim().slice(0, 120),   // 업체가 여럿이면 이름 나열(「삼표안양, 우진, …」) — 플래너 칸(120자)과 같은 상한
       qty: U.normQty(t.qty),               // 공용 정규화(U.normQty — 편집기·플래너·OCR 과 같은 규칙)
       planId: String(t.planId || '').trim(),   // 플래너 묶음 번호(2026-09-17) — 없으면 동+타설일 자동 묶음(Task.batchKey)
       jugu: (t.jugu === '1' || t.jugu === '24') ? t.jugu : '',   // 비면 동 번호로 추정(Task.juguOf)
@@ -1379,6 +1385,15 @@
     return run((db) => reqp(db.transaction('tasks').objectStore('tasks').count()));
   }
 
+  /* 부팅 복원 판정·백업 리마인더용 건수 = 작업 + bangs 스토어 전부(방통·물성). 백업·미러의 건수(tasks+bangs)와 같은 단위여야 한다 —
+     taskCount 로 견주면 물성(bangs)만 쓰는 기기가 매 부팅 가짜 「복원할까요?」를 보고, 설치형 PWA 는 백업 알림을 못 받는다(감사 2026-10-15). */
+  function recordCount() {
+    return run((db) => {
+      const t = db.transaction(['tasks', 'bangs']);
+      return Promise.all([reqp(t.objectStore('tasks').count()), reqp(t.objectStore('bangs').count())]);
+    }).then((p) => (p[0] || 0) + (p[1] || 0));
+  }
+
   function allTasks() {
     return run((db) => reqp(db.transaction('tasks').objectStore('tasks').getAll()))
       .then((arr) => {
@@ -1394,8 +1409,80 @@
   /* ---------- 방통시험 기록 (날짜별·감리·사진 — 동은 없다) ----------
      w=몰탈무게(g) · s1/s2=슬럼프(mm, 평균 낸다) 는 원본값으로 저장하고 화면이 다시 계산한다. */
   const K_BANG_DAY = 'gsc.filebak.bang.day.v1';
+
+  /* ---------- 물성시험 레코드(2026-10-15) ----------
+     bangs 스토어를 그대로 쓰고 kind:'prop' 로 가른다 — DB 버전·백업·미러·복원·gc 가 전부 getAll 이라 그대로 따라온다.
+       { id, kind:'prop', day(타설일=시험일), dong, place, supervisor, supPhone, jugu, mix, vendor, qty, memo, planId,
+         tests:[{ id, vendor, round, temp, slump, airApp, air, cl1, cl2, water, outTemp, photos:[] }], photos, order, … }
+     값은 **문자열**(판넬에 적힌 그대로 — 「0.010」 의 끝 0 을 보존), 빈 값은 ''. 숫자·점·앞 마이너스만 받는다.
+     **photos 는 tests[].photos 를 순서대로 평탄화한 것**(+레코드 자체 photos 중 빠진 것)으로 매번 다시 계산한다 —
+     gc·deleteTask·deleteRecord·refBangPhotos 가 photos 만 보므로, 이것만으로 시험 사진이 보호된다(그 네 곳은 안 건드린다).
+     시험의 photos 는 칸 위치(0=판넬, 1=전경)를 지키려고 빈 칸을 ''로 남길 수 있다(끝의 빈 칸만 잘라 낸다). */
+  const PROP_VALS = ['temp', 'slump', 'airApp', 'air', 'cl1', 'cl2', 'water', 'outTemp'];
+  function propNum(v) {
+    let s = String(v === null || v === undefined ? '' : v).trim().replace(/[^0-9.\-]/g, '');
+    const neg = s.charAt(0) === '-';
+    s = s.replace(/-/g, '');
+    const i = s.indexOf('.');
+    if (i >= 0) { const j = s.indexOf('.', i + 1); if (j >= 0) s = s.slice(0, j); }   // 점은 하나만 — 둘째 점부터 버린다
+    s = s.replace(/\.$/, '');
+    return /\d/.test(s) ? ((neg ? '-' : '') + s.slice(0, 10)) : '';
+  }
+  const propText = (v, n) => String(v === null || v === undefined ? '' : v).replace(/\s+/g, ' ').trim().slice(0, n);
+  function propSlots(arr) {
+    const seen = Object.create(null);
+    const out = (Array.isArray(arr) ? arr : []).map((id) => {
+      const s = (id === null || id === undefined) ? '' : String(id);
+      if (!s || seen[s]) return '';
+      seen[s] = 1; return s;
+    });
+    while (out.length && !out[out.length - 1]) out.pop();
+    return out;
+  }
+  function propTest(t, i) {
+    t = t || {};
+    const r = parseInt(t.round, 10);
+    const o = {
+      id: t.id ? String(t.id) : U.uid(),
+      vendor: propText(t.vendor, 40),
+      round: (isFinite(r) && r > 0 && r < 100) ? r : i + 1,
+      photos: propSlots(t.photos)
+    };
+    PROP_VALS.forEach((k) => { o[k] = propNum(t[k]); });
+    return o;
+  }
+  function propRec(b, now) {
+    const tests = (Array.isArray(b.tests) ? b.tests : []).map(propTest);
+    const seen = Object.create(null), photos = [];
+    const take = (id) => { if (id && !seen[id]) { seen[id] = 1; photos.push(id); } };
+    tests.forEach((t) => t.photos.forEach(take));
+    (Array.isArray(b.photos) ? b.photos : []).forEach((id) => take((id === null || id === undefined) ? '' : String(id)));
+    return {
+      id: b.id || U.uid(),
+      kind: 'prop',
+      day: goodDay(b.day, U.dayKey(now)),
+      dong: (b.dong || '').trim(),
+      place: propText(b.place, 80),            // 타설부위 — 동 포함 표기(Task.placeOf)
+      supervisor: (b.supervisor || '').trim(),
+      supPhone: (b.supPhone || '').trim(),
+      jugu: (b.jugu === '1' || b.jugu === '24') ? b.jugu : '',
+      mix: propText(b.mix, 40),
+      vendor: propText(b.vendor, 80),          // 업체 여럿이면 쉼표 나열
+      qty: U.normQty(b.qty),
+      memo: String(b.memo || '').trim().slice(0, 200),
+      planId: String(b.planId || '').trim(),
+      tests: tests,
+      photos: photos,
+      order: (typeof b.order === 'number') ? b.order : now,
+      createdAt: b.createdAt || now,
+      updatedAt: now
+    };
+  }
+  const isProp = (b) => !!(b && b.kind === 'prop');
+
   function bangRec(b) {
     const now = Date.now();
+    if (b && b.kind === 'prop') return propRec(b, now);
     const num = (v) => { const n = parseFloat(v); return (isFinite(n) && n >= 0) ? n : null; };
     return {
       id: b.id || U.uid(),
@@ -1419,13 +1506,23 @@
     return tx(['bangs'], 'readwrite', (s) => { s.objectStore('bangs').put(rec); })
       .then(() => { mirrorSoon(); return rec; });
   }
+  /* bangsOf·allBangs 는 **방통만** 돌려준다(kind 없는 기록) — 물성은 propsOf·allProps 로 따로 읽는다.
+     같은 스토어라 섞어 주면 방통 목록·플래너·동별 모아보기에 물성 레코드가 값 없는 방통으로 뜬다. */
   function bangsOf(day) {
     return run((db) => reqp(
       db.transaction('bangs').objectStore('bangs').index('byDay').getAll(IDBKeyRange.only(day))
-    )).then((arr) => (arr || []).sort((a, b) => (a.order - b.order) || (a.createdAt - b.createdAt)));
+    )).then((arr) => (arr || []).filter((b) => !isProp(b)).sort((a, b) => (a.order - b.order) || (a.createdAt - b.createdAt)));
   }
   function allBangs() {
-    return run((db) => reqp(db.transaction('bangs').objectStore('bangs').getAll())).then((a) => a || []);
+    return run((db) => reqp(db.transaction('bangs').objectStore('bangs').getAll())).then((a) => (a || []).filter((b) => !isProp(b)));
+  }
+  function propsOf(day) {
+    return run((db) => reqp(
+      db.transaction('bangs').objectStore('bangs').index('byDay').getAll(IDBKeyRange.only(day))
+    )).then((arr) => (arr || []).filter(isProp).sort((a, b) => (a.order - b.order) || (a.createdAt - b.createdAt)));
+  }
+  function allProps() {
+    return run((db) => reqp(db.transaction('bangs').objectStore('bangs').getAll())).then((a) => (a || []).filter(isProp));
   }
   function getBang(id) {
     return run((db) => reqp(db.transaction('bangs').objectStore('bangs').get(id)));
@@ -1690,7 +1787,14 @@
         if (t.sub) Spec.SUBS.forEach((sb) => { const b = t.sub[sb.key]; if (b && strip(b.photos)) hit = true; });
         if (hit) { try { await putTask(t); } catch (e) {} }
       }
-      for (const b of (r[1] || [])) { if (strip(b.photos)) { try { await putBang(b); } catch (e) {} } }
+      // 물성 레코드는 시험마다 사진 id 를 따로 든다 — bangRec 이 photos 를 tests[].photos 에서 다시 계산하므로 거기서도 걷어야
+      // 죽은 참조가 되살아나지 않는다(칸 위치를 지키려고 splice 가 아니라 ''로 비운다)
+      const wipe = (arr) => { let h = false; if (!Array.isArray(arr)) return false; for (let i = 0; i < arr.length; i++) if (bad[arr[i]]) { arr[i] = ''; h = true; } return h; };
+      for (const b of (r[1] || [])) {
+        let hit = strip(b.photos);
+        if (b.kind === 'prop' && Array.isArray(b.tests)) b.tests.forEach((t) => { if (t && wipe(t.photos)) hit = true; });
+        if (hit) { try { await putBang(b); } catch (e) {} }
+      }
       console.log('[washDead]', ids.length + '개 죽은 사진 참조 정리');
     } catch (e) { console.warn('[washDead]', e); }
   }
@@ -1789,8 +1893,9 @@
     putTask: putTask, tasksOf: tasksOf, getTask: getTask, deleteTask: deleteTask,
     allTasks: allTasks,
     putBang: putBang, bangsOf: bangsOf, allBangs: allBangs, getBang: getBang, deleteBang: deleteBang,
+    propsOf: propsOf, allProps: allProps,
     normalizeSets: normalizeSets,
-    taskCount: taskCount, backupInfo: backupInfo, backupNow: backupNow, fullSnapshot: fullSnapshot,
+    taskCount: taskCount, recordCount: recordCount, backupInfo: backupInfo, backupNow: backupNow, fullSnapshot: fullSnapshot,
     backupDaily: backupDaily, restoreBackup: restoreBackup,
     backupToFileDaily: backupToFileDaily, fileBackupInfo: fileBackupInfo,
     mirrorInfo: mirrorInfo, mirrorSoon: mirrorSoon, bestBackupInfo: bestBackupInfo, reviveMissingThumbs: reviveMissingThumbs,
@@ -2443,7 +2548,8 @@
         }
       });
     }
-    U.sheet('서버 백업 (beta)', items);
+    // 서버로 가는 스냅숏은 작업(tasks)뿐이다 — 방통·물성시험(bangs 스토어)은 안 실린다(폰 안 백업·수동 백업 파일엔 들어 있다). 이름만 보면 전체 백업으로 오해한다(감사 2026-10-15)
+    U.sheet('서버 백업 (beta)\n작업만 보냅니다 — 방통·물성시험은 제외', items);
   }
 
   function init() {
@@ -3492,6 +3598,14 @@
 
   const numStr = (v) => { if (v === null || v === undefined || v === '') return null; const n = Number(v); return isFinite(n) ? String(n) : null; };
   const strCell = (v) => '<is><t>' + esc(String(v)) + '</t></is>';   // 인라인 문자열(스타일 유지, sharedStrings 안 건드림)
+  /* 세트의 업체·LOT 몫 물량이 아직 작업 물량과 맞는가 — 몫은 플래너가 세트에 숨겨 둔 값이라 편집기에서 보이지도 고쳐지지도 않는다. 작업 물량(#tk-qty)을 고치면(OCR 오독 정정 등)
+     몫만 낡은 숫자로 남아 공식 대장에 찍힌다(감사 2026-10-15). 몫의 합이 작업 물량과 같을 때만 블록별 몫으로 쓰고, 어긋나면 몫을 버려 손으로 만든 세트와 같은 규칙(작업 물량)을 쓴다 */
+  function qtysFresh(qtys, total) {
+    const ns = (qtys || []).map((s) => Number(String(s == null ? '' : s).replace(/,/g, ''))).filter((n) => isFinite(n) && n > 0);
+    if (!ns.length) return false;
+    const t = Number(String(total == null ? '' : total).replace(/,/g, ''));
+    return isFinite(t) && t > 0 && Math.abs(ns.reduce((a, b) => a + b, 0) - t) < 0.01;
+  }
 
   /* 그림 조각(xdr:pic) — rId 로 미디어를 가리킨다 */
   function picXml(id, name, rId, cx, cy) {
@@ -3587,11 +3701,18 @@
         (K.info || []).forEach(([col, key]) => {
           const ref = col + (2 + j);
           if (key === 'cast' || key === 'test') { const sn = info[key] ? excelSerial(info[key]) : null; if (sn != null) xml = setCell(xml, ref, '<v>' + sn + '</v>'); return; }
-          if (key === 'qty') { const s = numStr(info.qty); if (s != null) xml = setCell(xml, ref, '<v>' + s + '</v>'); return; }
+          if (key === 'qty') {
+            // 타설물량 = **이 행(블록)의 몫**. 플래너가 만든 세트는 업체·LOT 몫을 들고 있다(o.qtys — 하나라도 값이 있으면 그 모드): 그 블록 것만 쓰고 모르면 비운다
+            // (작업 합계를 모든 행에 찍으면 틀린 숫자다 — 완성본 215동은 행마다 276 / 258). 세트에 몫이 하나도 없으면(손으로 만든 세트) 예전처럼 작업 물량
+            const per = (o.qtys || []).some(Boolean);
+            const s = numStr(per ? (o.qtys || [])[j] : info.qty);
+            if (s != null) xml = setCell(xml, ref, '<v>' + s + '</v>');
+            return;
+          }
           if (key === 'age') { xml = setCell(xml, ref, strCell('28일'), 'inlineStr'); return; }
           // 타설위치 = place(동 포함 — 메모는 안 싣는다). 업체 = **그 세트에 적은 회사 텍스트** 우선, 없으면 작업의 업체(사용자 지시 2026-09-29 — 세트마다 업체가 다르다)
           const v = key === 'place' ? String(info.place || info.dong || '').trim()
-                  : key === 'vendor' ? (String((o.names || [])[j] || '').trim() || info.vendor || '')
+                  : key === 'vendor' ? (String((o.names || [])[j] || '').trim().replace(/\s*\d+\s*LOT$/i, '').trim() || info.vendor || '')   // 세트 이름의 LOT 꼬리(「삼표안양 2LOT」)는 업체가 아니다
                   : (info[key] || '');
           if (v) xml = setCell(xml, ref, strCell(v), 'inlineStr');
         });
@@ -3655,13 +3776,15 @@
     (cards || []).forEach((card) => {
       const sets = (card.sets || []).map((s) => (s.vals || s.values || []).map((v) => (v && typeof v === 'object') ? v.v : v));
       const names = (card.sets || []).map((s) => String((s && s.name) || '').trim());   // 세트에 적은 회사 텍스트 → 블록별 업체(완성본 211동처럼 P2·P3 가 다른 업체)
+      const qtys0 = (card.sets || []).map((s) => String((s && s.qty) || '').trim());      // 세트의 업체·LOT 몫 물량 → 블록별 타설물량(완성본 215동 276 / 258)
+      const qtys = qtysFresh(qtys0, (card.info || {}).qty) ? qtys0 : qtys0.map(() => '');   // 카드 전체로 판정(시트가 나뉘어도 합은 카드 단위) — 낡았으면 전부 비워 작업 물량으로
       const pairs = (card.pairs || []).map((p) => (p.photos || []).filter((b) => b && b.length));
       const raw = sheetName(card.name);
       const base = uniq(raw, '');   // 같은 동이 또 오면 「214 (2)」 — 분할 접미는 그 위에 붙는다(「214 (2) (2)」)
       const n = Math.max(1, Math.ceil(sets.length / per), Math.ceil(pairs.length / per));
       for (let c = 0; c < n; c++) {
         const name = c ? uniq(raw, base.sfx + ' (' + (c + 1) + ')').name : base.name;
-        out.push({ name: name, test: card.test || '', label: RECORD_LABEL[card.specKey] || '', info: Object.assign({ dong: card.name || '', test: card.test || '' }, card.info || {}), names: names.slice(c * per, c * per + per),
+        out.push({ name: name, test: card.test || '', label: RECORD_LABEL[card.specKey] || '', info: Object.assign({ dong: card.name || '', test: card.test || '' }, card.info || {}), names: names.slice(c * per, c * per + per), qtys: qtys.slice(c * per, c * per + per),
                    sets: sets.slice(c * per, c * per + per), pairs: pairs.slice(c * per, c * per + per) });
       }
     });
@@ -3713,7 +3836,7 @@
 
       // ---- 대장 ----
       const mainDrawNo = drawN + 1;   // 서명이 붙을 때만 실제로 쓴다
-      const pm = patchMainSheet(T.main, { K: K, label: sh.label, test: sh.test, sets: sh.sets, names: sh.names, info: sh.info, first: i === 0, codeName: codes[0], drawingRid: 'rId2' });
+      const pm = patchMainSheet(T.main, { K: K, label: sh.label, test: sh.test, sets: sh.sets, names: sh.names, qtys: sh.qtys, info: sh.info, first: i === 0, codeName: codes[0], drawingRid: 'rId2' });
       put('xl/worksheets/sheet' + mainNo + '.xml', pm.xml);
       put('xl/printerSettings/printerSettings' + mainNo + '.bin', T.ps[0]);
       let mainRels = T.mainRels.replace(/printerSettings\d+\.bin/, 'printerSettings' + mainNo + '.bin');
@@ -4087,7 +4210,7 @@
 
    ① readSchedule — 시험 일정표(표) 사진 → 작업 후보
    ② readBoard    — 시험 성적판(화이트보드) 사진 → 강도값 후보
-   ③ readPlan     — 타설계획표 사진 → 플래너 대기 목록 후보
+   ③ readPlan     — 타설계획표 사진 → 플래너 대기 목록 후보(블록마다 동·부위·감리·규격 + 업체들 vendors)
 
    아이폰 PWA 를 포함해 Vision 만 있으면 어느 플랫폼에서든 된다 — 버튼은 항상 보인다.
 ========================================================= */
@@ -4149,24 +4272,33 @@
       '{"values":[24.53,25.11],"avg":24.82,"corrAvg":23.79,"cast":"2026-08-15","test":"2026-08-16"}'
     ].join('\n'),
 
+    /* 2026-10-15 양식 — 「4공구」 블록마다 담당감리·규격 칸 + 오른쪽 색 띠 제목(동+부위) + 업체 행들 + 「누계」 행.
+       업체가 둘 이상이면 전부 읽게(사용자 지시) — 판정은 코드가 한다(합계 행 거르기·동 추출·LOT 수 계산은 Task) */
     plan: [
-      '콘크리트 공시체 타설계획표 사진이다. 표 안에 「담당감리」가 적힌 행마다 정보를 뽑아라.',
+      '콘크리트 타설계획표 사진이다. 표는 「4공구」「5공구」처럼 공구 블록으로 나뉘고, 한 공구 안에 타설 블록(오른쪽 색 띠 하나)이 여러 개일 수 있다.',
+      '타설 블록 하나마다 행 하나를 만들어라. 한 감리가 블록을 여럿 가지면 블록마다 따로 행을 만든다.',
       '',
-      '- sup: 담당감리 이름(한글 2~4자, "상무"·"이사" 같은 직급은 빼라).',
-      '- dong: 그 행의 동수 — 적힌 그대로. 숫자동 뒤 A/B 글자, "특화동"·"(특화동)" 표기,',
-      '  "209,210동"처럼 여러 동이 나열된 것도 그대로 담아라.',
-      '  "A9"·"B2" 같은 블록명도 동으로 취급해라.',
-      '- part: 부위 — 제목칸 원문에서 동 표기를 뺀 나머지(예: "옥탑", "15F 벽체", "옥탑 및 214동 ph2"). 다른 동이 부위 안에 또 나와도 그대로 담아라.',
-      '- mix: 규격/배합 표기 — "25-30-180" 또는 "25-30-180(초유지)" 처럼 적힌 그대로. 없으면 null.',
-      '- vendor: 레미콘 업체명 — 회사명 그대로(예 "(주)삼표산업(서부)"). 없으면 null.',
-      '- qty: 타설물량 — ㎥ 단위 표기는 빼고 숫자만(예 "198㎥" → 198). 없으면 null.',
-      '- date(최상위): 계획표 머리(제목·상단)에 적힌 타설 날짜를 YYYY-MM-DD 로(예 "2026. 9. 17 (수)" → "2026-09-17"). 표 밖이라도 이 날짜만은 읽어라. 없으면 null.',
+      '블록의 구조:',
+      '- 왼쪽: 「담당감리」 옆 이름, 「반입/반출」, 「규격」(여러 줄일 수 있다), 「펌프카」.',
+      '- 오른쪽 맨 위 색 띠(옅은 파랑·주황)가 그 블록의 제목이다 — 동과 부위가 적혀 있다.',
+      '  예) 「203동 12F벽체/13F바닥」 「203-204동 사이 램프 B3F-B1F 무근」 「램프 #2 B1F-B2F 무근」 「A9 2동 6F벽체/7F바닥」',
+      '- 제목 아래 작은 표: 열 머리가 「예정 / 요청(대) / 출하(대) / 타설완료(대) / 요청(㎥) / 출하(㎥) / 타설완료(㎥) / 잔량」이고,',
+      '  각 행의 첫 열이 업체명(레미콘 회사)이다. 맨 아래 「누계」 행은 합계다.',
       '',
-      '펌프카·반입반출 같은 다른 칸은 무시해라. 표 밖 글자도 무시해라.',
-      '아래 JSON 형태로만 답하라. 설명 문장·마크다운 코드블록 금지. 모르는 값은 null.',
+      '행마다 담아라:',
+      '- sup: 「담당감리」 옆 이름(한글 2~4자, 「상무」·「이사」 같은 직급은 뺀다).',
+      '- title: 색 띠 제목을 한 글자도 고치지 말고 그대로(하이픈·「#」·층 표기·띄어쓰기 포함). 동을 따로 떼거나 줄이거나 바꾸지 마라.',
+      '- mix: 「규격」 칸의 첫 번째 비어 있지 않은 값(예 「25-30-180(초유지)」) — 괄호까지 적힌 그대로. 없으면 null.',
+      '- vendors: 그 블록의 업체 행을 위에서 아래 순서대로 전부 [{"name":업체명,"qty":숫자}]. 업체가 둘 이상이면 하나도 빠뜨리지 마라.',
+      '  qty 는 「예정」 열의 숫자(㎥)만 — 「요청」「출하」「타설완료」「잔량」 열은 읽지 마라. 「예정」 칸이 비었거나 「-」 이면 null.',
+      '  「누계」·「합계」·「소계」 행은 업체가 아니다 — vendors 에 넣지 마라.',
+      '- date(최상위): 표 머리에 적힌 타설 날짜를 YYYY-MM-DD 로(예 "2026. 9. 17 (수)" → "2026-09-17"). 표 밖이라도 이 날짜만은 읽어라. 없으면 null.',
       '',
-      '{"date":"2026-09-17","rows":[{"sup":"최태식","dong":"215동 특화동","part":"15F 벽체",' +
-      '"mix":"25-30-180(초유지)","vendor":"(주)삼표산업(서부)","qty":198}]}'
+      '「※잔량 타설 후 종료」 같은 문구와 표 밖 글자는 무시해라.',
+      '아래 JSON 형태로만 답하라. 설명 문장·마크다운 코드블록 금지. 모르는 값은 null(추측해서 채우지 마라).',
+      '',
+      '{"date":"2026-09-17","rows":[{"sup":"최태식","title":"205동 15F벽체/16F바닥","mix":"25-30-180(초유지)",' +
+      '"vendors":[{"name":"삼표서부","qty":198},{"name":"흥국","qty":120}]}]}'
     ].join('\n')
   };
 
@@ -4190,33 +4322,63 @@
 
   /* ---------------- 동 표기 추출/정규화 (일정표·계획표 공용) ----------------
      텍스트에서 동(들)을 뽑고 나머지를 rest 로 돌려준다. 부위 텍스트가 섞여
-     있어도(계획표) 걷어낼 수 있어야 해서, "정규화"가 아니라 "추출"이 핵심이다. */
-  function extractDong(raw) {
+     있어도(계획표) 걷어낼 수 있어야 해서, "정규화"가 아니라 "추출"이 핵심이다.
+     → { list, special, rest, lead } — lead = 동 표기가 텍스트 맨 앞에서 시작하는가(제목이 「215-216동 …」 꼴인지) */
+
+  /* 층·부위 낱말 — 동도 블록명도 없는 제목(「램프 #5 B2F-B3F 무근」)에서 이름 끝을 가르는 기준(2026-10-15).
+     영문·숫자 낱말은 더 긴 영숫자 낱말의 일부(A15F…)일 땐 건너뛴다 */
+  const PART_WORD = /B?\d{1,3}F(?![A-Za-z])|(?:지하|지상|B)?\d{1,3}층|PH\d*(?![A-Za-z])|RF(?![A-Za-z])|PIT(?![A-Za-z])|벽체|바닥|무근|지붕|옥탑|슬래브|기초|옹벽|기둥|계단/;
+  function partIdx(s) {
+    const re = new RegExp(PART_WORD.source, 'gi');   // g 는 exec 반복용 — 모듈 상수에 lastIndex 가 남지 않게 매번 새로 만든다
+    let m;
+    while ((m = re.exec(s))) {
+      if (!/^[A-Za-z0-9]/.test(m[0]) || !m.index || !/[A-Za-z0-9]/.test(s.charAt(m.index - 1))) return m.index;
+    }
+    return -1;
+  }
+
+  /* strict = 일정표용: 동도 블록명도 없는 문자열은 동이 아니다(아래 마지막 폴백을 끈다). 폴백은 계획표 제목(「램프 #5 B2F-B3F 무근」)을 위한 것이라
+     일정표의 dong 칸이 「경로당 1F」 처럼 동이 아닌 글이어도 작업 후보가 되던 것을 막는다(예전 동작 = 스킵, 감사 지적) */
+  function extractDong(raw, strict) {
     let s = String(raw || '').replace(/\s+/g, ' ').trim();
     s = s.replace(/\(\s*특화동\s*\)/g, ' 특화동');       // "(특화동)"→" 특화동"
     // "209동, 210동"(동이 번호마다 반복) → "209, 210동"(끝에 한 번만) — 아래 그룹 정규식과
     // 맞추기 위한 전처리. "213,214동B"(번호만 나열, 동은 끝에 한 번)는 이미 이 형태다.
     s = s.replace(/(\d{2,3})\s*동(?=\s*[,，·]\s*\d)/g, '$1');
+    // "215동-216동"·"215동~216동"(범위 구분자 앞에 동이 또 붙은 꼴) → "215-216동". 뒤에 「N동」이 따라올 때만 — 「215동 - 27F벽체」 의 하이픈은 그대로
+    s = s.replace(/(\d{2,3})\s*동\s*([\-–—~∼〜\/／])\s*(?=\d{2,3}\s*동)/g, '$1$2');
 
-    // 숫자동(다중 가능 — 쉼표·가운뎃점 나열) + 선택적 A/B 접미(뒤에 영숫자·한글 없을 때만) + 선택적 「특화동」
-    const m = s.match(/(\d{2,3}(?:\s*[,，·]\s*\d{2,3})*)\s*동(?:\s*([A-Ba-b])(?![0-9A-Za-z가-힣]))?(?:\s*특화동)?/);
+    // 숫자동(다중 가능 — 쉼표·가운뎃점·하이픈·물결·슬래시 나열: 「215-216동」 = 215동, 216동) + 선택적 A/B 접미(뒤에 영숫자·한글 없을 때만) + 선택적 「특화동」
+    const m = s.match(/(\d{2,3}(?:\s*[,，·\-–—~∼〜\/／]\s*\d{2,3})*)\s*동(?:\s*([A-Ba-b])(?![0-9A-Za-z가-힣]))?(?:\s*특화동)?/);
     if (m) {
-      const nums = m[1].split(/[,，·]/).map((x) => x.trim()).filter(Boolean);
+      const nums = m[1].split(/[,，·\-–—~∼〜\/／]/).map((x) => x.trim()).filter(Boolean);
       const suf = m[2] ? m[2].toUpperCase() : '';
       const special = / 특화동/.test(m[0]);
       const list = nums.map((n) => n + '동' + suf);
       const rest = (s.slice(0, m.index) + s.slice(m.index + m[0].length)).trim();
-      return { list: list, special: special, rest: rest };
+      return { list: list, special: special, rest: rest, lead: !s.slice(0, m.index).trim() };
     }
     // 블록명(A9·B2·A-9 등) — 숫자동이 아닌 단지
-    const bm = s.match(/(?:^|[^A-Za-z0-9가-힣])([ABab]-?\d{1,2})(?![0-9A-Za-z])/);
+    // (「B1층」 은 지하 1층이지 블록 B1 이 아니다 — 뒤에 층이 오면 블록명이 아님)
+    const bm = s.match(/(?:^|[^A-Za-z0-9가-힣])([ABab]-?\d{1,2})(?![0-9A-Za-z]|\s*층)/);
     if (bm) {
       const idx = s.indexOf(bm[1], bm.index);
       const block = bm[1].toUpperCase().replace('-', '');
       const rest = (s.slice(0, idx) + s.slice(idx + bm[1].length)).trim();
-      return { list: [block], special: false, rest: rest };
+      return { list: [block], special: false, rest: rest, lead: !s.slice(0, idx).trim() };
     }
-    return { list: [], special: false, rest: s };
+    // 동도 블록명도 없는 제목(「램프 #5 B2F-B3F 무근」) — 버리지 않고 첫 층·부위 낱말 앞까지를 동으로 삼는다(계획표 제목 전용 — strict 면 건너뜀)
+    if (!strict) {
+      const pi = partIdx(s);
+      if (pi > 0) {
+        let name = s.slice(0, pi).replace(/[\s,.\-·]+$/, '').trim();
+        let rest = s.slice(pi).trim();
+        const ob = /[(（\[【]$/.exec(name);   // 「램프 #5(B2F-B3F) 무근」 — 여는 괄호는 이름이 아니라 부위 쪽에 둔다
+        if (ob) { name = name.slice(0, -1).replace(/[\s,.\-·]+$/, '').trim(); rest = ob[0] + rest; }
+        if (name) return { list: [name], special: false, rest: rest, lead: true };
+      }
+    }
+    return { list: [], special: false, rest: s, lead: false };
   }
 
   function buildDongStr(ex) {
@@ -4285,7 +4447,7 @@
       const diff = Math.round((new Date(testDay) - new Date(castDay)) / 86400000);
       const offAge = Math.abs(diff - age) > 3;
 
-      const ex = extractDong(String(row.dong || ''));
+      const ex = extractDong(String(row.dong || ''), true);   // strict — 일정표의 dong 칸이 동도 블록명도 아니면 스킵(계획표 제목용 폴백을 안 탄다)
       if (!ex.list.length) return;
       const dongMain = ex.list[0];                       // 담당 감리는 첫 동 기준(사용자 지시)
       const special = ex.special || !!row.special;
@@ -4361,19 +4523,52 @@
   /* ---------------- ③ 타설계획표 → 플래너 대기 목록 ----------------
      모델이 dong·part 칸을 늘 깔끔하게 나누진 못한다(경계가 애매한 인쇄물이 많다) —
      그래서 두 필드를 다시 합친 뒤 동 표기만 정규식으로 재추출한다. 어느 쪽에 얼마나
-     섞여 왔든 같은 결과가 나온다(픽스처로 검증). */
+     섞여 왔든 같은 결과가 나온다(픽스처로 검증).
+     2026-10-15 양식부터는 색 띠 제목 원문(title)을 그대로 받는다 — 예전 꼴(dong+part)도 같이 받는다. */
+  const normText = (v) => String(v === null || v === undefined ? '' : v).replace(/\s+/g, ' ').trim();
+
+  /* 제목 원문 — title 이 있으면 그것(동이 안 보이면 dong 을 앞에), 없으면 dong+part. 같은 동이 part 앞머리에 또 오면 한 번만 둔다 */
+  function rowTitle(row) {
+    const title = normText(row.title), dong = normText(row.dong), part = normText(row.part);
+    if (title) return (!dong || extractDong(title).list.length) ? title : (dong + ' ' + title);
+    if (!dong || !part) return dong || part;
+    const ed = extractDong(dong), ep = extractDong(part);
+    if (ed.list.length && !ed.rest && ep.lead && buildDongStr(ep) === buildDongStr(ed)) return part;
+    return dong + ' ' + part;
+  }
+
+  /* 업체들 — vendors:[{name,qty}](새 꼴) 또는 예전 꼴 vendor·qty 단일. 「누계」 같은 합계 행은 업체가 아니다 — 모델이 넣어 와도 코드가 거른다.
+     이름 trim ≤40, 물량은 U.normQty(0·「-」 는 모름 = '') */
+  const TOTAL_ROW = /^(?:누계|합계|소계|총계|총합|누적)|^(?:계|합|total|sum|subtotal)$/i;   // 긴 낱말은 시작 일치, 한 글자·영문은 정확 일치(「계룡산업」·「합동산업」 은 업체)
+  function vendorsOf(row) {
+    const collect = (src) => {
+      if (typeof src === 'string' || (src && typeof src === 'object' && !Array.isArray(src))) src = [src];   // 문자열·객체 하나로 와도 업체 하나로 받는다
+      const out = [];
+      (Array.isArray(src) ? src : []).forEach((v) => {
+        if (typeof v === 'string') { Task.parseVendors(v, '').forEach((p) => out.push(p)); return; }   // 모델이 「삼표안양 300」 문자열로 줘도 받는다
+        if (!v || typeof v !== 'object') return;
+        const q = U.normQty(v.qty);
+        out.push({ name: trimText(v.name !== undefined && v.name !== null ? v.name : v.vendor, 40).replace(/\s+/g, ' '), qty: Number(q) > 0 ? q : '' });
+      });
+      return out.filter((v) => v.name && !TOTAL_ROW.test(v.name.replace(/\s/g, '')));
+    };
+    const out = collect(row.vendors);
+    // vendors 가 비었는데 예전 꼴(vendor·qty 단일)이 있으면 그것을 업체 하나로
+    return (!out.length && trimText(row.vendor, 40)) ? collect([{ name: row.vendor, qty: row.qty }]) : out;
+  }
+
   function planItems(rows) {
     const items = [];
     const seen = Object.create(null);
 
     (rows || []).forEach((row) => {
       if (!row) return;
-      const combined = ((row.dong || '') + ' ' + (row.part || '')).replace(/\s+/g, ' ').trim();
+      const combined = rowTitle(row);
       const ex = extractDong(combined);
       const dongs = buildDongStr(ex);                     // 정규화된 동 나열(「209동, 210동」·「215동 특화동」)
       if (!dongs) return;
       // 여러 동 = 앞에 적힌 동이 대표(2026-09-29 사용자 지시): dong 은 첫 동(특화동·A/B 접미는 첫 동의 일부라 유지),
-      // place(타설부위) 는 원문 전체 정리본에 대표 동을 접두 — 「205동 옥탑 및 214동 ph2」·「209동, 210동 옥탑」
+      // place(타설부위) 는 원문 전체 정리본에 대표 동을 접두 — 「205동 옥탑 및 214동 ph2」
       const dong = (ex.list.length === 1) ? dongs : ex.list[0];
       let rest = ex.rest.replace(/^[\s·,，\-]+|[\s·,，\-]+$/g, '');
       // 모델이 part 칸에도 동을 한 번 더 적어 오면(dong「205동」+part「205동 옥탑 …」) 합친 원문 앞머리에 같은 동이 두 번 선다
@@ -4383,14 +4578,20 @@
         if (buildDongStr(ex2) !== dongs || rest.slice(rest.length - ex2.rest.length) !== ex2.rest) break;   // 앞머리(= 나머지가 접미) 가 아니면 손대지 않음
         rest = ex2.rest.replace(/^[\s·,，\-]+/, '');
       }
-      const place = Task.placeOf(dong, (dongs + ' ' + rest).trim()).slice(0, 80);
+      // 제목이 「215-216동 사이 램프 …」·「209,210동 옥탑」 처럼 **여러 동 무리로 시작**하면 대표 동(첫 동)을 이미 품고 있다 — 원문 제목을 살린다
+      // (앞에 「215동」을 또 붙이거나 「215동, 216동」으로 고쳐 쓰지 않는다, 2026-10-15). 그 밖엔 지금 규칙(대표 동 접두)
+      const place = ((ex.lead && ex.list.length > 1) ? combined.replace(/\(\s*특화동\s*\)/g, ' 특화동').replace(/\s+/g, ' ').trim()
+                                                      : Task.placeOf(dong, (dongs + ' ' + rest).trim())).slice(0, 80);
       const sup = String(row.sup || '').trim();
 
       const key = place + '|' + sup;   // 대표 동만 보면 같은 감리의 「209동 옥탑」·「209, 210동 지하」 행이 접힌다(감사 지적) — scheduleItems 와 같이 place 기준
       if (seen[key]) return;
       seen[key] = 1;
-      const x = extras(row);
-      items.push({ dong: dong, sup: sup, place: place, mix: x.mix, vendor: x.vendor, qty: x.qty });
+      const vendors = vendorsOf(row);
+      const mixRaw = Array.isArray(row.mix) ? (row.mix.map((m) => trimText(m, 40)).find(Boolean) || '') : row.mix;   // 규격 칸이 여러 줄이면 첫 비어 있지 않은 값
+      items.push({ dong: dong, sup: sup, place: place, mix: trimText(mixRaw, 40),
+                   vendors: vendors, vendor: vendors.map((v) => v.name).join(', '),
+                   qty: Task.sumQty(vendors) || U.normQty(row.qty) });   // 합계 — 업체별 물량이 없으면 최상위 qty(예전 꼴)
     });
 
     return items;
@@ -4447,7 +4648,7 @@
     available: available, ensureKey: ensureKey,
     readSchedule: readSchedule, readBoard: readBoard, readPlan: readPlan,
     scheduleItems: scheduleItems, boardValues: boardValues, planItems: planItems,
-    normDong: normDong,
+    normDong: normDong, extractDong: extractDong,
     _prompts: PROMPTS
   };
 })(window);
@@ -5071,6 +5272,557 @@
 })(window);
 
 ;
+/* ===== js/leave.js ===== */
+/* ============ leave.js — 감리 휴무 상황판 ============
+   사무실 화이트보드 「감리원 근무상황판」 사진을 읽어 두고, 그날 휴무인 감리를 앱 곳곳에서 빨갛게 보여 준다
+   (홈 카드 · 홈/작업탭 목록 · 편집기 감리 칸 · 감리 고르기 · 방통 화면).
+   저장은 이 기기 localStorage 한 키(gsc.leave.v1) — 새 상황판이 이전 것을 통째로 교체한다(서버 공유는 범위 밖).
+   엔진은 vision.js(Gemini) — ocr.js 는 건드리지 않고 프롬프트·후처리를 여기 둔다.
+   **모델에게 판정을 시키지 않는다**: 이름·날짜 칸 글자(text)·시간·용무만 읽게 하고, 범위/나열 판정(물결 유무)·연도·하루 단위 펼치기·
+   반차 판정·이름 대조는 순수 함수(Leave._t.parse / splitNames)가 한다 — 브라우저 픽스처로 검증하기 위함.
+================================================================ */
+(function (global) {
+  'use strict';
+
+  const K_LEAVE = 'gsc.leave.v1';
+  const OCR_TIMEOUT = 30000;
+  const MAX_SPAN = 92;     // 한 기간의 상한(일) — 손글씨 오독으로 몇 달이 펼쳐져 저장되는 걸 막는다
+  const WEEK = ['일', '월', '화', '수', '목', '금', '토'];
+
+  /* ---------------- 날짜 ---------------- */
+  const pad2 = (n) => (n < 10 ? '0' : '') + n;
+  const ymd = (y, m, d) => y + '-' + pad2(m) + '-' + pad2(d);
+  function validDay(y, m, d) {
+    if (!(m >= 1 && m <= 12 && d >= 1 && d <= 31)) return false;
+    const t = new Date(y, m - 1, d);
+    return t.getFullYear() === y && t.getMonth() === m - 1 && t.getDate() === d;
+  }
+  function dateOf(key) {           // 'YYYY-MM-DD' → 로컬 자정
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(key || ''));
+    return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null;
+  }
+  const keyOf = (d) => ymd(d.getFullYear(), d.getMonth() + 1, d.getDate());
+  function nextDay(key) { const d = dateOf(key); d.setDate(d.getDate() + 1); return keyOf(d); }
+  function dayKeyOf(v) {           // 'YYYY-MM-DD'·Date·ms 어느 것이든. 비면 오늘
+    if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+    if (v instanceof Date && !isNaN(v)) return keyOf(v);
+    if (typeof v === 'number' && isFinite(v)) return keyOf(new Date(v));
+    return keyOf(new Date());
+  }
+  const md = (key) => (/^\d{4}-\d{2}-\d{2}$/.test(key) ? (+key.slice(5, 7)) + '/' + (+key.slice(8, 10)) : String(key || ''));
+  const span = (a, b) => (a === b ? md(a) : md(a) + '~' + md(b));
+  function dayText(key) {
+    const d = dateOf(key);
+    return d ? (d.getMonth() + 1) + '월 ' + d.getDate() + '일 (' + WEEK[d.getDay()] + ')' : String(key || '');
+  }
+
+  /* '10/14' · '10.14' · '10월 14일' · '2026-10-14' · '2026년 10월 14일 수요일' (뒤의 「(수)」·「수요일」은 버림) → {y|null, m, d} */
+  function mdOf(s) {
+    s = String(s == null ? '' : s).replace(/\([^)]*\)|（[^）]*）/g, '').trim().replace(/\s*[월화수목금토일]\s*요일$/, '');
+    let m = /^(\d{4})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})\s*일?$/.exec(s);
+    if (m) return { y: +m[1], m: +m[2], d: +m[3] };
+    m = /^(\d{1,2})\s*[-./월]\s*(\d{1,2})\s*일?$/.exec(s);
+    return m ? { y: null, m: +m[1], d: +m[2] } : null;
+  }
+  /* 날짜의 연도는 월·일만 믿고 기준 날짜에 가장 가까운 해로 정한다(동률이면 뒤) — 12월 상황판의 「1/5」 는 다음 해가 된다.
+     모델이 붙여 온 연도는 안 본다: 프롬프트의 「표 위 연도를 붙여라」 를 글자 그대로 따라 12월 표의 1월 날짜에 같은 해를 붙이거나
+     연도를 잘못 읽어도(2020) 같은 규칙으로 바로잡힌다 */
+  function resolveYear(x, board) {
+    const by = board.getFullYear();
+    let best = null, dist = Infinity;
+    [by - 1, by, by + 1].forEach((y) => {
+      if (!validDay(y, x.m, x.d)) return;
+      const t = new Date(y, x.m - 1, x.d), g = Math.abs(t - board);
+      if (g <= dist) { best = t; dist = g; }
+    });
+    return best;
+  }
+  /* 시작 날짜 from(Date)에 끝 {m,d} 를 붙여 기간으로. 끝이 시작보다 앞서 보이면 두 경우다 — 해를 건넌 범위(12/30~1/2)면 다음 해로,
+     끝·시작이 뒤바뀐 것(10/16~10/14)이면 맞바꾼다. 다음 해로 넘겨도 한 기간 상한(MAX_SPAN) 안이면 해를 건넌 것으로 본다 */
+  function spanTo(from, t) {
+    if (!t) return { from: from, to: from };
+    const fy = from.getFullYear();
+    if (!validDay(fy, t.m, t.d)) return { from: from, to: from };      // 끝 날짜가 말이 안 되면(2/30) 시작 하루만
+    const same = new Date(fy, t.m - 1, t.d);
+    if (same >= from) return { from: from, to: same };
+    const next = validDay(fy + 1, t.m, t.d) ? new Date(fy + 1, t.m - 1, t.d) : null;
+    if (next && Math.round((next - from) / 86400000) <= MAX_SPAN) return { from: from, to: next };
+    return { from: same, to: from };
+  }
+
+  /* ---------------- 시간·용무 ---------------- */
+  /* 12:00 이전에 끝나면 'am', 13:00 이후에 시작하면 'pm', 아니면 종일(''). 현장은 24시간제로 적지만
+     12시간제 손글씨(「1:00~5:00」)도 새벽 1~6시 근무는 없으므로 오후로 본다 */
+  function halfOf(time) {
+    const ts = [];
+    String(time == null ? '' : time).replace(/(\d{1,2})\s*[:：]\s*(\d{2})/g, (_, h, m) => {
+      h = +h; if (h >= 1 && h <= 6) h += 12;
+      ts.push(h * 60 + (+m));
+      return '';
+    });
+    if (!ts.length) return '';
+    if (ts.length >= 2 && ts[1] <= 12 * 60) return 'am';
+    if (ts[0] >= 13 * 60) return 'pm';
+    return '';
+  }
+  const kindOf = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim().slice(0, 12);
+  /* 용무에 「오후 반차」·「오전반차」 처럼 반일이 적혀 있으면 시간 칸이 비어도 반일로 본다 */
+  function splitHalf(kind) {
+    const m = /^(오전|오후)\s*(.*)$/.exec(kind);
+    return m ? { half: m[1] === '오전' ? 'am' : 'pm', kind: m[2] || '반차' } : { half: '', kind: kind };
+  }
+  /* 「오후 대휴」 — 홈 카드·꼬리표·시트가 같은 글자를 쓰도록 한 곳에서 */
+  function labelOf(o) { return (o.half === 'am' ? '오전 ' : o.half === 'pm' ? '오후 ' : '') + (o.kind || '휴무'); }
+
+  /* ---------------- 이름 ---------------- */
+  /* 이름이 아닌 낱말 — 직급·용무. 이름 칸/감리 텍스트에서 이름 토큰만 남기려고 거른다 */
+  const RANKS = ['감리단장', '본부장', '센터장', '공구장', '상무보', '감리원', '소장', '상무', '이사', '전무', '부장',
+                 '차장', '과장', '팀장', '대리', '책임', '사원', '주임', '실장', '단장', '대표', '감리', '님', '씨']
+    .sort((a, b) => b.length - a.length);
+  const NOT_NAME = Object.create(null);
+  RANKS.concat(['연차', '대휴', '반차', '휴가', '출장', '교육', '외근', '외출', '병가', '휴무', '조퇴', '오전', '오후',
+                '종일', '현장', '본사', '공구', '특화동', '토목', '공공청사', '주구중심'])
+    .forEach((w) => { NOT_NAME[w] = 1; });
+
+  /* 「이남철 상무」·「박종익, 이상호」·「박태규 (백낙민)」·「HD 주구중심 B3 한형구 상무」 → 이름 토큰(한글 2~4자, 직급 제외).
+     비교는 **토큰 완전 일치**로만 한다(「이상」 이 「이상규」 에 걸리는 부분 일치 오탐 금지) */
+  function splitNames(text) {
+    const s = String(text == null ? '' : text);
+    // 손글씨 「이 남철」·「홍 길동 소장」 처럼 성을 띄어 쓴 한 사람 — 직급을 뺀 조각 중 한 글자짜리가 있을 때만 붙여 본다
+    // (「김한 이한」 같은 두 사람, 「김한 이사」 의 직급은 건드리지 않는다)
+    const rest = s.split(/\s+/).filter((p) => p && !NOT_NAME[p]);
+    if (rest.length > 1 && rest.some((p) => p.length === 1)) {
+      const one = rest.join('');
+      if (/^[가-힣]{2,4}$/.test(one)) return [one];
+    }
+    const out = [];
+    s.split(/[^가-힣]+/).filter(Boolean).forEach((run) => {
+      if (NOT_NAME[run]) return;
+      if (run.length >= 5) {                             // 「홍길동소장」 처럼 붙여 쓴 직급은 뗀다
+        for (let i = 0; i < RANKS.length; i++) {
+          const w = RANKS[i], keep = run.length - w.length;
+          if (keep >= 2 && keep <= 4 && run.slice(-w.length) === w) { run = run.slice(0, keep); break; }
+        }
+      }
+      if (run.length >= 2 && run.length <= 4 && !NOT_NAME[run] && out.indexOf(run) < 0) out.push(run);
+    });
+    return out;
+  }
+
+  /* 상황판 이름 → 명부의 「이름 직급」(전 주구 — 감리가 주구를 넘나든다). 명부에 없으면 '' */
+  function supOf(name) {
+    const L = (global.Contacts && global.Contacts.LIST) || [];
+    for (let i = 0; i < L.length; i++) if (L[i].name === name) return global.Contacts.label(L[i]);
+    return '';
+  }
+  function rosterNames() {
+    const seen = {}, out = [];
+    ((global.Contacts && global.Contacts.LIST) || []).forEach((c) => {
+      if (c.name && !seen[c.name]) { seen[c.name] = 1; out.push(c.name); }
+    });
+    return out;
+  }
+
+  /* ---------------- 프롬프트 ----------------
+     문구는 실제 Gemini 로 맞춘 것이다(2026-10-15, 상황판 실사 5회). 「text 를 항상 적어라」 판은 박종익/이상호 줄(날짜 한 줄·시간 한 줄을
+     두 사람이 나눠 씀)에서 이상호를 머리 날짜(10/14)로 읽는 회귀가 3/3 이었다 — 바꾸면 실사로 다시 확인할 것 */
+  function buildPrompt() {
+    return [
+      '감리원 근무상황판(화이트보드, 손글씨) 사진이다. 휴가·외근 등으로 자리를 비우는 사람이 한 줄씩 적혀 있다.',
+      '표의 열은 성명 · 시간 · 용무 · 행선지 · 비고다. 시간 칸에는 날짜(위 줄)와 시간(아래 줄)이 같이 적힌다.',
+      '비고 칸의 숫자·낙서는 무시해라.',
+      '',
+      '표 위에 적힌 날짜(예: 「2026년 3월 4일(수요일)」)를 boardDate 에 YYYY-MM-DD 로 적어라.',
+      '',
+      '사람마다 행 하나(rows)를 만들고 다음을 담아라:',
+      '- name: 성명 한 사람. 한 칸에 두 사람이 위아래로 적혀 있으면 사람마다 행을 따로 만들고,',
+      '  날짜·시간·용무·행선지가 한 번만 적혀 있으면 두 사람에게 똑같이 적어라.',
+      '  (예: 이름 두 줄 옆 시간 칸에 「3/5」 한 줄과 「08:00~17:00」 한 줄이 따로 적혀 있으면 두 사람 모두 3/5 08:00~17:00.)',
+      '- entries: 쉬는 기간 목록.',
+      '  - from: 시작 날짜 YYYY-MM-DD. to: 끝 날짜 YYYY-MM-DD(하루면 from 과 같게).',
+      '  - time: 적힌 시간 그대로(「08:00~17:00」, 「13:00~17:00」). 없으면 "".',
+      '  - kind: 용무 그대로(「연차」, 「대휴」, 「반차」, 「출장」 등).',
+      '  - text: 날짜 칸에 물결(~)이나 쉼표·점으로 이어진 날짜가 있으면 그 날짜 글자를 보이는 그대로 옮겨라(「3/4 ~ 3/6」, 「3/4, 6」, 「3/4. 6」).',
+      '    시간·용무는 뺀다. 앱이 이 글자로 범위인지 나열인지 다시 가리니 풀어 쓰거나 다듬지 마라(쉼표·점을 물결로 바꾸지 마라).',
+      '    날짜가 하나뿐이면 "" 로 둔다.',
+      '  - 범위는 두 날짜 사이에 물결(~)이 있을 때만이다. 「3/4~3/6」 은 entry 하나(from 3/4, to 3/6).',
+      '    범위가 둘(「3/4~3/6」 아래 「3/9~3/13」)이면 entry 둘.',
+      '  - 물결 없이 쉼표·점·띄어쓰기로만 이어진 날짜(「3/4, 6」·「3/4. 6」)는 범위가 아니다. 적힌 날짜 하나하나가 따로 쉬는 날이다.',
+      '    날짜마다 entry 를 따로 만들고(from 과 to 를 같게) 사이 날짜(3/5)를 채우지 마라.',
+      '  - 날짜마다 시간·용무가 다르게 적혀 있으면(「3/5 13:00~17:00 대휴」 아래 「3/6 08:00~17:00 연차」) entry 를 나눠라.',
+      '  - 연도가 안 적힌 날짜는 표 위 날짜와 가장 가까운 해를 붙여라(12월 표의 1월 날짜는 다음 해).',
+      '- place: 행선지(없으면 "").',
+      '',
+      '성명은 아래 명부에 있는 사람들이다. 손글씨가 명부 이름과 비슷하면 명부 표기로 적어라.',
+      '명부에 없는 이름이면 보이는 대로 적어라(지어내지 마라).',
+      '명부: ' + rosterNames().join(', '),
+      '',
+      '빈 행은 넣지 마라. 설명 문장·마크다운 코드블록 없이 아래 JSON 형태로만 답하라. 모르는 값은 "" 로 둬라.',
+      '{"boardDate":"2026-03-04","rows":[' +
+      '{"name":"홍길동","entries":[' +
+      '{"text":"3/4 ~ 3/6","from":"2026-03-04","to":"2026-03-06","time":"08:00~17:00","kind":"연차"},' +
+      '{"text":"3/9 ~ 3/13","from":"2026-03-09","to":"2026-03-13","time":"08:00~17:00","kind":"연차"}],"place":"서울"},' +
+      '{"name":"김철수","entries":[' +
+      '{"text":"3/16, 18","from":"2026-03-16","to":"2026-03-16","time":"13:00~17:00","kind":"대휴"},' +
+      '{"text":"3/16, 18","from":"2026-03-18","to":"2026-03-18","time":"13:00~17:00","kind":"대휴"}],"place":""},' +
+      '{"name":"최민수","entries":[{"text":"","from":"2026-03-05","to":"2026-03-05","time":"08:00~17:00","kind":"연차"}],"place":"부산"},' +
+      '{"name":"정하늘","entries":[{"text":"","from":"2026-03-05","to":"2026-03-05","time":"08:00~17:00","kind":"연차"}],"place":"부산"}]}'
+    ].join('\n');
+  }
+
+  /* ---------------- 후처리(순수) ---------------- */
+  function listOf(raw) {
+    if (Array.isArray(raw)) return raw;
+    if (!raw || typeof raw !== 'object') return [];
+    const ks = ['rows', 'items', 'people', 'data'];
+    for (let i = 0; i < ks.length; i++) if (Array.isArray(raw[ks[i]])) return raw[ks[i]];
+    return [];
+  }
+  function entriesOf(row) {
+    let es = row.entries || row.periods;
+    if (!Array.isArray(es)) es = (row.from || row.start || row.date) ? [row] : [];
+    return es;
+  }
+
+  /* 날짜 글자(「10/14~10/16, 10/19~10/23」·「10/14. 16」)를 기간 목록 [{f:{m,d}, t:{m,d}|null}] 으로 — 물결(~) = 범위, 쉼표·점·줄바꿈 = 나열.
+     범위인지 나열인지는 모델이 아니라 여기서 가른다(모델이 「10/14, 16」 을 10/14~10/16 으로 뭉갠 실측 — 사이의 15일이 가짜 휴무가 됐다) */
+  function cellPeriods(text) {
+    const out = [];
+    let lastM = null;
+    const dayOnly = (t, m) => {        // 「10/14, 16」 의 16 — 월은 앞 날짜에서 물려받는다
+      const x = /^(\d{1,2})\s*일?$/.exec(String(t).trim());
+      return (x && m) ? { y: null, m: m, d: +x[1] } : null;
+    };
+    String(text == null ? '' : text)
+      .replace(/\d{1,2}\s*[:：]\s*\d{2}(?:\s*[~∼～]\s*\d{1,2}\s*[:：]\s*\d{2})?/g, ' ')   // 같은 칸에 적힌 시간(08:00~17:00)은 뗀다
+      .replace(/(\d{1,2}\/\d{1,2})\s*\.\s+(?=\d)/g, '$1, ')                                // 손글씨 「10/14. 16」 의 점은 쉼표
+      .split(/[,，、;·ㆍ\n]|\s+및\s+/).forEach((part) => {
+        part = part.trim();
+        if (!part) return;
+        const seg = part.split(/\s*[~∼～]\s*/);
+        const f = mdOf(seg[0]) || dayOnly(seg[0], lastM);
+        if (!f) return;
+        lastM = f.m;
+        out.push({ f: f, t: seg[1] ? (mdOf(seg[1]) || dayOnly(seg[1], f.m)) : null });
+      });
+    return out;
+  }
+  function resolvePeriods(ps, board) {
+    const res = [];
+    ps.forEach((p) => {
+      const from = resolveYear(p.f, board);
+      if (from) res.push(spanTo(from, p.t));
+    });
+    return res;
+  }
+  /* entry 하나의 기간들. 모델이 풀어 준 from/to 가 틀을 정하고, 날짜 칸 글자 e.text 는 그 안에서 범위·나열을 가른다 —
+     「10/14, 16」 을 from 10/14 ~ to 10/16 으로 뭉갠 entry 는 글자대로 10/14·10/16 두 날로 줄고,
+     칸 전체 글자를 entry 마다 복사해 와도(「10/14, 16」 을 두 entry 에 똑같이) 자기 from/to 밖의 날짜는 안 섞인다.
+     글자가 from/to 를 넓히지는 않는다(글자와 from/to 가 안 겹치면 from/to). from/to 가 아예 없을 때만 글자가 틀이다 */
+  function periodsOf(e, board) {
+    const a = e.from != null ? e.from : (e.start != null ? e.start : e.date);
+    const b = e.to != null ? e.to : e.end;
+    const fps = cellPeriods(a);                                      // from 칸에 여러 기간이 통째로 와도 푼다
+    if (fps.length === 1 && !fps[0].t) fps[0].t = mdOf(b);           // 범위가 from/to 로 나뉘어 온 보통의 경우
+    const win = resolvePeriods(fps, board);
+    const txt = resolvePeriods(cellPeriods(e.text), board);
+    if (!txt.length) return win;
+    if (!win.length) return txt;
+    const cut = [];
+    txt.forEach((p) => win.forEach((w) => {
+      const x = p.from > w.from ? p.from : w.from, y = p.to < w.to ? p.to : w.to;
+      if (x <= y) cut.push({ from: x, to: y });
+    }));
+    return cut.length ? cut : win;
+  }
+
+  /* 같은 날 두 번 걸리면 넓은 쪽(종일 > 반일)을 남긴다 — 오전·오후가 따로 적힌 날은 종일 */
+  function putDay(days, key, v) {
+    const old = days[key];
+    if (!old) { days[key] = { kind: v.kind, half: v.half, time: v.time }; return; }
+    if (old.half === '') return;
+    if (v.half === '' || v.half !== old.half) days[key] = { kind: v.kind || old.kind, half: '', time: v.time || old.time };
+  }
+  function addEntry(days, e, board) {
+    if (typeof e === 'string') e = { from: e };
+    if (!e || typeof e !== 'object') return;
+    const time = String(e.time == null ? '' : e.time).trim().slice(0, 24);
+    const k = splitHalf(kindOf(e.kind != null ? e.kind : (e.reason != null ? e.reason : e.type)));
+    const half = halfOf(time) || k.half;
+    periodsOf(e, board).forEach((p) => {
+      const d = new Date(p.from.getTime());
+      for (let n = 0; n <= MAX_SPAN && d <= p.to; n++, d.setDate(d.getDate() + 1)) {
+        putDay(days, keyOf(d), { kind: k.kind, half: half, time: time });
+      }
+    });
+  }
+
+  /* raw = 모델이 준 JSON. boardDate 는 상황판 머리 날짜('YYYY-MM-DD') — 없으면 raw.boardDate, 그것도 없으면 오늘.
+     → { boardDate, items:[{name, sup, days:{'YYYY-MM-DD':{kind,half,time}}, place}], dropped:[이름…] } */
+  function parse(raw, boardDate) {
+    const top = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
+    const bd = mdOf(boardDate instanceof Date ? keyOf(boardDate) : (boardDate || top.boardDate || top.date));
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    // 상황판 머리의 연도는 그대로 믿는다(다른 날짜의 연도 보정 기준이 된다). 연도가 없을 때만 오늘에 가까운 해
+    const board = !bd ? today
+      : (bd.y && validDay(bd.y, bd.m, bd.d)) ? new Date(bd.y, bd.m - 1, bd.d)
+      : (resolveYear(bd, today) || today);
+    const items = [], by = {}, dropped = [];
+    listOf(raw).forEach((row) => {
+      if (!row || typeof row !== 'object') return;
+      const names = splitNames(row.name != null ? row.name : row.names);
+      if (!names.length) return;
+      const days = {};
+      entriesOf(row).forEach((e) => addEntry(days, e, board));
+      if (!Object.keys(days).length) { dropped.push(names.join(', ')); return; }
+      const place = String(row.place == null ? '' : row.place).trim().slice(0, 20);
+      names.forEach((n) => {
+        let it = by[n];
+        if (!it) { it = by[n] = { name: n, sup: supOf(n), days: {}, place: '' }; items.push(it); }
+        Object.keys(days).forEach((k) => putDay(it.days, k, days[k]));
+        if (!it.place && place) it.place = place;
+      });
+    });
+    return { boardDate: keyOf(board), items: items, dropped: dropped };
+  }
+
+  /* 상황판 머리 날짜('YYYY-MM-DD')의 연도 보정 — 사진은 그날 찍으니 오늘에서 반 년 넘게 벗어난 머리 날짜는 연도 오독이다
+     (손글씨 「2026」→「2020」). 월·일은 믿고 오늘에 가장 가까운 해로 바꾼 키를 돌려준다(멀지 않으면 그대로).
+     parse 는 시계를 안 보는 순수 함수로 두고, 읽은 직후 이 보정을 거쳐 다시 parse 한다 */
+  function nearToday(key, today) {
+    const b = dateOf(key);
+    if (!b) return key;
+    const n = today instanceof Date ? today : new Date();
+    const t0 = new Date(n.getFullYear(), n.getMonth(), n.getDate());
+    if (Math.abs(b - t0) <= 183 * 86400000) return key;
+    const near = resolveYear({ m: b.getMonth() + 1, d: b.getDate() }, t0);
+    return near ? keyOf(near) : key;
+  }
+
+  /* ---------------- 저장 ---------------- */
+  let cacheRaw = null, cacheVal = null;      // 행마다 불러도 JSON 파싱은 값이 바뀔 때만
+  function load() {
+    let raw = '';
+    try { raw = localStorage.getItem(K_LEAVE) || ''; } catch (e) {}
+    if (raw === cacheRaw) return cacheVal;
+    cacheRaw = raw; cacheVal = null;
+    if (!raw) return null;
+    try {
+      const j = JSON.parse(raw);
+      if (j && Array.isArray(j.items)) cacheVal = j;
+    } catch (e) {}
+    return cacheVal;
+  }
+  function save(res) {
+    try {
+      localStorage.setItem(K_LEAVE, JSON.stringify({ boardDate: res.boardDate, savedAt: Date.now(), items: res.items }));
+      return true;
+    } catch (e) { return false; }
+  }
+
+  /* ---------------- 조회 ---------------- */
+  /* 이 감리(텍스트)가 그날 쉬는가 → {name, kind, half} | null */
+  function offOn(supText, day) {
+    const d = load();
+    if (!d || !supText) return null;
+    const toks = splitNames(supText);
+    if (!toks.length) return null;
+    const key = dayKeyOf(day);
+    for (let i = 0; i < d.items.length; i++) {
+      const it = d.items[i];
+      if (!it || toks.indexOf(it.name) < 0) continue;
+      const e = it.days && it.days[key];
+      if (e) return { name: it.name, kind: e.kind || '', half: e.half || '' };
+    }
+    return null;
+  }
+  function offList(day) {
+    const d = load();
+    if (!d) return [];
+    const key = dayKeyOf(day), out = [];
+    d.items.forEach((it) => {
+      const e = it && it.days && it.days[key];
+      if (e) out.push({ name: it.name, kind: e.kind || '', half: e.half || '' });
+    });
+    return out;
+  }
+
+  /* 빨간 표시 — 표시 지점마다 이 한 줄만 부른다. 다시 칠해도 안전(이전 표시를 걷고 새로 단다).
+     el 안에 감리 이름이 이미 들어 있어야 한다(꼬리표는 el 의 맨 끝에 붙는다) */
+  function decorate(el, supText, day) {
+    if (!el) return el;
+    el.classList.remove('sup-off');
+    const old = el.querySelector(':scope > .off-tag');
+    if (old) old.remove();
+    const o = offOn(supText, day);
+    if (!o) return el;
+    el.classList.add('sup-off');
+    const multi = splitNames(supText).length > 1;     // 「A, B」 면 누가 쉬는지 꼬리표에 적는다
+    el.appendChild(U.el('span', 'off-tag', (multi ? o.name + ' ' : '') + labelOf(o)));
+    return el;
+  }
+
+  /* ---------------- 목록 글 ---------------- */
+  /* 하루 단위 days → 이어진 같은 값끼리 기간으로 */
+  function rangesOf(it) {
+    const out = [];
+    Object.keys(it.days || {}).sort().forEach((k) => {
+      const v = it.days[k], last = out[out.length - 1];
+      if (last && last.kind === (v.kind || '') && last.half === (v.half || '') && last.time === (v.time || '') &&
+          nextDay(last.to) === k) { last.to = k; return; }
+      out.push({ from: k, to: k, kind: v.kind || '', half: v.half || '', time: v.time || '' });
+    });
+    return out;
+  }
+  /* 「10/14~10/16, 10/19~10/23 · 연차 08:00~17:00 / 10/20 · 오후 대휴 13:00~17:00 · 서울」 */
+  function describe(it) {
+    const groups = [], idx = Object.create(null);
+    rangesOf(it).forEach((r) => {
+      const head = labelOf(r) + (r.time ? ' ' + r.time : '');
+      if (!(head in idx)) { idx[head] = groups.length; groups.push({ head: head, dates: [] }); }
+      groups[idx[head]].dates.push(span(r.from, r.to));
+    });
+    return groups.map((g) => g.dates.join(', ') + ' · ' + g.head).join(' / ') + (it.place ? ' · ' + it.place : '');
+  }
+
+  /* ---------------- 시트 ---------------- */
+  /* 항목 버튼 위에 스크롤 목록을 끼운다 — U.sheet 의 제목은 스크롤이 안 돼 긴 글을 넣으면 버튼이 화면 밖으로 밀린다 */
+  function sheetWithList(title, listNode, items, onCancel) {
+    U.sheet(title, items, onCancel);
+    const box = U.$('#sheet'), scroll = box && box.querySelector('.sheet-scroll');
+    if (box && scroll) box.insertBefore(listNode, scroll);
+  }
+  function rowNode(it, key) {
+    const row = U.el('div', 'leave-row');
+    const top = U.el('div', 'leave-row-top');
+    const off = it.days && it.days[key];
+    const nm = U.el('span', 'leave-name', it.name);
+    top.appendChild(nm);
+    if (off) { nm.classList.add('sup-off'); top.appendChild(U.el('span', 'off-tag', labelOf(off))); }
+    if (!it.sup) top.appendChild(U.el('span', 'leave-note', '명부 외'));
+    row.appendChild(top);
+    row.appendChild(U.el('div', 'leave-days', describe(it)));
+    return row;
+  }
+  function listNodeOf(items, key) {
+    const list = U.el('div', 'leave-list');
+    // 그 날 쉬는 사람이 위로
+    const on = (it) => (it.days && it.days[key] ? 1 : 0);
+    items.slice().sort((a, b) => on(b) - on(a)).forEach((it) => list.appendChild(rowNode(it, key)));
+    return list;
+  }
+
+  /* 읽은 결과 확인 — 사람이 보고 「저장」 해야 반영된다(OCR 은 권고일 뿐). 연도까지 보여 줘 머리 날짜 오독이 눈에 띄게 한다 */
+  function review(res) {
+    const lines = ['읽은 상황판 · ' + (dateOf(res.boardDate) ? res.boardDate.slice(0, 4) + '년 ' : '') + dayText(res.boardDate) + ' 기준',
+                   res.items.length + '명 — 이름·날짜가 맞는지 확인하세요'];
+    if (res.yearFrom) lines.push('머리 날짜의 연도(' + res.yearFrom.slice(0, 4) + ')가 오늘과 달라 ' + res.boardDate.slice(0, 4) + '년으로 보정했습니다');
+    if (res.dropped && res.dropped.length) lines.push('날짜를 못 읽어 뺀 사람: ' + res.dropped.join(', '));
+    sheetWithList(lines.join('\n'), listNodeOf(res.items, res.boardDate), [
+      { label: '저장 · ' + res.items.length + '명', cls: 'strong', onPick: () => {
+          if (!save(res)) { U.toast('저장하지 못했습니다'); return; }
+          U.toast('상황판을 저장했습니다 · ' + md(res.boardDate) + ' 기준 ' + res.items.length + '명', 2500);
+          refreshViews();
+        } }
+    ]);
+  }
+
+  function openList() {
+    const d = load();
+    if (!d || !d.items.length) { upload(); return; }       // 아직 안 올렸으면 바로 올리기로
+    const key = homeDay || dayKeyOf();
+    const n = offList(key).length;
+    sheetWithList('감리 근무상황판 · ' + md(d.boardDate) + ' 기준 ' + d.items.length + '명\n' +
+                  dayText(key) + ' 휴무 ' + n + '명', listNodeOf(d.items, key), [
+      { label: '상황판 새로 올리기', cls: 'strong', onPick: upload }
+    ]);
+  }
+
+  /* ---------------- 올리기 ---------------- */
+  let busy = false;
+  /* 내 판독 중이거나, 일정표·성적판·계획표 판독(OCR)이 도는 중 — 두 요청이 겹치면 싱글턴 토스트·확인 시트가 서로 덮는다.
+     반대쪽(내가 도는 중에 OCR 이 시작)은 ocr.js 의 guarded 가 Leave 를 몰라 막지 못한다(ocr.js 는 이 작업의 범위 밖) */
+  const busyNow = () => busy || !!(global.OCR && OCR.isBusy && OCR.isBusy());
+  async function upload() {
+    if (busyNow()) { U.toast('아직 앞 사진을 읽는 중입니다 — 잠시만'); return; }
+    if (!global.OCR || !(await OCR.ensureKey())) return;     // 사진을 고르기 **전에** — 찍은 뒤 키를 물으면 그 사진은 버려진다
+    U.sheet('감리 근무상황판 사진 (beta)', [
+      { label: '촬영', onPick: async () => scan(await Native.shootPath()) },
+      { label: '앨범에서 고르기', onPick: async () => scan(await Native.pickPath()) }
+    ]);
+  }
+  async function scan(src) {
+    if (!src) return;                                          // 취소
+    if (busyNow()) { U.toast('아직 앞 사진을 읽는 중입니다 — 잠시만'); return; }
+    busy = true;
+    U.toast('상황판 읽는 중… (Gemini)', 60000);
+    let res;
+    try {
+      if (!Vision.online()) throw new Error('OFFLINE');
+      const im = await Vision.toJpegB64(src, 2048);
+      const raw = await Vision.callJSON(buildPrompt(), [im], { timeout: OCR_TIMEOUT });
+      res = parse(raw);
+      const near = nearToday(res.boardDate);                   // 머리 날짜 연도 오독 보정(월·일은 믿고 오늘에 가까운 해로)
+      if (near !== res.boardDate) { const was = res.boardDate; res = parse(raw, near); res.yearFrom = was; }
+    } catch (e) {
+      console.warn('[leave]', e);
+      U.toast(Vision.explain(e), 3500);
+      return;
+    } finally { busy = false; }
+    U.toast('읽기 완료', 700);                                  // 긴 토스트는 반드시 교체
+    if (!res.items.length) { U.toast('휴무 감리를 찾지 못했습니다\n상황판이 크게 나오게 찍어 보세요', 3500); return; }
+    review(res);
+  }
+
+  /* ---------------- 홈 카드 ---------------- */
+  let homeDay = '';
+  function renderHome(day) {
+    const card = U.$('#home-leave');
+    if (!card) return;
+    if (day) homeDay = dayKeyOf(day);
+    const key = homeDay || dayKeyOf();
+    const d = load();
+    const line = U.$('#leave-line'), sub = U.$('#leave-sub');
+    const offs = d ? offList(key) : [];
+    line.innerHTML = '';
+    if (!offs.length) {
+      line.textContent = d ? '휴무 감리 없음' : '상황판 없음';     // 상황판이 없는 것과 휴무자가 없는 것은 다르다 — 「아무도 안 쉰다」로 읽히면 안 된다
+    } else {
+      line.appendChild(document.createTextNode('휴무 감리'));
+      offs.forEach((o) => {
+        line.appendChild(document.createTextNode(' · '));
+        const one = U.el('span', 'leave-one');
+        one.appendChild(U.el('span', 'sup-off', o.name));
+        one.appendChild(U.el('span', 'leave-kind', '(' + labelOf(o) + ')'));
+        line.appendChild(one);
+      });
+    }
+    sub.textContent = d ? md(d.boardDate) + ' 상황판 기준' : '상황판을 올리면 휴무 감리가 빨갛게 표시됩니다';
+  }
+
+  /* 새 상황판이 저장되면 이미 그려진 화면의 빨강을 다시 칠한다 */
+  function refreshViews() {
+    try { if (global.Home && Home.refresh) Home.refresh(); else renderHome(); } catch (e) {}
+    try { if (global.Tasks && Tasks.refresh) Tasks.refresh(); } catch (e) {}
+  }
+
+  function init() {
+    const main = U.$('#leave-main'), up = U.$('#leave-up');
+    if (main) main.addEventListener('click', openList);
+    if (up) up.addEventListener('click', upload);
+    renderHome();
+  }
+
+  global.Leave = {
+    init: init, renderHome: renderHome, decorate: decorate, offOn: offOn, offList: offList,
+    upload: upload, openList: openList, review: review,
+    isBusy: () => busy,               // 판독 요청 진행 중 — PWA 자동 새로고침이 이때는 미룬다(tools/pwa-client.js idle)
+    _t: { parse: parse, splitNames: splitNames, buildPrompt: buildPrompt, halfOf: halfOf, labelOf: labelOf,
+          rangesOf: rangesOf, describe: describe, load: load, save: save, nearToday: nearToday, K: K_LEAVE }
+  };
+})(window);
+
+;
 /* ===== js/task.js ===== */
 /* ============ task.js — 시험 작업 ============
    워크플로우
@@ -5198,13 +5950,51 @@
     return rest === '' || /^[\s,，·]/.test(rest);
   }
 
+  /* 맨 앞이 **여러 동 무리**(「215-216동 …」·「209,210동 …」·「213,214동B …」)이고 그 첫 동이 d 인가 — 대표 동을 이미 품은 원문이다.
+     계획표 제목은 이 꼴 그대로 place 가 되는데(ocr.planItems), 이걸 몰라보면 편집기 저장(collect)마다 「215동 215-216동 …」 로 접두가 쌓였다(2026-10-15 감사).
+     placeOf 만 쓴다 — placeBrief 는 무리를 떼지 않는다(목록에서 「216동」 정보를 잃지 않게) */
+  const LEAD_GROUP = /^(\d{2,3})((?:\s*[,，·\-–—~∼〜\/／]\s*\d{2,3})+)\s*동(?:\s*([A-Ba-b])(?![0-9A-Za-z가-힣]))?/;
+  function leadsWithDong(t, d) {
+    if (startsWithDong(t, d)) return true;
+    // 「215동-216동」(동이 번호마다 반복된 범위)도 같은 무리 — 맨 앞 한 쌍만 「215-216동」 꼴로 접어 본다
+    const f = t.replace(/^(\d{2,3})\s*동\s*([,，·\-–—~∼〜\/／])\s*(?=\d{2,3}\s*동)/, '$1$2');
+    const m = LEAD_GROUP.exec(f);
+    return !!m && (m[1] + '동' + (m[3] || '')).toUpperCase() === String(d).replace(/\s+/g, '').toUpperCase();
+  }
+
   function placeOf(dong, text) {
     const d = String(dong || '').trim();
     const t = String(text || '').replace(/\s+/g, ' ').trim();
     if (!d) return t;
     if (!t) return d;
-    if (startsWithDong(t, d)) return t;
+    if (leadsWithDong(t, d)) return t;
     return d + ' ' + t;
+  }
+
+  /* 중복 판정용 키 — 대소문자·공백·괄호·구두점을 무시한다(OCR 이 「RF바닥」·「R/F 바닥」 처럼 흔들어도 같은 부위, 2026-10-15 감사) */
+  const LOOSE_JUNK = /[\s()（）\[\]{}.,，·\-–—~∼〜\/／\\_]+/g;
+  function looseKey(s) { return String(s || '').replace(LOOSE_JUNK, '').toLowerCase(); }
+  /* 부위 낱말 키 = looseKey 에서 **동 표기(번호동·무리·A/B 접미·특화동)를 먼저 걷어낸** 것.
+     일정표 OCR 이 만든 「209동, 210동」(placeBrief → 「210동」)은 부위가 아니라 동 나열이라 ''. 「209,210동 옥탑」은 「옥탑」 */
+  const DONG_TOKEN = /\d{2,3}(?:\s*[,，·\-–—~∼〜\/／]\s*\d{2,3})*\s*동(?:\s*[A-Ba-b](?![0-9A-Za-z가-힣]))?(?:\s*특화동)?/g;
+  function partKey(s) { return looseKey(String(s || '').replace(DONG_TOKEN, ' ')); }
+
+  /* 두 부위 글자가 같은 타설을 가리키는가 — 낱말 키(partKey)가 같거나 한쪽이 다른 쪽을 **영숫자 경계에서** 품는다
+     (판넬 손글씨 「27F벽체」 ↔ 계획표 「27F벽체/28F바닥」). 경계를 안 보면 「3F벽체」 가 「13F벽체/14F바닥」 에 걸린다.
+     한쪽이라도 부위가 비면 false — 「같다」를 말할 근거가 없다는 뜻이지 「다르다」가 아니다(다르다고 볼지는 호출부가 partKey 로 따로 판단) */
+  function partsAlike(a, b) {
+    const x = partKey(a), y = partKey(b);
+    if (!x || !y) return false;
+    if (x === y) return true;
+    const s = x.length <= y.length ? x : y, l = x.length <= y.length ? y : x;
+    const alnum = /[0-9a-z]/;
+    for (let i = l.indexOf(s); i >= 0; i = l.indexOf(s, i + 1)) {
+      if (i > 0 && alnum.test(l[i - 1]) && alnum.test(s[0])) continue;
+      const j = i + s.length;
+      if (j < l.length && alnum.test(l[j]) && alnum.test(s[s.length - 1])) continue;
+      return true;
+    }
+    return false;
   }
 
   /* 목록·문구용 부위 요약 — place 에서 제목(동수)과 겹치는 대표 동 접두를 걷어낸 나머지.
@@ -5287,6 +6077,105 @@
     return ((pair && pair.sets) || []).map((s) => String(s.name || '').trim()).filter(Boolean).join(', ');
   }
 
+  /* ---------- 업체·LOT·물성 횟수 (플래너가 빈 계산 세트를 미리 만드는 규칙 — 2026-10-15 사용자 지시) ----------
+     공시체 28일강도는 360㎥ 마다 1 LOT, 물성시험은 120㎥ 마다 1회 — 한 업체가 그 기준을 넘으면 업체 안에서 LOT·회차가 늘고,
+     업체가 여럿이면 업체마다 따로 센다. vendors = [{ name, qty }] (qty 문자열·숫자, 모르면 비움). 전부 순수 함수.
+     MAX_* 는 물량 오타(「300000」)가 세트 수천 개를 만들지 못하게 막는 안전판 — 현실 타설은 못 넘는다. */
+  const LOT_M3 = 360;
+  const PROP_M3 = 120;
+  const MAX_LOTS = 30;
+  const MAX_PROPS = 60;
+
+  function qtyNum(q) {
+    const n = Number(U.normQty(q));   // 「300㎥」·「1,080」·300 모두 숫자로(편집기·플래너·OCR 과 같은 정규화)
+    return (isFinite(n) && n > 0) ? n : 0;
+  }
+  /* 이름 있는 업체만, 이름 trim ≤40. 문자열 항목도 받는다 */
+  function vendorList(vendors) {
+    return (Array.isArray(vendors) ? vendors : []).map((v) => {
+      const o = (v && typeof v === 'object') ? v : { name: v };
+      return { name: String(o.name === null || o.name === undefined ? '' : o.name).replace(/\s+/g, ' ').trim().slice(0, 40), qty: o.qty };
+    }).filter((v) => v.name);
+  }
+  const countBy = (qty, per, max) => { const n = qtyNum(qty); return n > 0 ? Math.min(max, Math.max(1, Math.ceil(n / per))) : 1; };
+
+  /* 수직·수평·필러용 세트 — 업체마다 하나. { name, qty }: qty = 그 업체 물량(문자열, 모르면 ''). 업체 없으면 [].
+     ※ 방통 큐브몰드는 28일 시험이라 이게 아니라 lotSets/lotParts(28일과 같은 LOT 규칙)를 쓴다 — registerPlanItem 이 그렇게 한다 */
+  function vendorParts(vendors) { return vendorList(vendors).map((v) => ({ name: v.name, qty: qtyNum(v.qty) ? U.normQty(v.qty) : '' })); }
+  function vendorSets(vendors) { return vendorParts(vendors).map((p) => p.name); }
+
+  /* 28일(수중·봉함 같은 목록)용 — 업체마다 LOT 수 = max(1, ceil(㎥/360)). 1개면 업체 이름 그대로, 2개 이상이면 「삼표서부 1LOT」 「삼표서부 2LOT」.
+     순서 = 업체 순서 → LOT 순서. qty = 그 LOT 의 몫 — LOT 는 360㎥ 단위로 닫히니 앞 LOT 는 360, 마지막이 나머지(700 → 360 + 340).
+     ※ 이 분할은 현장 관행에 맞춘 가정이다(스펙에 없음) — 틀리면 이 한 곳만 고친다 */
+  function lotParts(vendors) {
+    const out = [];
+    vendorList(vendors).forEach((v) => {
+      const total = qtyNum(v.qty);
+      const n = countBy(v.qty, LOT_M3, MAX_LOTS);
+      for (let i = 1; i <= n; i++) {
+        let q = '';
+        if (total > 0) q = (n === 1) ? U.normQty(v.qty) : U.normQty(String(i < n ? LOT_M3 : Math.min(LOT_M3, Math.round((total - LOT_M3 * (n - 1)) * 100) / 100)));
+        out.push({ name: n > 1 ? (v.name + ' ' + i + 'LOT') : v.name, qty: Number(q) > 0 ? q : '' });
+      }
+    });
+    return out;
+  }
+  function lotSets(vendors) { return lotParts(vendors).map((p) => p.name); }
+
+  /* 물성시험 횟수 [{ vendor, round }] — 업체마다 max(1, ceil(㎥/120))회(회차는 업체마다 1부터). 업체가 없으면 한 번 */
+  function propTests(vendors) {
+    const list = vendorList(vendors);
+    if (!list.length) return [{ vendor: '', round: 1 }];
+    const out = [];
+    list.forEach((v) => {
+      const n = countBy(v.qty, PROP_M3, MAX_PROPS);
+      for (let i = 1; i <= n; i++) out.push({ vendor: v.name, round: i });
+    });
+    return out;
+  }
+
+  /* 업체별 물량 합계 문자열 — 아는 물량이 하나도 없으면 ''. 소수 둘째 자리까지(부동소수 잡음 제거) */
+  function sumQty(vendors) {
+    let sum = 0, any = false;
+    vendorList(vendors).forEach((v) => { const n = qtyNum(v.qty); if (n > 0) { sum += n; any = true; } });
+    return any ? U.normQty(String(Math.round(sum * 100) / 100)) : '';
+  }
+
+  /* 플래너 손입력 「삼표안양 300, 우진 300」 → [{ name, qty }]. 구분은 쉼표·「/」·「·」·「+」(괄호 안은 건드리지 않는다 — 「유진기업(주)(강서)」),
+     각 조각 끝의 숫자가 물량: 「이름 300」·「이름: 300」·「이름(300)」·「이름 300㎥」(m3·루베)·「이름300㎥」, 그리고 이름에 **세 자리 이상** 숫자가 붙은 「삼표안양300」.
+     한두 자리가 이름에 붙은 「삼표2」 는 이름이다. 끝의 마침표는 무시.
+     숫자 없는 **단일** 업체면 qtyTotal 이 그 물량 — 업체가 여럿이면 합계를 나눌 수 없어 비워 둔다. 이름 없이 숫자뿐인 조각은 버린다 */
+  function parseVendors(text, qtyTotal) {
+    const src = String(text === null || text === undefined ? '' : text);
+    const parts = [];
+    let cur = '', depth = 0;
+    src.split('').forEach((ch, i) => {
+      if (ch === '(' || ch === '（') depth++;
+      else if (ch === ')' || ch === '）') depth = Math.max(0, depth - 1);
+      // 「1,200」 의 천단위 쉼표(숫자 뒤 + 숫자 세 자리)는 구분자가 아니다
+      const thousands = ch === ',' && /\d/.test(src.charAt(i - 1)) && /^\d{3}(?!\d)/.test(src.slice(i + 1));
+      if (!depth && !thousands && /[,，/／·・、;；+＋\n\r]/.test(ch)) { parts.push(cur); cur = ''; } else cur += ch;
+    });
+    parts.push(cur);
+    const out = [];
+    parts.forEach((p) => {
+      p = p.replace(/\s+/g, ' ').replace(/[.。]+$/, '').trim();
+      if (!p) return;
+      let name = p, qty = '';
+      const NUM = '(\\d[\\d,]*(?:\\.\\d+)?)', UNIT = '(?:㎥|m3|m³|루베)';
+      const m = new RegExp('^(.+?)\\s*[（(]\\s*' + NUM + '\\s*' + UNIT + '?\\s*[)）]$', 'i').exec(p)              // 「삼표(300)」
+             || new RegExp('^(.+?)(?:\\s+|\\s*[:：=]\\s*)' + NUM + '\\s*' + UNIT + '?$', 'i').exec(p)             // 「삼표 300」·「삼표: 300」
+             || new RegExp('^(.+?)\\s*' + NUM + '\\s*' + UNIT + '$', 'i').exec(p)                                  // 「삼표300㎥」
+             || /^(.*[^\d\s.,:：=])(\d{3,}(?:\.\d+)?)$/.exec(p);                                                     // 「삼표안양300」
+      if (m) { name = m[1]; qty = U.normQty(m[2]); }
+      name = name.replace(/[\s:：=]+$/, '').trim();
+      if (!name || /^[\d.,\s]+$/.test(name)) return;
+      out.push({ name: name.slice(0, 40), qty: qty });
+    });
+    if (out.length === 1 && !out[0].qty) out[0].qty = U.normQty(qtyTotal);
+    return out;
+  }
+
   /* 값이 하나라도 들어 있는 세트만 — 빈 세트는 세지 않는다. 28일은 두 칸 통틀어. */
   function filledSets(t) {
     return allSets(t).filter((p) => (p.set.values || []).length).map((p) => p.set);
@@ -5322,7 +6211,7 @@
   /* ---------- 내보내기 묶음 ----------
      카톡은 감리에게 보낸다 → **감리별로 묶는다.**
      한 감리 안에서도 동·분류가 다르면 따로 보낸다.
-     문구는 "201동 수직입니다" / "204동 28일강도입니다" 형식(수중은 28일강도로 쓴다). */
+     문구는 "201동 9/12 타설 수직입니다" / "204동 10/10 시험 28일강도입니다" 형식(수중은 28일강도로 쓴다). */
 
   /* 카톡에 쓸 동 표기. 연락처의 동은 "215동(특화동)" · "305동, 214동B" 처럼
      지저분한 것이 섞여 있어 앞의 「숫자+동」만 뽑는다. 없으면 적힌 그대로.
@@ -5366,6 +6255,22 @@
   }
   function reportDayOf(t) {
     return (t && t.reportDay) ? t.reportDay : autoReportDay(t);
+  }
+
+  /* 보고 날짜가 어떤 날짜인지 글자로(2026-10-15 사용자 지시) — 수중·봉함(28일)·구버전 water/seal·큐브몰드는 「시험」, 수직·수평·필러는 「타설」.
+     reportDay 를 손으로 고쳐도 낱말은 **분류 규칙**(Spec.byTestDay)을 따른다 — 날짜만 바뀌고 낱말은 그대로.
+     분류를 모르면 ''(틀린 낱말을 붙이느니 안 붙인다). subKey 는 specKey 가 비었을 때의 보조(28일 칸 키). */
+  function dayWord(t, subKey) {
+    const k = (t && t.specKey) || subKey;
+    return Spec.byKey(k) ? (Spec.byTestDay(k) ? '시험' : '타설') : '';
+  }
+
+  /* 「9/12 타설」 — 내보내기 문구·폴더·사진 도장이 같이 쓰는 날짜 꼬리. 보고 날짜가 없으면 ''(예전 꼴: 낱말도 없다) */
+  function dayTag(t, subKey) {
+    const md = Spec.md(reportDayOf(t));
+    if (!md) return '';
+    const w = dayWord(t, subKey);
+    return md + (w ? ' ' + w : '');
   }
 
   /* 그 작업의 동수. 안 적혀 있어도 담당 감리가 한 동만 맡으면 그 동으로 본다 —
@@ -5412,22 +6317,26 @@
     return !!s && s.key === 'seal';
   }
 
-  /* 카톡에 붙일 한 줄: "201동 수직입니다" · 감리축으로 안 보내는 것은 빈 문자열
-     28일은 수중 칸만 나가고 문구는 "201동 28일강도입니다". */
+  /* 카톡에 붙일 한 줄: "201동 9/12 타설 수직입니다" · 감리축으로 안 보내는 것은 빈 문자열
+     28일은 수중 칸만 나가고 문구는 "201동 10/10 시험 28일강도입니다".
+     날짜(보고 날짜 + 타설/시험 낱말)는 동 뒤에 붙는다 — 보고 날짜가 없으면 예전 꼴 "201동 수직입니다". */
   function exportLabel(t, subKey) {
     const s = Spec.byKey(t && t.specKey);
     if (!s) return '';
+    const tag = dayTag(t, subKey);
+    const when = tag ? tag + ' ' : '';
     if (hasSubs(t)) {
       if (subKey === 'seal') return '';
       const d0 = dongOf(t);
-      return (d0 ? d0 + ' ' : '') + '28일강도입니다';
+      return (d0 ? d0 + ' ' : '') + when + '28일강도입니다';
     }
     if (supAxisOff(t)) return '';
     const name = (s.key === 'water') ? '28일강도' : s.name;
     const d = dongOf(t);
-    return (d ? d + ' ' : '') + name + '입니다';
+    return (d ? d + ' ' : '') + when + name + '입니다';
   }
 
+  /* 키에 보고 날짜가 들어간다 — 같은 감리·동·분류라도 날짜가 다르면 문구가 달라지므로 한 묶음으로 섞이면 안 된다 */
   function exportGroup(t, subKey) {
     const s = Spec.byKey(t.specKey);
     if (!s) return null;
@@ -5437,15 +6346,16 @@
     if (!label) return null;
     const sup = (t.supervisor || '').trim();
     const d = dongOf(t);
+    const day = reportDayOf(t);
     return {
-      key: sup + '|' + d + '|' + s.key + '|' + (subKey || ''),
-      sup: sup, dong: d, day: reportDayOf(t),
+      key: sup + '|' + d + '|' + s.key + '|' + (subKey || '') + '|' + day,
+      sup: sup, dong: d, day: day,
       label: label
     };
   }
 
-  /* 날짜축 묶음 — 감리와 무관하게 같은 날·같은 분류끼리. 예 "7/22 필러"
-     수직·수평·필러는 타설일, 수중·봉함은 시험일 기준(reportDayOf 가 그 규칙이다). */
+  /* 날짜축 묶음 — 감리와 무관하게 같은 날·같은 분류끼리. 예 "7/22 타설 필러" · "8/1 시험 28일강도"
+     수직·수평·필러는 타설일, 수중·봉함은 시험일 기준(reportDayOf 가 그 규칙이고, 낱말은 dayWord). */
   function dayGroup(t, subKey) {
     const s = Spec.byKey(t && t.specKey);
     if (!s) return null;
@@ -5454,11 +6364,12 @@
     let name;
     if (subKey) name = (subKey === 'water') ? '28일강도' : '봉함';
     else name = (s.key === 'water') ? '28일강도' : s.name;
+    const tag = dayTag(t, subKey);
     return { key: day + '|' + s.key + '|' + (subKey || ''), day: day,
-             label: (day ? (Spec.md(day) + ' ') : '') + name };
+             label: (tag ? tag + ' ' : '') + name };
   }
 
-  /* 사진 도장 문구: "211동 28일 수중 · 8/13" — 내보내기 도장(U.stampImage)에 쓴다 */
+  /* 사진 도장 문구: "211동 28일 수중 · 8/13 시험" — 내보내기 도장(U.stampImage)에 쓴다 */
   function wmText(t, subKey) {
     const s = Spec.byKey(t && t.specKey);
     const bits = [];
@@ -5468,8 +6379,8 @@
       const sub = subKey ? (Spec.subByKey(subKey) || {}).name : '';
       bits.push(s.name + (sub ? ' ' + sub : ''));
     }
-    const day = reportDayOf(t);
-    return bits.join(' ') + (day ? ' · ' + Spec.md(day) : '');
+    const tag = dayTag(t, subKey);
+    return bits.join(' ') + (tag ? ' · ' + tag : '');
   }
 
   /* 한 작업이 내보내기에 내놓는 조각들.
@@ -5513,11 +6424,13 @@
     });
   }
 
-  /* 감리축 — 감리·동·분류가 같은 것끼리. 예 "201동 수직입니다" */
+  /* 감리축 — 감리·동·분류·보고 날짜가 같은 것끼리. 예 "201동 9/12 타설 수직입니다"
+     같은 감리·동 안에서는 날짜순(라벨 글자순이면 「10/10」이 「9/12」보다 앞서 버린다) */
   function groupForExport(tasks) {
     return groupBy(tasks, exportGroup).sort((a, b) =>
       (a.sup || '￿').localeCompare(b.sup || '￿', 'ko') ||
       (a.dong || '').localeCompare(b.dong || '', 'ko') ||
+      (a.day || '').localeCompare(b.day || '') ||
       a.label.localeCompare(b.label, 'ko'));
   }
 
@@ -5535,8 +6448,10 @@
     pendingSubs: pendingSubs, doneNote: doneNote,
     setsOf: setsOf, allSets: allSets, setName: setName, setStats: setStats,
     filledSets: filledSets, setsBrief: setsBrief, pairsOf: pairsOf, pairLabel: pairLabel,
+    LOT_M3: LOT_M3, PROP_M3: PROP_M3, vendorSets: vendorSets, lotSets: lotSets, vendorParts: vendorParts, lotParts: lotParts, propTests: propTests, parseVendors: parseVendors, sumQty: sumQty,
+    looseKey: looseKey, partKey: partKey, partsAlike: partsAlike,
     actualAge: actualAge, label: label, summary: summary,
-    autoReportDay: autoReportDay, reportDayOf: reportDayOf, exportLabel: exportLabel,
+    autoReportDay: autoReportDay, reportDayOf: reportDayOf, dayWord: dayWord, exportLabel: exportLabel,
     wmText: wmText,
     supAxisOff: supAxisOff,
     batchKey: batchKey, batchKeyBang: batchKeyBang, dongKeyOf: dongKeyOf, defaultSup: defaultSup,
@@ -6084,15 +6999,23 @@
     if (linkedId !== id || linkedSub !== sub || linkedSet !== setId) return;   // 그 사이 다른 세트로 이동함
     if (!t) { U.toast('작업을 찾지 못했습니다'); return; }
 
-    // 수중이 여러 세트(회사·LOT)면 **연결된 봉함 세트의 순번**에 대응하는 수중 세트만 따른다 —
+    // 수중이 여러 세트(회사·LOT)면 **연결된 봉함 세트에 대응하는 수중 세트** 하나만 따른다 —
     // 첫 봉함은 첫 수중, 둘째는 둘째와 비슷하게. 전부 합산하면 개수·평균이 다 틀어진다(사용자 확인 버그).
-    const waterSets = Store.normalizeSets(Task.subOf(t, 'water'))
-      .filter((s) => (s.values || []).some((v) => typeof v.v === 'number' && isFinite(v.v)));
-    if (!waterSets.length) { U.toast('수중 칸에 값이 없습니다'); return; }
+    // 대응 = 같은 이름(수중에 하나뿐일 때) → 없으면 같은 순번. **값 있는 세트만 추린 목록에서 순번을 세지 않는다** —
+    // 플래너가 업체·LOT 이름만 있는 빈 세트를 미리 만들어 두면 순번이 어긋나 다른 업체의 평균으로 값을 지어냈다(감사 지적).
+    // 대응하는 세트가 없거나 비었으면 다른 세트로 갈아타지 않고 그렇게 말하고 멈춘다.
+    const hasVal = (s) => (s.values || []).some((v) => typeof v.v === 'number' && isFinite(v.v));
+    const allWater = Store.normalizeSets(Task.subOf(t, 'water'));
+    if (!allWater.some(hasVal)) { U.toast('수중 칸에 값이 없습니다'); return; }
     const sealSets = Store.normalizeSets(Task.subOf(t, 'seal'));
-    let idx = sealSets.findIndex((s) => s.id === setId);
-    if (idx < 0) idx = 0;
-    const src = waterSets[Math.min(idx, waterSets.length - 1)];
+    const idx = sealSets.findIndex((s) => s.id === setId);
+    if (idx < 0) { U.toast('연결된 봉함 세트를 찾지 못했습니다'); return; }
+    const nm = String(sealSets[idx].name || '').trim();
+    const sameName = nm ? allWater.filter((s) => String(s.name || '').trim() === nm) : [];
+    const src = sameName.length === 1 ? sameName[0] : allWater[idx];
+    const srcName = src ? (String(src.name || '').trim() || ('세트 ' + (allWater.indexOf(src) + 1))) : '';
+    if (!src) { U.toast('이 봉함 세트에 대응하는 수중 세트가 없습니다'); return; }
+    if (!hasVal(src)) { U.toast('대응하는 수중 「' + srcName + '」 세트에 값이 없습니다'); return; }
     const waterVals = src.values.map((v) => v.v).filter((v) => typeof v === 'number' && isFinite(v));
 
     const target = waterVals.length;
@@ -6114,7 +7037,7 @@
     justAdded = entries.length - 1;
     save(); render();
     U.buzz(12);
-    U.toast(made.length + '개를 채웠습니다 · 수중 평균 ' + U.fix2(avg) + ' 기준');
+    U.toast(made.length + '개를 채웠습니다 · 수중 ' + (src.name ? '「' + srcName + '」 ' : '') + '평균 ' + U.fix2(avg) + ' 기준');
   }
 
   /* 되묻지 않고 바로 지운다. 대신 토스트에서 한 번에 되돌릴 수 있다. */
@@ -6341,12 +7264,17 @@
       items.push({ sep: true });
       tasks.forEach((t) => {
         const had = Task.filledSets(t).length;
-        const mk = (subKey, subName) => ({
-          label: Task.label(t) + (subName ? ' ' + subName : '') + ' · ' + (t.dong || '동 미지정'),
-          // 덮어쓰지 않는다 — 세트를 하나 더 붙인다(회사·LOT 가 여러 개인 경우)
-          sub: had ? ('계산 세트 ' + had + '개 있음 → 새 세트로 추가') : (t.supervisor || '첫 세트로 들어갑니다'),
-          onPick: () => putInto(t, subKey)
-        });
+        const mk = (subKey, subName) => {
+          const empty = emptySetOf(t, subKey);
+          const pb = Task.placeBrief(t);   // 같은 동·분류가 둘(215동 벽체 / 215-216동 램프)이면 라벨이 같다 — 부위로 가른다
+          return {
+            label: Task.label(t) + (subName ? ' ' + subName : '') + ' · ' + (t.dong || '동 미지정'),
+            // 덮어쓰지 않는다 — 값이 든 세트는 두고, 미리 만든 빈 세트(플래너: 업체·LOT 이름만)가 있으면 그 첫 번째에 채우고, 없으면 세트를 하나 더 붙인다(회사·LOT 가 여러 개인 경우)
+            sub: [pb, empty ? ('빈 세트' + (empty.name ? ' 「' + empty.name + '」' : '') + '에 채움')
+                            : (had ? ('계산 세트 ' + had + '개 있음 → 새 세트로 추가') : (t.supervisor || '첫 세트로 들어갑니다'))].filter(Boolean).join(' · '),
+            onPick: () => putInto(t, subKey)
+          };
+        };
         if (Task.hasSubs(t)) {
           // 28일은 값이 수중/봉함 칸에 나뉘어 산다 — 칸을 안 물으면 putTask 가
           // t.sets 를 통째로 버려 값이 증발한다(감사에서 확인된 실경로). 칸별로 내놓는다.
@@ -6360,6 +7288,13 @@
     U.sheet('계산값 ' + entries.length + '개를 어디에 넣을까요?', items);
   }
 
+  /* 그 칸(28일이면 subKey 칸)에서 값이 비어 있는 첫 세트 — 플래너가 미리 만든 업체·LOT 이름 세트가 여기 걸린다.
+     없으면 undefined(= 예전처럼 새 세트를 붙인다) */
+  function emptySetOf(t, subKey) {
+    const box = (subKey && Task.hasSubs(t)) ? Task.subOf(t, subKey) : t;
+    return Store.normalizeSets(box).find((s) => !(s.values || []).length);
+  }
+
   async function putInto(t, subKey) {
     const n = entries.length;
     const lim = capFor(t.specKey);
@@ -6367,12 +7302,15 @@
       U.toast(((Spec.byKey(t.specKey) || {}).name || '이 분류') + ' — ' + lim + '개까지인데 값이 ' + n + '개입니다', 3500);
       return;
     }
+    // 미리 만든 빈 세트(이름만 있고 값 없음)가 있으면 그 첫 번째를 채운다 — 이름 없는 새 세트를 또 붙이면 이름 있는 세트는 비고 값만 따로 논다
+    // (사진 파일명·기록서 업체 칸이 어긋남, 감사 지적). 값이 든 세트는 건드리지 않는다
+    const empty = emptySetOf(t, subKey);
     // writeSet 이 28일(sub 칸)과 일반 작업을 모두 안다 — 직접 t.sets 를 만지면 d28 에서 증발한다
-    writeSet(t, entries.slice(), factor, null, subKey || '');
+    writeSet(t, entries.slice(), factor, empty ? empty.id : null, subKey || '');
     try { await Store.putTask(t); }
     catch (e) { console.error(e); U.toast('저장하지 못했습니다'); return; }
     entries = []; digits = ''; save(); render();
-    U.toast('값 ' + n + '개를 「' + (t.dong || Task.label(t)) + '」에 넣었습니다');
+    U.toast('값 ' + n + '개를 「' + (t.dong || Task.label(t)) + (empty && empty.name ? ' · ' + empty.name : '') + '」에 넣었습니다');
     Nav.go('home');
     try {
       const fresh = await Store.getTask(t.id);
@@ -6508,7 +7446,9 @@
 
   function isActive() {
     const v = U.$('#view-calc');
-    return v && !v.classList.contains('hidden') && !Nav.isTaskOpen() && !Nav.isSupOpen();
+    // 물성 모드의 계산 탭은 키패드 없는 외기온도판이고, 물성 편집기가 계산 탭 위에 떠 있을 때도 있다 — 숫자 키가 숨은 공시체 계산기에 등록되지 않게(감사 2026-10-15)
+    return v && !v.classList.contains('hidden') && !Nav.isTaskOpen() && !Nav.isSupOpen() &&
+      U.mode() !== 'prop' && !(global.Prop && global.Prop.isOpen());
   }
 
   function init() { load(); bind(); bindChipDrag(); render(); }
@@ -6577,6 +7517,7 @@
   let base = Spec.atMidnight(new Date());   // 기준 날짜(시험일)
 
   const isToday = () => Spec.sameDay(base, new Date());
+  const propMode = () => U.mode() === 'prop' && !!global.Prop;   // 물성 모드 — 목록·막대 동작은 Prop 이 맡는다(2026-10-15)
 
   /* ---------------- 데이터 ---------------- */
   let loadFail = null;      // 읽기 실패를 "작업 없음"과 구별해 보여준다 (실패면 에러 객체)
@@ -6656,6 +7597,7 @@
   }
 
   async function refresh() {
+    if (propMode()) { dongMode = null; renderNav(); await Prop.renderTasksTab(U.dayKey(base.getTime())); return; }   // 물성 모드: 날짜 이동은 그대로, 목록은 Prop
     renderNav();
     renderChips();
     await load();
@@ -6757,13 +7699,19 @@
       const card = U.el('div', 'bang-saved-item');
       const main = U.el('div', 'bang-si-main');
       main.appendChild(U.el('span', 'bang-si-sup', Bangtong.placeOf(b)));   // 윗줄 = 동(사용자 지시)
-      const sub = [Bangtong.supOf(b),
-                   (r.kgm3 == null && r.slump == null ? '값 미입력' : ''),
-                   (r.kgm3 != null ? (r.kgm3 + 'kg/㎥') : ''),
-                   (r.slump != null ? '슬럼프 ' + r.slump + 'mm' : ''),
-                   ((b.photos || []).length ? '사진 ' + b.photos.length + '장' : '')]
+      const sup = Bangtong.supOf(b);
+      const rest = [(r.kgm3 == null && r.slump == null ? '값 미입력' : ''),
+                    (r.kgm3 != null ? (r.kgm3 + 'kg/㎥') : ''),
+                    (r.slump != null ? '슬럼프 ' + r.slump + 'mm' : ''),
+                    ((b.photos || []).length ? '사진 ' + b.photos.length + '장' : '')]
         .filter(Boolean).join(' · ');
-      main.appendChild(U.el('span', 'bang-si-sub', sub));
+      const subEl = U.el('span', 'bang-si-sub');
+      if (sup) {
+        subEl.appendChild(U.el('span', '', sup));
+        if (global.Leave) Leave.decorate(subEl.lastChild, sup, b.day);   // 그날 휴무인 감리는 빨강 — 홈의 같은 방통 행과 같게
+      }
+      if (rest) subEl.appendChild(document.createTextNode((sup ? ' · ' : '') + rest));
+      main.appendChild(subEl);
       main.addEventListener('click', () => Bangtong.openEdit(b));
       card.appendChild(main);
       const send = U.el('button', 'bang-si-btn');
@@ -6828,6 +7776,7 @@
     if (on) box.appendChild(U.icon('check'));
     h.appendChild(box);
     h.appendChild(U.el('b', '', dongMode ? dayText(t.day) : (done ? '완료' : (t.supervisor || '감리 미지정'))));
+    if (global.Leave && !dongMode && !done && t.supervisor) Leave.decorate(h.lastChild, t.supervisor, U.dayKey(base.getTime()));
     h.appendChild(U.el('span', '', groupOf(t, done).length + '건'));
     h.addEventListener('click', () => {
       // 지금 화면 상태를 다시 본다 — 만들 때의 on 을 쓰면 두 번째 탭이 안 먹는다
@@ -6876,6 +7825,7 @@
     head.appendChild(U.el('span', 'rec-title', Task.dongOf(t) || '동 미지정'));
     // 동수와 담당 감리는 한 줄에 같이 간다(사용자 지시)
     if (t.supervisor) head.appendChild(U.el('span', 'row-sup', t.supervisor));
+    if (global.Leave && t.supervisor) Leave.decorate(head.lastChild, t.supervisor, dongMode ? t.day : U.dayKey(base.getTime()));   // 동별 모아보기는 행마다 날짜가 다르다
     if (t.photoMark) head.appendChild(U.el('span', 'photo-mark', '사진'));   // 표시 전용 배지
     body.appendChild(head);
 
@@ -6954,8 +7904,8 @@
   /* ---------------- 전송 ----------------
      카톡에는 묶음 단위로 보낸다: 사진 여러 장 → 그 밑에 텍스트 한 줄.
      묶는 기준은 분류마다 다르다 (Task.exportGroup 참고).
-       수직·수평·필러 = 타설일   → "7/27 수평"
-       수중·봉함     = 시험일   → "8/1 28일강도" / "7/31 봉함"  */
+       수직·수평·필러 = 타설일   → "7/27 타설 수평"
+       수중·봉함     = 시험일   → "8/1 시험 28일강도" / "7/31 시험 봉함"  */
   async function sendGroup(g, copyText, axis) {
     U.toast('사진 준비 중…', 60000);
     let blobs = [], missing = 0;
@@ -7199,7 +8149,7 @@
   }
 
   /* ---------------- 파일(압축) 내보내기 ----------------
-     기준일 이름의 ZIP(예: 0815.zip) 하나로 — 분류 폴더(수직/수평/필러/28일강도/봉함, 있는 것만),
+     기준일 이름의 ZIP(예: 0815.zip) 하나로 — 분류 폴더(「9.12 타설 수직」·「10.10 시험 28일강도」·「10.10 시험 봉함」 꼴, 있는 것만),
      각 폴더에 사진(동_타설-시험_n.jpg)과 **강도값 엑셀 한 장**(강도값.xlsx — 작업마다 열,
      값은 위→아래. 같은 분류라도 열 제목으로 구분). 사용자 지시 양식.
      수중 칸의 폴더명은 카톡 문구와 같은 「28일강도」다(사용자 지시). */
@@ -7214,7 +8164,7 @@
   function supText(t) {
     // 명부에 없는 동·감리(직접 입력)도 그대로 — 명부에 동이 없으면 defaultSup 이 앱의 감리를 돌려주고, 그것도 없으면 「감리 미지정」
     const def = Task.defaultSup(t), own = ((t && t.supervisor) || '').trim();
-    const nm = (x) => String(x || '').trim().split(/s+/)[0];
+    const nm = (x) => String(x || '').trim().split(/\s+/)[0];
     if (!own && !def) return '감리 미지정';
     if (!own) return def;
     if (!def) return own;
@@ -7380,7 +8330,7 @@
   }
 
   /* mode 'records' = 기록서만(사진·강도값 파일 없이 시험 대장 xlsm 만 — 한 권이면 xlsm 그대로, 여러 권이면 「N월 D일 기록서.zip」, 2026-09-29 사용자 지시) */
-  /* 폴더 라벨(「9.29 수직」) 을 파일명 접두로 — '/' 는 폴더 구분자라 공백으로 */
+  /* 폴더 라벨(「9.29 타설 수직」) 을 파일명 접두로 — '/' 는 폴더 구분자라 공백으로 */
   const fileTag = (folder) => (String(folder || '').replace(/[\/]+/g, ' ').trim() + ' ');
 
   async function exportDayZip(rows, mode) {
@@ -7405,10 +8355,14 @@
 
     try {
       for (const t of rows) {
-        // 폴더 이름은 날짜별 내보내기 라벨과 같은 꼴(사용자 지시) — 「8.25 봉함」
-        // ('/' 는 압축 안에서 하위 폴더가 되므로 '.' 로). 날짜는 보고 날짜 규칙(reportDayOf)을 따른다.
-        const dtag = (Spec.md(Task.reportDayOf(t) || t.day) || '').replace('/', '.');
-        const fname = (k) => (dtag ? dtag + ' ' : '') + ZIP_FOLDER[k];
+        // 폴더 이름은 날짜별 내보내기 라벨과 같은 꼴(사용자 지시) — 「9.12 타설 수직」 「10.10 시험 28일강도」 「10.10 시험 봉함」
+        // ('/' 는 압축 안에서 하위 폴더가 되므로 '.' 로). 날짜는 보고 날짜 규칙(reportDayOf)을, 낱말(타설/시험)은 분류 규칙(Task.dayWord)을 따른다.
+        // 보고 날짜가 없어 작업일(t.day)로 대신한 폴더엔 낱말을 안 붙인다(그 날짜는 타설일도 시험일도 아니다) — 예전처럼 「날짜 분류」만.
+        // 파일명 접두(fileTag)가 이 폴더 이름을 따라가므로 기록서·강도값 파일명도 같이 바뀐다
+        const rday = Task.reportDayOf(t);
+        const dtag = (Spec.md(rday || t.day) || '').replace('/', '.');
+        const dword = (rday && dtag) ? Task.dayWord(t) : '';
+        const fname = (k) => [dtag, dword, ZIP_FOLDER[k]].filter(Boolean).join(' ');
         // 28일은 수중/봉함 칸이 각각 제 폴더로, 단일재령·구버전(water/seal)은 분류 폴더로
         // key = 분류 키(단일재령은 t.specKey, 28일은 칸 키 water|seal) — 기록서 양식 고르기(Record.kindOf)에 쓴다
         const pieces = Task.hasSubs(t)
@@ -7444,7 +8398,7 @@
                          info: { vendor: t.vendor || '', mix: t.mix || '', qty: t.qty || '', place: t.place || Task.placeOf(Task.dongOf(t), ''), dong: Task.dongOf(t) || '', cast: t.castDay || '', test: Task.testDayOf(t) || '' },   // place=타설위치(동 포함, 비면 동만) — 메모(part)는 안 싣는다
                          // 기록서 대장 블록용 — **세트 순서 그대로(빈 세트 포함)**. 봉함은 블록 j ↔ 회차 j(pairsOf 가 빈 세트도 회차로 센다)라
                          // 값 든 것만 추린 card.sets 를 쓰면 값과 사진이 다른 회차에 실린다(감사 지적). 빈 블록은 record.js 가 값·서명 없이 둔다
-                         blocks: allSets.map((s) => ({ vals: (s.values || []).map((v) => v.v), name: String(s.name || '').trim() })) };   // name = 세트의 회사 텍스트 → 기록서 블록 업체
+                         blocks: allSets.map((s) => ({ vals: (s.values || []).map((v) => v.v), name: String(s.name || '').trim(), qty: String(s.qty || '') })) };   // name = 세트의 회사 텍스트 → 기록서 블록 업체, qty = 그 업체·LOT 몫 물량 → 블록 타설물량
 
           if (ids.length) {
             let photos = [];
@@ -7527,7 +8481,7 @@
                               sets: c.blocks || c.sets.map((s) => ({ vals: s.vals })), pairs: pairs });
             }
             const bytes = await Record.buildBytes(kind, recCards);
-            const rec = { name: folder + '/' + fileTag(folder) + Record.fileName(kind), data: bytes, kind: kind, folder: folder };   // 「9.29 수직 거푸집 탈형 …」 — 폴더가 달라도 파일명이 겹치면 엑셀이 둘째를 못 연다
+            const rec = { name: folder + '/' + fileTag(folder) + Record.fileName(kind), data: bytes, kind: kind, folder: folder };   // 「9.29 타설 수직 거푸집 탈형 …」 — 폴더가 달라도 파일명이 겹치면 엑셀이 둘째를 못 연다
             entries.push(rec); recEntries.push(rec);
           } catch (e) { console.warn('[zip] 기록서 실패', folder, e); recFail = true; }
         }
@@ -7535,7 +8489,7 @@
       const recNote = recFail ? ' · 기록서는 만들지 못했습니다' : '';
 
       if (recordsOnly) {
-        // 기록서만 — 한 권이면 xlsm 을 그대로(「9.29 수직 거푸집 탈형 압축강도 시험 대장.xlsm」), 여러 권이면 폴더째 zip
+        // 기록서만 — 한 권이면 xlsm 을 그대로(「9.29 타설 수직 거푸집 탈형 압축강도 시험 대장.xlsm」), 여러 권이면 폴더째 zip
         if (!recEntries.length) { U.toast(recFail ? '기록서를 만들지 못했습니다' : '기록서를 만들 작업이 없습니다 — 수직·수평·필러·봉함 강도값이 있어야 합니다'); return; }
         let blob, outName;
         if (recEntries.length === 1) {
@@ -7564,9 +8518,10 @@
   }
 
   /* 내보내기 두 갈래 — 묶는 축만 다르고 보내는 방식은 같다.
-       byDay : 같은 날 같은 분류끼리   → "7/22 필러"
-       bySup : 감리·동·분류가 같은 것 → "201동 수직입니다" */
+       byDay : 같은 날 같은 분류끼리   → "7/22 타설 필러"
+       bySup : 감리·동·분류·날짜가 같은 것 → "201동 7/22 타설 수직입니다" */
   function askSend(axis) {
+    if (propMode()) { Prop.send(axis); return; }
     const rows = selected();
     if (!rows.length) { U.toast('작업을 선택하세요'); return; }
     const bySup = (axis === 'sup');
@@ -7631,6 +8586,7 @@
     // 파일(압축) 내보내기 — 전용 버튼(사용자 지시: 시트 안 아님)
     const zb = U.$('#tasks-zip');
     if (zb) zb.addEventListener('click', () => {
+      if (propMode()) { Prop.exportZip(); return; }
       const rows = selected();
       if (!rows.length) { U.toast('작업을 선택하세요'); return; }
       exportDayZip(rows);
@@ -7722,22 +8678,37 @@
 
   /* ---------------- 공시체 플래너 (전용 화면 — 사용자 지시) ----------------
      타설일·동·감리를 전용 화면(#view-plan)에서 입력해 **대기 목록(버퍼)**에 담고,
-     「올리기」를 누른 것만 수직·수평·필러·28일 4건으로 등록한다(휴일 이월 규칙, day=시험일).
+     「올리기」를 누른 것만 수직·수평·필러·28일 4건 + 물성시험 레코드 1건으로 등록한다(휴일 이월 규칙, day=시험일. 물성은 day=타설일 — 모드별 플래너는 아래 planNames).
      타설계획표 사진(OCR.readPlan — Gemini Vision, 담당감리·동·부위가 같은 행)으로도 목록을 채운다.
      버퍼는 localStorage 에 남아 재시작해도 산다. */
   const K_PLANBUF = 'gsc.plan.buffer.v1';
-  /* 항목별 분류 체크박스(사용자 지시) — 기본 전부 켬, 끈 분류는 등록하지 않는다 */
+  /* 항목별 분류 체크박스(사용자 지시) — 기본 전부 켬, 끈 분류는 등록하지 않는다.
+     「물성」(2026-10-15)은 작업이 아니라 물성시험 레코드(bangs 스토어 kind:'prop') — Spec.SPECS 에 없는 키라 아래 작업 등록의 분류 필터에는 안 걸리고 registerPlanItem 이 따로 만든다 */
   const PLAN_NAMES = [
     { key: 'vert', name: '수직' }, { key: 'horiz', name: '수평' },
-    { key: 'filler', name: '필러' }, { key: 'd28', name: '28일' }
+    { key: 'filler', name: '필러' }, { key: 'd28', name: '28일' },
+    { key: 'prop', name: '물성' }
   ];
   /* 방통 모드 플래너(2026-09-17): 한 항목 = 방통시험(타설일, 값은 비움) + 큐브몰드(28일 뒤). 버퍼 항목은 mode 를 새겨 모드별로 나눠 보인다 */
   const PLAN_NAMES_BANG = [{ key: 'bang', name: '방통시험' }, { key: 'cube', name: '큐브몰드' }];
-  const planNames = (mode) => ((mode || U.mode()) === 'bang' ? PLAN_NAMES_BANG : PLAN_NAMES);
+  /* 물성 모드 플래너(2026-10-15): 한 항목 = 물성시험 레코드 하나(업체·물량으로 시험 카드 수가 정해진다 — Task.propTests) */
+  const PLAN_NAMES_PROP = [{ key: 'prop', name: '물성' }];
+  const planNames = (mode) => { const m = mode || U.mode(); return m === 'bang' ? PLAN_NAMES_BANG : (m === 'prop' ? PLAN_NAMES_PROP : PLAN_NAMES); };
   const plAllSpecs = (mode) => planNames(mode).map((n) => n.key);
   const plMine = () => plBuf.filter((it) => (it.mode || 'spec') === U.mode());
   /* 대기 항목의 타설부위 — 예전 버퍼(영속)엔 part 로 담겨 있어 그것도 동 접두 규칙으로 읽는다 */
   const plPlace = (it) => it.place || Task.placeOf(it.dong, it.part || '');
+  /* 대기 항목의 업체들 [{name, qty}] — 새 항목은 vendors, 예전 버퍼(영속)엔 vendor 문자열·qty 뿐이라 손입력과 같은 규칙으로 읽는다 */
+  const plVendors = (it) => Array.isArray(it.vendors) ? it.vendors : (it.vendor ? Task.parseVendors(it.vendor, it.qty) : []);
+  /* 올리기가 미리 만드는 빈 계산 세트(2026-10-15) — 이름만 있고 값은 비어 있다. id 는 호출마다 새로(수중·봉함이 같은 id 를 나눠 갖지 않게).
+     parts = Task.vendorParts/lotParts 의 [{ name, qty }] — **세트가 둘 이상일 때** qty(그 업체·LOT 몫의 물량)를 세트에 싣는다: 기록서 대장의 블록(행)마다 타설물량이 달라서
+     (완성본 215동 276 / 258) 작업 합계를 모든 행에 찍으면 틀린다(감사 지적). 모르면 '' (빈 문자열도 「물량 모름」 표식으로 저장된다 — Store.normalizeSets).
+     세트가 하나뿐이면 싣지 않는다 — 작업 물량이 곧 그 행의 물량이라, 편집기에서 물량을 고쳐도 기록서가 따라가게 */
+  const plPreSets = (parts, factor) => parts.map((p) => {
+    const s = { id: U.uid(), name: p.name, values: [], factor: factor };
+    if (parts.length > 1) s.qty = p.qty || '';
+    return s;
+  });
   let plDong = '', plSup = '', plPhone = '';
   let plBuf = [];
   /* 플래너 「올린 묶음」에서 작업·방통을 열면 플래너를 잠시 닫고(둘 다 오버레이라 겹친다), 그 화면이 닫힐 때 플래너로 돌아온다 */
@@ -7762,9 +8733,10 @@
     const ci = $('#plan-cast');
     if (ci && !ci.value) ci.value = U.dayKey(Date.now());
     renderPlanPick(); renderPlanBuf(); renderPlanGroups();
-    // 모드별 모양: 방통 플래너는 층 칸을 보이고 계획표 OCR(공시체 타설계획표)은 숨긴다
-    const bang = (U.mode() === 'bang');
-    const ttl = $('#plan-title'); if (ttl) ttl.textContent = bang ? '방통 플래너' : '플래너';
+    // 모드별 모양: 방통 플래너는 층 칸을 보이고 계획표 OCR(공시체 타설계획표)은 숨긴다.
+    // 물성 플래너는 제목만 다르다 — 계획표 OCR 은 그대로 보인다(계획표의 업체·물량이 물성 시험 횟수를 정한다)
+    const mode = U.mode(), bang = (mode === 'bang');
+    const ttl = $('#plan-title'); if (ttl) ttl.textContent = bang ? '방통 플래너' : (mode === 'prop' ? '물성 플래너' : '플래너');
     const ff = $('#plan-floor-field'); if (ff) ff.classList.toggle('hidden', !bang);
     const ob = $('#plan-ocr');
     if (ob) ob.classList.toggle('hidden', bang || !(global.OCR && OCR.available && OCR.available()));
@@ -7838,6 +8810,10 @@
 
   function planAdd() {
     if (!plDong) { U.toast('동을 먼저 고르세요'); return; }
+    // 업체 · 물량(2026-10-15) — 「삼표안양 300, 우진 300」 을 업체별로 읽는다(숫자 없는 단일 업체면 합계 물량 칸이 그 물량). vendor·qty 는 나열·합계
+    const qtyIn = $('#plan-qty') ? U.normQty($('#plan-qty').value) : '';
+    const vendors = Task.parseVendors($('#plan-vendor') ? $('#plan-vendor').value : '', qtyIn);
+    const sumV = Task.sumQty(vendors);
     plBuf.push({
       id: U.uid(), mode: U.mode(), castDay: planCastDay(), dong: plDong,
       supervisor: plSup, supPhone: plPhone,
@@ -7845,11 +8821,12 @@
       place: Task.placeOf(plDong, $('#plan-part') ? $('#plan-part').value : ''),   // 타설부위(동 포함 — 「214동 옥탑」, 2026-09-29). 메모(part)는 플래너에 없다
       // 규격·업체·물량(선택, 2026-09-29) — 올린 작업 전부에 실린다
       mix: ($('#plan-mix') ? $('#plan-mix').value.trim().slice(0, 40) : ''),
-      vendor: ($('#plan-vendor') ? $('#plan-vendor').value.trim().slice(0, 40) : ''),
-      qty: ($('#plan-qty') ? U.normQty($('#plan-qty').value) : ''),
+      vendors: vendors, vendor: vendors.map((v) => v.name).join(', '), qty: sumV || qtyIn,
       specs: plAllSpecs()
     });
     plSave();
+    // 업체별 물량이 있으면 합계 칸은 쓰이지 않는다 — 다르게 적었으면 말해 준다(조용히 무시하면 합계가 틀려 보인다)
+    if (qtyIn && sumV && Number(qtyIn) !== Number(sumV)) U.toast('업체별 물량 합계 ' + sumV + '㎥ 를 따랐습니다 (합계 칸 ' + qtyIn + ' 은 안 씀)', 3500);
     // 연속 입력 대비 — 날짜는 유지, 동·감리·부위·규격·업체·물량만 비운다
     plDong = ''; plSup = ''; plPhone = '';
     if ($('#plan-part')) $('#plan-part').value = '';
@@ -7875,10 +8852,22 @@
       const card = U.el('div', 'bang-saved-item');
       const main = U.el('div', 'bang-si-main');
       main.appendChild(U.el('span', 'bang-si-sup', it.dong));
-      const sub = [it.supervisor || '감리 미지정', Spec.md(it.castDay) + ' 타설', it.floor ? it.floor + '층' : '', plBrief(it),
-        it.mix || '', it.vendor || '', it.qty ? it.qty + '㎥' : '']   // 있으면 「규격 · 업체 · N㎥」 덧붙임
-        .filter(Boolean).join(' · ');
-      main.appendChild(U.el('span', 'bang-si-sub', sub));
+      // 업체마다 「삼표안양 300」 + 올리면 미리 만들어질 계산 세트 수(LOT 반영)·물성 시험 수 — 「… · 삼표안양 300 · 우진 300 · 28일 2세트 · 물성 6회」(2026-10-15)
+      // 세트·물성 수는 분류 체크를 따라간다(체크를 끄면 그 미리보기도 사라진다 — subText 를 체크 변경 때 다시 부른다)
+      const vs = plVendors(it);
+      const setKey = (it.mode === 'bang') ? 'cube' : 'd28';
+      const subText = () => {
+        const lots = (vs.length && it.specs.indexOf(setKey) >= 0) ? Task.lotSets(vs).length : 0;
+        const props = (it.specs.indexOf('prop') >= 0) ? Task.propTests(vs).length : 0;   // 업체마다 120㎥당 1회 — 업체가 없어도 한 번은 만든다
+        return [it.supervisor || '감리 미지정', Spec.md(it.castDay) + ' 타설', it.floor ? it.floor + '층' : '', plBrief(it), it.mix || '']
+          .concat(vs.map((v) => v.name + (v.qty ? ' ' + v.qty : '')))
+          .concat([(it.qty && !vs.some((v) => v.qty)) ? it.qty + '㎥' : '',           // 업체별 물량이 없을 때만 합계를 따로
+                   lots ? ((it.mode === 'bang' ? '큐브몰드 ' : '28일 ') + lots + '세트') : '',
+                   props ? '물성 ' + props + '회' : ''])
+          .filter(Boolean).join(' · ');
+      };
+      const subEl = U.el('span', 'bang-si-sub', subText());
+      main.appendChild(subEl);
       // 분류 체크박스 — 기본 전부 켬, 끈 분류는 올릴 때 뺀다(사용자 지시)
       const upBtn = U.el('button', 'bang-si-btn');
       const cks = U.el('div', 'plan-cks');
@@ -7893,6 +8882,7 @@
           else it.specs = it.specs.filter((k) => k !== nm.key);
           lab.classList.toggle('on', ck.checked);
           upBtn.disabled = !it.specs.length;
+          subEl.textContent = subText();
           plSave();
         });
         lab.appendChild(ck);
@@ -7920,36 +8910,42 @@
   /* ---------------- 올린 묶음 (2026-09-17 사용자 지시: 플래너로 넣은 것들을 한 번에 관리) ----------------
      플래너로 올린 작업(같은 planId)과, 예전 작업(동+타설일 자동 묶음)을 타설일 역순으로 한 줄씩.
      칩 = 구성원 상태(완료 ✓ / 시험일 / 없음=삭제됨). 칩을 누르면 그 작업(또는 방통 기록)을 연다. 「×」= 묶음 삭제(확인 후).
-     개별 삭제·수정은 편집기에서 그대로. 방통 모드는 구성원이 방통시험·큐브몰드. */
+     개별 삭제·수정은 편집기에서 그대로. 방통 모드는 구성원이 방통시험·큐브몰드.
+     물성시험 레코드(kind:'prop', 2026-10-15)는 같은 묶음 키(planId, 없으면 동+타설일+감리)로 얹힌다 — 공시체 모드에선 작업이 있는 묶음에만 칩으로 붙고
+     (물성만 있는 묶음은 물성 모드의 몫: 모드는 표시 필터), 물성 모드에선 물성 레코드가 묶음을 이룬다. */
   const GROUP_DAYS = 90;
   async function renderPlanGroups() {
     const box = $('#plan-groups');
     if (!box) return;
     const mode = U.mode();
     const since = U.dayKey(Date.now() - GROUP_DAYS * 86400000);
-    let tasks = [], bangs = [];
+    let tasks = [], bangs = [], props = [];
     try { tasks = Task.mine(await Store.allTasks()).filter((t) => (t.castDay || t.day || '') >= since); } catch (e) { console.warn('[plan groups]', e); }
     if (mode === 'bang') {
       try { bangs = (await Store.allBangs()).filter((b) => (!b.jugu || b.jugu === U.jugu()) && (b.day || '') >= since); } catch (e) {}
+    } else {
+      try { props = (await Store.allProps()).filter((b) => (!b.jugu || b.jugu === U.jugu()) && (b.day || '') >= since); } catch (e) {}
     }
     if (!Nav.isPlanOpen()) return;
     const groups = Object.create(null), order = [];
     const put = (key, rec, kind) => {
       if (!key) return;
-      if (!groups[key]) { groups[key] = { key: key, tasks: [], bangs: [], castDay: '', dong: '', sup: '', part: '' }; order.push(key); }
+      if (!groups[key]) { groups[key] = { key: key, tasks: [], bangs: [], props: [], castDay: '', dong: '', sup: '', part: '' }; order.push(key); }
       const g = groups[key];
       if (kind === 'task') { g.tasks.push(rec); g.castDay = g.castDay || rec.castDay || rec.day || ''; }
+      else if (kind === 'prop') { g.props.push(rec); g.castDay = g.castDay || rec.day || ''; }
       else { g.bangs.push(rec); g.castDay = g.castDay || rec.day || ''; }
       g.dong = g.dong || (rec.dong || '');
       g.sup = g.sup || (rec.supervisor || '');
-      g.part = g.part || (kind === 'task' ? (rec.place || rec.part || '') : (rec.memo || ''));   // 옛 플래너 작업은 부위가 part 에 있다(이관 없음) — 폴백   // 부위 표시 = 작업은 place(동 포함), 방통은 memo(부위 텍스트)
+      g.part = g.part || (kind === 'bang' ? (rec.memo || '') : (rec.place || rec.part || ''));   // 부위 표시 = 작업·물성은 place(동 포함), 방통은 memo(부위 텍스트). 옛 플래너 작업은 부위가 part 에 있다(이관 없음) — 폴백
     };
     tasks.forEach((t) => put(Task.batchKey(t), t, 'task'));
     bangs.forEach((b) => put(Task.batchKeyBang(b), b, 'bang'));
+    props.forEach((p) => { const k = Task.batchKeyBang(p); if (mode === 'prop' || (k && groups[k])) put(k, p, 'prop'); });
     order.sort((a, b) => (groups[b].castDay || '').localeCompare(groups[a].castDay || ''));
     box.innerHTML = '';
     if (!order.length) { box.appendChild(U.el('p', 'empty-msg', '올린 묶음이 없습니다')); return; }
-    const members = (mode === 'bang') ? [{ key: 'bang', name: '방통시험' }, { key: 'cube', name: '큐브몰드' }] : PLAN_NAMES;
+    const members = planNames(mode);
     order.forEach((key) => {
       const g = groups[key];
       const card = U.el('div', 'plan-grp');
@@ -7972,12 +8968,28 @@
         chip.addEventListener('click', () => { plReturn = true; Nav.showPlan(false); open(t, t.day); });
         return chip;
       };
+      // 물성 칩 = 「물성 6회」 + 완료 표시 — 홈·작업탭 목록과 같은 규칙(Prop.testDone: 시험마다 사진 2장, 공시체 「사진 = 완료」와 같음):
+      // 다 됐으면 「✓」, 일부면 「2/6」(끝난 시험 수), 하나도 없으면 횟수만
+      const propChip = (p) => {
+        const tests = Array.isArray(p.tests) ? p.tests : [];
+        const n = tests.length, full = (global.Prop && Prop.testDone) ? tests.filter(Prop.testDone).length : 0;
+        const done = n > 0 && full === n;
+        const chip = U.el('button', 'plan-chip' + (done ? ' done' : ''), '물성 ' + n + '회' + (done ? ' ✓' : (full ? ' ' + full + '/' + n : '')));
+        chip.addEventListener('click', () => {
+          if (!global.Prop) return;
+          plReturn = true; Nav.showPlan(false); Prop.open(p, p.day);   // 물성 편집기가 닫히면 finishClose 가 _overlayClosed 로 플래너를 되연다
+        });
+        return chip;
+      };
       const goneChip = (name) => { const c = U.el('button', 'plan-chip gone', name + ' 없음'); c.disabled = true; return c; };
       const shownIds = Object.create(null);
       members.forEach((m) => {
         if (m.key === 'bang') {
           if (!g.bangs.length) chips.appendChild(goneChip(m.name));
           g.bangs.forEach((b) => chips.appendChild(bangChip(b)));
+        } else if (m.key === 'prop') {
+          // 물성은 선택 구성원(체크를 끄고 올릴 수 있고 옛 묶음엔 아예 없다) — 없다고 「없음」 칩을 만들지 않는다. 같은 묶음에 여럿이면 칩도 여럿
+          g.props.forEach((p) => chips.appendChild(propChip(p)));
         } else {
           const ts = g.tasks.filter((x) => x.specKey === m.key);
           if (!ts.length) chips.appendChild(goneChip(m.name));
@@ -7990,14 +9002,15 @@
       del.textContent = '×';
       del.setAttribute('aria-label', '묶음 삭제');
       del.addEventListener('click', () => {
-        const n = g.tasks.length + g.bangs.length;
+        const n = g.tasks.length + g.bangs.length + g.props.length;
         // 무엇이 지워지는지 그대로 적는다 — 분류 나열 + 감리(여럿이면 전부)
-        const names = g.tasks.map((t) => (Spec.byKey(t.specKey) || {}).name || '분류 없음').concat(g.bangs.map(() => '방통시험'));
-        const sups = []; g.tasks.concat(g.bangs).forEach((r) => { const v = (r.supervisor || '').trim() || '감리 미지정'; if (sups.indexOf(v) < 0) sups.push(v); });
-        U.confirmSheet('이 묶음의 ' + n + '건을 모두 지울까요?\n' + names.join(' · ') + '\n' + sups.join(', ') + '\n사진·강도값도 함께 지워집니다', '묶음 삭제', async () => {
+        const names = g.tasks.map((t) => (Spec.byKey(t.specKey) || {}).name || '분류 없음').concat(g.bangs.map(() => '방통시험'), g.props.map(() => '물성시험'));
+        const sups = []; g.tasks.concat(g.bangs, g.props).forEach((r) => { const v = (r.supervisor || '').trim() || '감리 미지정'; if (sups.indexOf(v) < 0) sups.push(v); });
+        U.confirmSheet('이 묶음의 ' + n + '건을 모두 지울까요?\n' + names.join(' · ') + '\n' + sups.join(', ') + '\n사진·' + (g.props.length ? '강도값·물성값' : '강도값') + '도 함께 지워집니다', '묶음 삭제', async () => {
           let k = 0;
           for (const t of g.tasks) { try { await Store.deleteTask(t.id); k++; } catch (e) { console.error(e); } }
           for (const b of g.bangs) { try { await Store.deleteBang(b.id); k++; } catch (e) { console.error(e); } }
+          for (const p of g.props) { try { await Store.deleteBang(p.id); k++; } catch (e) { console.error(e); } }   // 물성도 bangs 스토어 — deleteBang 이 시험 사진(photos 평탄화)까지 지운다
           U.toast(k + '건을 지웠습니다');
           renderPlanGroups(); refreshLists();
         }, true);
@@ -8007,7 +9020,7 @@
     });
   }
 
-  /* 한 건 올리기 — 수직·수평·필러·28일 4건 등록(동·분류·타설일 중복은 건너뜀) */
+  /* 한 건 올리기 — 수직·수평·필러·28일 4건 등록(동·분류·타설일 중복은 건너뜀) + 분류 체크 「물성」이면 물성시험 레코드 1건 */
   async function registerPlanItem(it) {
     const planId = it.planId || U.uid();          // 한 항목에서 나온 작업은 같은 묶음
     if ((it.mode || 'spec') === 'bang') {
@@ -8036,7 +9049,8 @@
             await Store.putTask({ day: testDay, testDay: testDay, specKey: 'cube', castDay: it.castDay,
               dong: it.dong, jugu: U.jugu(), supervisor: it.supervisor || '', supPhone: it.supPhone || '',
               place: plPlace(it), part: '', mix: it.mix || '', vendor: it.vendor || '', qty: it.qty || '',   // 타설부위(동 포함)·메모 없음
-              photos: [], sets: [], planId: planId });
+              // 큐브몰드도 28일 시험이라 같은 LOT 규칙 — 업체마다(360㎥ 넘으면 「X 1LOT」「X 2LOT」) 빈 세트, 계수 1.00(분류가 잠근다)
+              photos: [], sets: plPreSets(Task.lotParts(plVendors(it)), Spec.CUBE.factor), planId: planId });
             ok++;
           } catch (e) { console.error('[planner cube]', e); }
         }
@@ -8049,50 +9063,101 @@
       spec: s, testDay: U.dayKey(Spec.testDayOf(cast, s.age).getTime())
     }));
     let existing = [];
-    try { existing = (await Store.allTasks()).filter((t) => Task.juguOf(t) === U.jugu()); } catch (e) {}
+    if (plan.length) { try { existing = (await Store.allTasks()).filter((t) => Task.juguOf(t) === U.jugu()); } catch (e) {} }   // 물성만 올리는 항목(물성 모드)은 작업을 안 만드니 읽을 필요 없다
     const dkey = (s) => String(s || '').replace(/[\s()（）]/g, '');
+    // 같은 동·분류·타설일이면 이미 있는 것 — 단 **둘 다 부위를 적었는데 서로 다르면** 다른 타설이다(계획표에서 한 감리가 같은 날
+    // 「215동 27F벽체/28F바닥」과 「215-216동 사이 램프」를 치면 대표 동이 같다). 어느 한쪽이 부위를 안 적었으면 예전대로 같은 것으로 본다.
+    // 「부위를 적었다」 = 동 표기를 걷어내고도 낱말이 남는다(Task.partKey): 일정표 OCR 의 「209동, 210동」(placeBrief → 「210동」)은 동 나열일 뿐이라 부위 없음이고,
+    // 부위끼리는 공백·괄호·슬래시·대소문자를 무시해 비교한다(OCR 이 「RF바닥」↔「R/F 바닥」 처럼 흔들어도 같은 부위 — 안 그러면 4건씩 이중 등록, 감사 지적)
+    const otherPlace = (t) => { const a = Task.partKey(Task.placeBrief(t)), b = Task.partKey(plBrief(it)); return !!a && !!b && a !== b; };
     const fresh = plan.filter((p) => !existing.some((t) =>
       (dkey(t.dong) || dkey(Task.dongOf(t))) === dkey(it.dong) &&
-      t.specKey === p.spec.key && (t.castDay || '') === it.castDay));
+      t.specKey === p.spec.key && (t.castDay || '') === it.castDay && !otherPlace(t)));
+    // 계산 세트를 미리 만든다(2026-10-15 사용자 지시) — 업체마다 이름만 있는 빈 세트. 수직·수평·필러 = 업체당 1세트,
+    // 28일(수중·봉함 칸마다 따로, id 도 따로) = 업체당 LOT 세트(360㎥ 넘으면 「X 1LOT」「X 2LOT」). 업체가 없으면 예전처럼 빈 채로
+    const vs = plVendors(it);
+    const names = Task.vendorParts(vs), lots = Task.lotParts(vs);   // [{ name, qty }] — qty = 업체·LOT 몫(기록서 블록별 타설물량)
     let ok = 0;
     for (const p of fresh) {
       try {
-        await Store.putTask({
+        const fac = p.spec.factor || Calc.DEFAULT_FACTOR;
+        const rec = {
           day: p.testDay, testDay: p.testDay, specKey: p.spec.key, castDay: it.castDay,
           dong: it.dong, jugu: U.jugu(),
           supervisor: it.supervisor || '', supPhone: it.supPhone || '',
           place: plPlace(it), part: '', mix: it.mix || '', vendor: it.vendor || '', qty: it.qty || '',   // 타설부위(동 포함)·메모 없음
           photos: [], sets: [], planId: planId
-        });
+        };
+        if (Spec.hasSubs(p.spec.key)) {
+          rec.sub = {};
+          Spec.SUBS.forEach((s) => { rec.sub[s.key] = { photos: [], sets: plPreSets(lots, fac) }; });
+        } else rec.sets = plPreSets(names, fac);
+        await Store.putTask(rec);
         ok++;
       } catch (e) { console.error('[planner]', e); }
     }
-    return { ok: ok, skip: plan.length - fresh.length, planId: planId };
+    // 물성시험 레코드(분류 체크 「물성」, 2026-10-15) — 업체·물량이 시험 카드 수를 정한다(Task.propTests: 업체마다 120㎥당 1회, 회차는 업체마다 1부터).
+    // 값·사진은 빈 채 — 판넬 스캔이 업체·회차가 맞는 빈 시험을 채운다(prop.js pickTestSlot). 같은 동·같은 타설일 물성 레코드가 이미 있으면 건너뛴다 —
+    // 작업과 같은 규칙으로, 둘 다 부위를 적었는데 서로 다르면 다른 타설(한 감리가 같은 날 벽체와 램프를 침). 단 부위 비교는 작업의 otherPlace(낱말 키가 똑같아야 같은 부위)가 아니라
+    // 한쪽이 다른 쪽을 품으면(Task.partsAlike) 같은 부위로 본다 — 물성의 기존 레코드는 판넬 스캔(손글씨 부위)이 먼저 만들었을 수 있어
+    // 「27F벽체」 ↔ 「27F벽체/28F바닥」 이 다른 타설로 갈리면 같은 타설의 빈 레코드가 또 생긴다(감사)
+    const otherPropPlace = (b) => { const a = Task.placeBrief(b), c = plBrief(it); return !!Task.partKey(a) && !!Task.partKey(c) && !Task.partsAlike(a, c); };
+    let pOk = 0, pSkip = 0;
+    if (want.indexOf('prop') >= 0) {
+      let props = [];
+      try { props = (await Store.propsOf(it.castDay)).filter((b) => !b.jugu || b.jugu === U.jugu()); } catch (e) {}
+      if (props.some((b) => dkey(b.dong) === dkey(it.dong) && !otherPropPlace(b))) pSkip++;
+      else {
+        try {
+          await Store.putBang({
+            kind: 'prop', day: it.castDay, dong: it.dong, place: plPlace(it),
+            supervisor: it.supervisor || '', supPhone: it.supPhone || '', jugu: U.jugu(),
+            mix: it.mix || '', vendor: it.vendor || '', qty: it.qty || '', memo: '', planId: planId,
+            tests: Task.propTests(vs).map((p) => ({ id: U.uid(), vendor: p.vendor, round: p.round, photos: [] })),   // 값 8칸은 propRec 이 빈 문자열로 채운다
+            photos: []
+          });
+          pOk++;
+        } catch (e) { console.error('[planner prop]', e); }
+      }
+    }
+    return { ok: ok + pOk, skip: plan.length - fresh.length + pSkip, planId: planId };
   }
 
+  /* 올리는 중 재진입 차단 — registerPlanItem 은 기존 작업을 읽고 나서 쓰는데, 대기 항목은 끝까지 다 쓴 뒤에야 버퍼에서 빠진다. 더블탭(또는 「전체 올리기」와 겹침)이면
+     두 호출이 서로의 쓰기를 못 보고 같은 작업(+빈 세트·물성 레코드)을 두 벌 만든다(감사 2026-10-15). 하나씩만 돈다 */
+  let plUploading = false;
+
   async function uploadPlanItem(it) {
+    if (plUploading) { U.toast('올리는 중입니다 — 잠시만'); return; }
     if (Array.isArray(it.specs) && !it.specs.length) { U.toast('분류를 하나는 선택하세요'); return; }
-    const r = await registerPlanItem(it);
-    plBuf = plBuf.filter((x) => x.id !== it.id);
-    plSave(); renderPlanBuf(); renderPlanGroups(); refreshLists();
-    U.toast(it.dong + ' — ' + r.ok + '건 등록' + (r.skip ? ' · 이미 있던 ' + r.skip + '건 건너뜀' : ''), 3000);
+    plUploading = true;
+    try {
+      const r = await registerPlanItem(it);
+      plBuf = plBuf.filter((x) => x.id !== it.id);
+      plSave(); renderPlanBuf(); renderPlanGroups(); refreshLists();
+      U.toast(it.dong + ' — ' + r.ok + '건 등록' + (r.skip ? ' · 이미 있던 ' + r.skip + '건 건너뜀' : ''), 3000);
+    } finally { plUploading = false; }
   }
 
   async function uploadPlanAll() {
     if (!plMine().length) return;
+    if (plUploading) { U.toast('올리는 중입니다 — 잠시만'); return; }
     // 분류를 전부 끈 항목은 두고 간다 — 지우면 담아둔 내용이 사라진다
     const list = plMine().filter((it) => !Array.isArray(it.specs) || it.specs.length);
     if (!list.length) { U.toast('선택된 분류가 없습니다'); return; }
-    U.toast('올리는 중…', 60000);
-    let ok = 0, skip = 0;
-    for (const it of list) {
-      const r = await registerPlanItem(it);
-      ok += r.ok; skip += r.skip;
-      plBuf = plBuf.filter((x) => x.id !== it.id);
-      plSave();
-    }
-    renderPlanBuf(); renderPlanGroups(); refreshLists();
-    U.toast('작업 ' + ok + '건을 등록했습니다' + (skip ? ' · 이미 있던 ' + skip + '건 건너뜀' : ''), 3500);
+    plUploading = true;
+    try {
+      U.toast('올리는 중…', 60000);
+      let ok = 0, skip = 0;
+      for (const it of list) {
+        const r = await registerPlanItem(it);
+        ok += r.ok; skip += r.skip;
+        plBuf = plBuf.filter((x) => x.id !== it.id);
+        plSave();
+      }
+      renderPlanBuf(); renderPlanGroups(); refreshLists();
+      U.toast('작업 ' + ok + '건을 등록했습니다' + (skip ? ' · 이미 있던 ' + skip + '건 건너뜀' : ''), 3500);
+    } finally { plUploading = false; }
   }
 
   /* 타설계획표 사진 → 대기 목록 (전용 OCR — 사용자 지시) */
@@ -8106,6 +9171,9 @@
 
   async function planScanPath(path) {
     if (!path) return;
+    // 공시체·물성 모드가 같은 계획표 OCR 을 쓴다 — 항목에 모드를 새기고(안 새기면 공시체 것으로 읽혀 물성 모드에서 안 보인다) 접기도 같은 모드끼리만.
+    // 읽는 동안(최대 30~60초) 뒤로가기로 나가 모드를 바꿀 수 있어 **스캔을 시작한 모드**를 await 전에 뜬다(감사)
+    const curMode = U.mode();
     U.toast('계획표를 읽는 중… (Gemini)', 60000);
     let parsed;
     try { parsed = await OCR.readPlan(path); }
@@ -8129,17 +9197,20 @@
     };
     let added = 0;
     parsed.items.forEach((it) => {
-      const dup = plBuf.some((b) => b.dong === it.dong && b.castDay === castDay &&
-                                    (b.supervisor || '').indexOf(it.sup || '') >= 0);
+      const place = it.place || Task.placeOf(it.dong, '');   // 계획표 원문 전체(대표 동 접두 — 「205동 옥탑 및 214동 ph2」)
+      // 같은 동·같은 감리라도 부위가 다르면 다른 블록이다(215동 벽체 + 215-216동 램프) — 같은 계획표를 다시 스캔했을 때만 접는다
+      const dup = plBuf.some((b) => (b.mode || 'spec') === curMode && b.dong === it.dong && b.castDay === castDay &&
+                                    (b.supervisor || '').indexOf(it.sup || '') >= 0 &&
+                                    Task.looseKey(plPlace(b)) === Task.looseKey(place));   // 공백·괄호·슬래시·대소문자 무시 — 같은 계획표를 다시 찍어 표기가 조금 흔들려도 접는다
       if (dup) return;
       const c = byName(it.sup);
       plBuf.push({
-        id: U.uid(), castDay: castDay, dong: it.dong,
+        id: U.uid(), mode: curMode, castDay: castDay, dong: it.dong,
         supervisor: c ? Contacts.label(c) : (it.sup || ''),
         supPhone: c ? (c.phone || '') : '',
-        place: it.place || Task.placeOf(it.dong, ''),   // 계획표 원문 전체(대표 동 접두 — 「205동 옥탑 및 214동 ph2」)
-        mix: it.mix || '', vendor: it.vendor || '', qty: it.qty || '',   // 계획표의 규격·업체·물량(OCR)
-        specs: plAllSpecs()
+        place: place,
+        mix: it.mix || '', vendors: it.vendors || [], vendor: it.vendor || '', qty: it.qty || '',   // 계획표의 규격·업체들(vendors 전부)·물량 합계(OCR)
+        specs: plAllSpecs(curMode)
       });
       added++;
     });
@@ -8182,9 +9253,9 @@
      칸은 readonly(키보드 안 뜸) — 탭하면 U.dialSheet, 「직접 입력」 은 prompt. 파싱 안 되는 값(자유 입력)은 기본 위치 */
   const MIX_COLS = [
     { label: '골재', items: [20, 25, 40], def: 25 },
-    { label: '강도', items: [18, 21, 24, 27, 30, 35, 40, 45, 50], def: 30 },
+    { label: '강도', items: [18, 21, 24, 27, 30, 33, 35, 40, 45, 50], def: 30 },   // 33 = 현장 계획표의 「25-33-180(상향)」 (2026-10-15)
     { label: '슬럼프', items: [80, 100, 120, 150, 180, 210], def: 180 },
-    { label: '구분', items: ['', '표준', '초유지', '무근', '저수축', '고강도'], def: '' }   // 현장 완성본에 실제로 있던 표기
+    { label: '구분', items: ['', '표준', '상향', '초유지', '무근', '저수축', '고강도'], def: '' }   // 현장 완성본·계획표에 실제로 있던 표기(상향 = 2026-10-15)
   ];
   function parseMix(v) {
     const m = /^(\d+)\s*-\s*(\d+)\s*-\s*(\d+)\s*(?:\(\s*([^)]*?)\s*\))?$/.exec(String(v || '').trim());
@@ -8439,7 +9510,7 @@
 
   /* ---------------- 동수 ----------------
      동을 고르면 그 동 담당 감리가 따라온다(한 동에 둘이면 고르게 한다).
-     동수는 목록 제목이자 카톡 문구("201동 수직입니다")의 주어다. */
+     동수는 목록 제목이자 카톡 문구("201동 9/12 타설 수직입니다")의 주어다. */
   function renderDong() {
     const el = $('#tk-dong-name');
     if (!el || !tk) return;
@@ -8542,6 +9613,7 @@
       whereEl.textContent = '';
       callEl.classList.add('hidden');
     }
+    if (global.Leave) Leave.decorate(nameEl, tk.supervisor, tk.day);
 
     // 추천 칩은 pickDong/pickSup 이 세우고 지운다 — 여기선 건드리지 않는다
     void hintEl;
@@ -8621,6 +9693,7 @@
         const b = U.el('button', 'sup-item' + (tk && tk.supPhone === c.phone ? ' on' : ''));
         const left = U.el('div', 'sup-left');
         left.appendChild(U.el('span', 'sup-name', Contacts.label(c)));
+        if (global.Leave) Leave.decorate(left.lastChild, Contacts.label(c), tk && tk.day);   // 그날 휴무인 감리는 고르기 전에 보이게
         left.appendChild(U.el('span', 'sup-sub', Contacts.where(c) + ' · ' + c.phone));
         b.appendChild(left);
         b.addEventListener('click', () => { pickSup(c); Nav.showSup(false); });
@@ -9094,7 +10167,7 @@
     tk.part = $('#tk-part').value.trim();   // 메모(순수 텍스트)
     // 규격·업체·물량 — 선택 입력. 물량은 숫자·점만 남긴다
     if ($('#tk-mix')) tk.mix = $('#tk-mix').value.trim().slice(0, 40);
-    if ($('#tk-vendor')) tk.vendor = $('#tk-vendor').value.trim().slice(0, 40);
+    if ($('#tk-vendor')) tk.vendor = $('#tk-vendor').value.trim().slice(0, 120);   // 여러 업체 나열(플래너) — Store.taskRec 와 같은 상한
     if ($('#tk-qty')) tk.qty = U.normQty($('#tk-qty').value);
     return tk;                    // supervisor/supPhone 은 감리 선택에서 채운다
   }
@@ -9287,7 +10360,7 @@
     $('#tk-workday').addEventListener('change', () => {
       if (!tk) return;
       tk.day = $('#tk-workday').value || tk.day;
-      markDirty(); renderWorkDay();
+      markDirty(); renderWorkDay(); renderSup();   // 감리 칸의 휴무 표시가 작업일을 따른다
     });
 
     $('#tk-add-set').addEventListener('click', () => { addSet(); });
@@ -9344,6 +10417,7 @@
   global.TaskUI = {
     init: init, open: open, tryClose: tryClose, setValues: setValues,
     isOpen: () => !!tk, addFiles: addFiles,
+    openMixDial: openMixDial,            // 물성 편집기(prop.js)의 규격 칸이 같은 KS 다이얼을 쓴다
     _overlayClosed: overlayClosed        // 플래너에서 연 방통 화면이 닫힐 때(bangtong.close) 플래너로 복귀
   };
 })(window);
@@ -10046,8 +11120,9 @@
     '- 일요일은 휴무라 일요일에 깨야 할 것은 월요일에 함께 깬다.',
     '',
     '[카카오톡 내보내기 규칙]',
-    '- 수직·수평·필러: 같은 날 "타설"한 것을 감리 무관하게 한 번에. 표기는 "7/22 필러" 형식.',
-    '- 수중·봉함: 같은 날 "시험"한 것을 한 번에. 수중은 텍스트를 "28일강도"로 쓴다(예 "8/1 28일강도").',
+    '- 수직·수평·필러: 같은 날 "타설"한 것을 감리 무관하게 한 번에. 표기는 "7/22 타설 필러" 형식(날짜 뒤에 타설/시험을 적는다).',
+    '- 수중·봉함: 같은 날 "시험"한 것을 한 번에. 수중은 텍스트를 "28일강도"로 쓴다(예 "8/1 시험 28일강도").',
+    '- 감리별로 보낼 땐 동·날짜가 앞에 붙는다(예 "201동 7/22 타설 수직입니다", "203동 8/1 시험 28일강도입니다").',
     '- 사진을 먼저 보내고 대화창에 제목을 붙여넣는 방식이다.',
     '- 아래 [지금 앱 상태]의 각 작업에 「카톡표기」가 이미 규칙대로 계산돼 있다.',
     '  카톡 문구를 물으면 그 값을 그대로 쓰고 날짜를 되묻지 마라.',
@@ -11937,6 +13012,7 @@
   function renderSup() {
     const t = draft.supervisor ? draft.supervisor : '담당 감리 선택';
     $('#bang-sup-txt').textContent = t;
+    if (global.Leave) Leave.decorate($('#bang-sup-txt'), draft.supervisor, editing ? editing.day : '');   // 새 입력은 오늘, 수정은 그 기록의 날짜
     $('#bang-sup').classList.toggle('set', !!draft.supervisor);
     $('#bang-dong-txt').textContent = draft.dong || '동 선택';
     $('#bang-dong').classList.toggle('set', !!draft.dong);
@@ -12222,13 +13298,18 @@
       const card = U.el('div', 'bang-saved-item' + (editing && editing.id === b.id ? ' editing' : ''));
       const main = U.el('div', 'bang-si-main');
       main.appendChild(U.el('span', 'bang-si-sup', bangPlace(b)));   // 윗줄 = 동(사용자 지시)
-      const sub = [b.supervisor,
-                   (r.kgm3 != null ? (r.kgm3 + 'kg/㎥') : ''),
-                   (r.slump != null ? '슬럼프 ' + r.slump + 'mm' : ''),
-                   ((b.photos || []).length ? '사진 ' + b.photos.length + '장' : ''),
-                   (b.memo || '')]
+      const rest = [(r.kgm3 != null ? (r.kgm3 + 'kg/㎥') : ''),
+                    (r.slump != null ? '슬럼프 ' + r.slump + 'mm' : ''),
+                    ((b.photos || []).length ? '사진 ' + b.photos.length + '장' : ''),
+                    (b.memo || '')]
         .filter(Boolean).join(' · ');
-      main.appendChild(U.el('span', 'bang-si-sub', sub));
+      const subEl = U.el('span', 'bang-si-sub');
+      if (b.supervisor) {       // 감리는 span 으로 따로 — 그날 휴무면 빨강(홈·작업탭의 같은 방통 카드와 같은 Leave.decorate)
+        subEl.appendChild(U.el('span', '', b.supervisor));
+        if (global.Leave) Leave.decorate(subEl.lastChild, b.supervisor, b.day);
+      }
+      if (rest) subEl.appendChild(document.createTextNode((b.supervisor ? ' · ' : '') + rest));
+      main.appendChild(subEl);
       // 본문을 탭하면 수정 모드로 싣는다(사용자 지시)
       main.addEventListener('click', () => openEdit(b));
       card.appendChild(main);
@@ -12368,6 +13449,1568 @@
 })(window);
 
 ;
+/* ===== js/prop.js ===== */
+/* ============ prop.js — 물성시험 모드 (2026-10-15) ============
+   콘크리트 물성시험(온도·슬럼프·공기량·염화물·단위수량) — 판넬(화이트보드)을 찍어 OCR 로 읽고, 기록·카톡·ZIP 으로 내보낸다.
+   **계산은 없다** — 판넬에 적힌 값을 그대로 옮길 뿐이다(겉보기만 있으면 공기량은 빈칸).
+   저장: bangs 스토어의 kind:'prop' 레코드(store.js 상단 「물성시험 레코드」). 시험(tests[])마다 사진 2장(판넬·전경)과 값 8칸.
+   화면: 편집기 #view-prop · 홈(물성 모드) #home-prop 목록 · 계산 탭 #calc-prop 외기온도판 · 작업 탭 목록·카톡·ZIP.
+   내보내기: 「10월 14일 물성시험분.zip」 → 폴더 「10.14 물성시험」 안에 사진 + 「물성시험값.html」(HPMS 열 순서 가로 표, 행 복사).
+   판넬 OCR 은 vision.js(Gemini)를 직접 쓴다 — ocr.js 는 건드리지 않는다. 모델에게 판정·계산을 시키지 않고 값만 받아 코드가 정리한다.
+================================================================ */
+(function (global) {
+  'use strict';
+
+  const $ = U.$;
+
+  /* HPMS 입력창의 열 순서(콘크리트 온도 → 슬럼프 → 겉보기 공기량 → 공기량 → 염화물 1·2회 → 평균 염화물 → 단위수량 → 비고)를 따른다.
+     입력 칸은 8개(평균 염화물은 계산이라 칸이 없고 표·복사에만 낀다), 외기온도는 비고로 간다. */
+  const VALS = [
+    { k: 'temp',    label: '콘크리트 온도', unit: '℃' },
+    { k: 'slump',   label: '슬럼프', unit: 'mm' },
+    { k: 'airApp',  label: '겉보기 공기량', unit: '%' },
+    { k: 'air',     label: '공기량', unit: '%' },
+    { k: 'cl1',     label: '염화물 1회', unit: 'kg/㎥' },
+    { k: 'cl2',     label: '염화물 2회', unit: 'kg/㎥' },
+    { k: 'water',   label: '단위수량', unit: 'kg/㎥' },
+    { k: 'outTemp', label: '외기온도', unit: '℃' }
+  ];
+  const RANGE = { temp: [-10, 45], slump: [0, 800], airApp: [0, 15], air: [0, 15], cl1: [0, 2], cl2: [0, 2], water: [100, 260], outTemp: [-30, 50] };
+  const labelOfKey = (k) => (VALS.find((v) => v.k === k) || {}).label || k;
+
+  /* ---------------- 순수 후처리 (브라우저 픽스처로 검증 — Prop._t) ---------------- */
+
+  /* 마이너스처럼 생긴 글자(유니코드 −·–·―·－ 등)와 「영하」 를 ASCII 마이너스로 — 모델이 겨울 외기 「−3℃」 를 이 꼴로 옮기면 부호가 조용히 버려져
+     −3 이 +3 으로 기록·카톡·물성시험값.html 에 나갔다(범위 -30~50 안이라 걸러지지도 않는다) */
+  const MINUS_LIKE = /[\u2010-\u2015\u2212\uFE63\uFF0D]/g;
+  const normMinus = (s) => String(s).replace(MINUS_LIKE, '-').replace(/영하\s*(?=[\d.])/g, '-');
+
+  /* 첫 숫자 토큰을 판에 적힌 그대로의 문자열로(「0.010」 의 끝 0 보존). 「0,011」 도 소수로 본다 */
+  function numTok(v) {
+    if (v === null || v === undefined) return '';
+    const s = (typeof v === 'number') ? (isFinite(v) ? String(v) : '') : normMinus(String(v).replace(/,/g, '.'));
+    const m = /-?\d+(?:\.\d+)?|-?\.\d+/.exec(s);
+    return m ? m[0] : '';
+  }
+  function inRange(k, s) {
+    const n = parseFloat(s), r = RANGE[k];
+    return isFinite(n) && n >= r[0] && n <= r[1];
+  }
+
+  /* 「4.6-0.2=4.4」 — 등호 앞의 첫 수가 겉보기, 뒤가 공기량. 식이 아니면 칸 그대로. 계산은 안 한다 */
+  function airSplit(airApp, air) {
+    const a = String(airApp === null || airApp === undefined ? '' : airApp);
+    const b = String(air === null || air === undefined ? '' : air);
+    const src = a.indexOf('=') >= 0 ? a : (b.indexOf('=') >= 0 ? b : '');
+    if (src) {
+      const eq = src.indexOf('=');
+      return { airApp: numTok(src.slice(0, eq)), air: numTok(src.slice(eq + 1)) };
+    }
+    return { airApp: numTok(a), air: numTok(b) };
+  }
+
+  function fixDate(v) {
+    const s = String(v === null || v === undefined ? '' : v).trim();
+    const m = /(\d{4})\D+(\d{1,2})\D+(\d{1,2})/.exec(s);
+    if (!m) return '';
+    const y = +m[1], mo = +m[2], d = +m[3];
+    // 달력에 없는 날(9/31·2/30)은 Date 가 다음 달로 넘겨 버리니 되짚어 같은지 본다 — 안 그러면 어느 날짜 목록에도 안 뜨는 레코드가 생긴다
+    const dt = new Date(y, mo - 1, d);
+    if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return '';
+    return m[1] + '-' + U.pad2(mo) + '-' + U.pad2(d);
+  }
+
+  /* 모델 JSON → 앱 값. 숫자 정리 + 범위 거르기(밖이면 빈칸, skipped 에 남긴다). 값은 전부 문자열 */
+  function panelValues(raw) {
+    let r = raw;
+    if (Array.isArray(r)) r = r.find((x) => x && typeof x === 'object') || {};
+    else if (r && typeof r === 'object' && !('temp' in r) && Array.isArray(r.rows)) r = r.rows[0] || {};
+    r = (r && typeof r === 'object') ? r : {};
+    const text = (v, n) => (v === null || v === undefined) ? '' : String(v).replace(/\s+/g, ' ').trim().slice(0, n);
+    const out = { place: text(r.place, 80), mix: '', round: null, date: fixDate(r.date), vendor: text(r.vendor, 40), dong: '', skipped: [] };
+    out.mix = text(r.mix, 40).replace(/\s*[-–—]\s*/g, '-');
+    const rn = parseInt(numTok(r.round), 10);
+    if (isFinite(rn) && rn > 0 && rn < 100) out.round = rn;
+    const air = airSplit(r.airApp, r.air);
+    const src = { temp: numTok(r.temp), slump: numTok(r.slump), airApp: air.airApp, air: air.air,
+                  cl1: numTok(r.cl1), cl2: numTok(r.cl2), water: numTok(r.water), outTemp: numTok(r.outTemp) };
+    VALS.forEach((v) => {
+      const s = src[v.k];
+      if (s !== '' && !inRange(v.k, s)) { out.skipped.push(v.k); out[v.k] = ''; }
+      else out[v.k] = s;
+    });
+    // 동 = 부위 글자의 첫 동(「204동 3,4호 옥탑」 → 「204동」) — 동 표기 규칙은 OCR.normDong(일정표·계획표 공용)
+    try { out.dong = String(global.OCR && OCR.normDong ? OCR.normDong(out.place) : '').split(',')[0].trim(); } catch (e) { out.dong = ''; }
+    return out;
+  }
+
+  /* 평균 염화물 — 두 값이면 평균(소수 둘째 자리), 한 값이면 그 값, 없으면 빈칸. HPMS 칸 정렬을 지키려고 행 복사에 넣는다 */
+  function avgCl(a, b) {
+    const x = parseFloat(a), y = parseFloat(b);
+    const hx = isFinite(x) && a !== '' && a != null, hy = isFinite(y) && b !== '' && b != null;
+    if (hx && hy) return (Math.round(((x + y) / 2) * 100 + 1e-9) / 100).toFixed(2);
+    if (hx) return String(a);
+    if (hy) return String(b);
+    return '';
+  }
+  /* HPMS 가로 칸 8개: 콘크리트 온도 · 슬럼프 · 겉보기 공기량 · 공기량 · 염화물 1회 · 염화물 2회 · 평균 염화물 · 단위수량 */
+  function rowCells(t) {
+    const s = (v) => (v === null || v === undefined) ? '' : String(v);
+    return [s(t.temp), s(t.slump), s(t.airApp), s(t.air), s(t.cl1), s(t.cl2), avgCl(t.cl1, t.cl2), s(t.water)];
+  }
+  const rowTsv = (t) => rowCells(t).join('\t');
+  const remarkOf = (t) => (t && t.outTemp ? '외기 ' + t.outTemp + '℃' : '');
+  const testLabel = (t) => ((t.vendor ? t.vendor + ' ' : '') + t.round + '회');
+
+  /* ---------------- 레코드 요약 ---------------- */
+  const titleOf = (r) => Task.dongOf(r) || '동 미지정';
+  const testsOf = (r) => (Array.isArray(r && r.tests) ? r.tests : []);
+  const photoN = (r) => ((r && r.photos) || []).length;
+  // 시험 1회 완료 = 사진 2장(판넬·전경) — 공시체 「사진 = 완료」와 같은 원칙. 값은 판넬 사진에서 언제든 다시 읽는다.
+  // 홈·작업탭 목록과 플래너 올린 묶음 칩이 이 하나를 같이 쓴다(2026-10-16 팀장 결정 — 칩만 값 기준이던 것을 통일)
+  const testDone = (t) => ((t && t.photos) || []).filter(Boolean).length >= 2;
+  const isDoneRec = (r) => testsOf(r).length > 0 && testsOf(r).every(testDone);
+  const hasVals = (r) => testsOf(r).some((t) => VALS.some((v) => t[v.k]));
+  const mineRows = (rows) => (rows || []).filter((b) => !b.jugu || b.jugu === U.jugu());
+  const dayWord = (day) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day || ''); return m ? (+m[2] + '월 ' + +m[3] + '일') : String(day || ''); };
+  const zipTitle = (day) => dayWord(day) + ' 물성시험분.zip';
+  const sortRows = (rows) => rows.slice().sort((a, b) =>
+    (a.supervisor || '￿').localeCompare(b.supervisor || '￿', 'ko') || (a.order - b.order) || (a.createdAt - b.createdAt));
+
+  /* 카톡 묶음 — 날짜별 「10/14 물성시험」 / 감리별 「204동 10/14 물성시험입니다」(감리·동이 같은 것끼리, 공시체 exportGroup 과 같은 규칙).
+     사진은 시험 순서대로 평탄화한 photos 를 쓴다 */
+  function groupsOf(rows, axis) {
+    const map = Object.create(null), order = [];
+    (rows || []).forEach((r) => {
+      const day = r.day || '';
+      let key, label, sup = '', dong = '';
+      if (axis === 'sup') {
+        sup = (r.supervisor || '').trim();
+        dong = Task.dongOf(r);
+        key = sup + '|' + dong + '|' + day;
+        label = (dong ? dong + ' ' : '') + (day ? Spec.md(day) + ' ' : '') + '물성시험입니다';
+      } else {
+        key = day;
+        label = (day ? Spec.md(day) + ' ' : '') + '물성시험';
+      }
+      if (!map[key]) { map[key] = { key: key, label: label, sup: sup, dong: dong, day: day, items: [], photoIds: [] }; order.push(key); }
+      const g = map[key];
+      g.items.push(r);
+      (r.photos || []).forEach((id) => { if (id && g.photoIds.indexOf(id) < 0) g.photoIds.push(id); });
+    });
+    const out = order.map((k) => { const g = map[k]; g.photos = g.photoIds.length; return g; });
+    return out.sort(axis === 'sup'
+      ? (a, b) => (a.sup || '￿').localeCompare(b.sup || '￿', 'ko') || (a.dong || '').localeCompare(b.dong || '', 'ko') || a.label.localeCompare(b.label, 'ko')
+      : (a, b) => (a.day || '').localeCompare(b.day || ''));
+  }
+
+  /* 판넬 한 장 → 레코드에 넣을 자리. 이미 같은 날·같은 동 레코드가 있으면 거기 시험을 더하되,
+     플래너가 미리 만들어 둔 **빈 시험(값·사진 없음)** 이 맞으면 새로 더하지 않고 그 칸을 채운다. 반환 인덱스(-1 = 새로 더함) */
+  /* 업체 이름 대조 — 공백·괄호·구두점·대소문자를 무시(Task.looseKey)하고, 두 글자 이상이면 한쪽이 다른 쪽을 품어도 같은 업체로 본다
+     (판넬 손글씨 「삼표」·「삼표(안양)」 ↔ 계획표 「삼표안양」). 공백만 걷은 완전 일치였을 땐 표기가 조금만 달라도 빈 시험 칸이 안 채워지고
+     같은 회차가 두 업체명으로 갈라졌다(감사 2026-10-15) */
+  const vkey = (s) => Task.looseKey(s);
+  const vNear = (a, b) => { const x = vkey(a), y = vkey(b); return !!x && !!y && (x === y || (Math.min(x.length, y.length) >= 2 && (x.indexOf(y) >= 0 || y.indexOf(x) >= 0))); };
+  function emptyTest(t) { return !VALS.some((v) => t[v.k]) && !(t.photos || []).some(Boolean); }
+  /* 후보 {t, i} 가운데 판넬 업체에 맞는 칸 — 표기가 똑같은 칸이 먼저, 없으면 한쪽이 다른 쪽을 품는 칸이 **한 업체로만** 좁혀질 때
+     (판넬 「삼표」 가 삼표안양·삼표서부 둘 다에 걸리면 어느 쪽인지 몰라 고르지 않는다) */
+  function byVendor(list, vendor) {
+    const k = vkey(vendor);
+    const same = list.find((o) => vkey(o.t.vendor) === k);
+    if (same) return same;
+    const near = list.filter((o) => vNear(o.t.vendor, vendor));
+    const kinds = Object.create(null); near.forEach((o) => { kinds[vkey(o.t.vendor)] = 1; });
+    return (near.length && Object.keys(kinds).length === 1) ? near[0] : null;
+  }
+  function pickTestSlot(tests, v) {
+    const empty = tests.map((t, i) => ({ t: t, i: i })).filter((o) => emptyTest(o.t));
+    const named = !!vkey(v.vendor);
+    if (v.round) {
+      const cand = empty.filter((o) => o.t.round === v.round);
+      if (named) {
+        const hit = byVendor(cand, v.vendor) || cand.find((o) => !vkey(o.t.vendor));   // 업체 이름이 맞는 칸 → 이름이 비어 있는 칸
+        return hit ? hit.i : -1;
+      }
+      // 업체를 못 읽었다 — 그 회차의 빈 칸이 한 업체뿐일 때만 채운다(삼표안양 2회·우진 2회가 둘 다 비어 있으면 어느 쪽 값인지 몰라 새 시험으로 둔다 — 남의 칸에 값이 들어가는 것보다 낫다)
+      const kinds = Object.create(null); cand.forEach((o) => { kinds[vkey(o.t.vendor)] = 1; });
+      return (cand.length && Object.keys(kinds).length === 1) ? cand[0].i : -1;
+    }
+    const hit = named ? byVendor(empty, v.vendor) : null;
+    return hit ? hit.i : -1;
+  }
+  /* 같은 날·같은 동 레코드가 여럿일 때(플래너가 부위가 다른 두 타설을 따로 만든 경우 — 215동 벽체 + 램프) 판넬이 속할 레코드.
+     ①부위가 맞는 레코드(Task.partsAlike) → 없으면 부위를 안 적은 레코드(적은 부위가 서로 다르면 다른 타설이라 뒤로) → 그래도 없으면 전부
+     ②그 가운데 판넬의 업체·회차에 맞는 빈 시험 칸이 있는 레코드 ③첫 레코드. 하나뿐이면 부위가 달라 보여도 그것 — 손글씨 표기가 흔들려도 새로 만들지 않는다 */
+  function pickRecord(cands, v) {
+    if (cands.length < 2) return cands[0] || null;
+    const has = (s) => !!Task.partKey(s);
+    let pool = cands;
+    if (has(v.place)) {
+      const hit = cands.filter((r) => Task.partsAlike(r.place, v.place));
+      const blank = cands.filter((r) => !has(r.place));
+      pool = hit.length ? hit : (blank.length ? blank : cands);
+    }
+    return pool.find((r) => pickTestSlot(testsOf(r), v) >= 0) || pool[0];
+  }
+  function nextRound(tests, vendor) {
+    const vk = vkey(vendor);
+    let max = 0;
+    tests.forEach((t) => { if (!vk || !vkey(t.vendor) || vNear(t.vendor, vendor)) max = Math.max(max, parseInt(t.round, 10) || 0); });
+    return max + 1;
+  }
+
+  /* ---------------- 판넬 OCR ---------------- */
+  const OCR_TIMEOUT = 30000;
+  /* 예시는 일부러 실제 판넬과 다른 값 — 예시를 베껴 쓰는지 판별할 수 있어야 한다 */
+  const PROMPT = [
+    '콘크리트 품질시험 판넬(화이트보드, 손글씨) 사진이다. 위쪽에 공사명·타설부위·타설규격·시험회차가 있고,',
+    '가운데 「시험항목 / 합격기준 / 시험결과」 표, 아래에 타설일자·공급업체·비고가 있다.',
+    '',
+    '중요: 「합격기준」 열의 글자(예 "5 ~ 30 ℃", "180 ± 25", "0.3 이하")는 인쇄된 기준값이다 — 절대 읽지 마라.',
+    '오른쪽 「시험결과」 열에 손으로 쓴 측정값만 읽어라. 시험결과 칸은 위에서 아래로 이 순서다:',
+    '  1) 콘크리트 온도(℃)  2) 슬럼프(플로, mm)  3) 공기량(%)  4) 염화물 함유량 첫째 칸  5) 염화물 함유량 둘째 칸(칸이 하나뿐이면 없음)  6) 단위수량(kg/㎥)',
+    '',
+    '필드:',
+    '- place: 타설부위 칸에 적힌 글자 그대로.',
+    '- mix: 타설규격 칸 — "25-30-180" 처럼 하이픈으로 이어서(공백 없이).',
+    '- round: 시험회차 숫자.',
+    '- temp: 콘크리트 온도 시험결과.',
+    '- slump: 슬럼프(플로) 시험결과.',
+    '- airApp, air: 공기량 시험결과. "4.6-0.2=4.4" 처럼 식으로 적혀 있으면 airApp="4.6"(식 맨 앞 겉보기 값), air="4.4"(등호 뒤 값).',
+    '  값이 하나만 적혀 있으면 air 에만 넣고 airApp 은 null.',
+    '- cl1, cl2: 염화물 함유량 시험결과(둘째 칸이 없으면 cl2 는 null). 소수점 아래 끝의 0 도 적힌 그대로("0.010").',
+    '- water: 단위수량 시험결과.',
+    '- date: 타설일자(YYYY-MM-DD).',
+    '- vendor: 공급업체 칸에 적힌 글자 그대로.',
+    '- outTemp: 비고 칸에 「외기 17℃」 처럼 적힌 외기온도 숫자만("17"). 없으면 null.',
+    '',
+    '규칙: 숫자 값은 전부 문자열로, 판에 적힌 그대로 옮겨라 — 계산하지 마라, 반올림하지 마라.',
+    '안 보이거나 확실치 않으면 null — 추측해서 채우지 마라.',
+    '아래 JSON 형태로만 답하라. 설명 문장·마크다운 코드블록 금지.',
+    '',
+    '{"place":"101동 지하1층 벽체","mix":"25-24-150","round":2,"temp":"21.3","slump":"150","airApp":"5.0","air":"4.8",' +
+    '"cl1":"0.032","cl2":"0.030","water":"171.2","date":"2026-03-05","vendor":"예시산업","outTemp":"8"}'
+  ].join('\n');
+
+  /* src = Blob/File 또는 네이티브 경로·blob: URL(Vision.toJpegB64 가 다 받는다) → 모델 원본 JSON */
+  async function ocrPanel(src) {
+    if (!Vision.online()) throw new Error('OFFLINE');
+    const im = await Vision.toJpegB64(src, 2048);
+    return Vision.callJSON(PROMPT, [im], { timeout: OCR_TIMEOUT });
+  }
+
+  /* ---------------- 물성시험값.html ----------------
+     엑셀 없이 확인·복사·사진 보기가 되는 독립 페이지(외부 리소스 0, 전부 이스케이프, tasks.js valuesHtml 의 복사·라이트박스 패턴).
+     카드 = 레코드(동·감리·타설일·규격·업체·부위) → HPMS 열 순서 가로 표 → 시험마다 사진 썸네일.
+     cards: [{ dong, sup, day, mix, vendor, place, tests:[{ round, vendor, label, temp…outTemp, photos:[{ name, thumb }] }] }] */
+  function valuesHtml(folder, cards) {
+    const esc = (x) => String(x == null ? '' : x).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+    let seq = 0, nTests = 0;
+    const allRows = [];
+    const cardsHtml = cards.map((c) => {
+      const info = [c.day ? '타설 ' + Spec.md(c.day) : '', c.mix ? '규격 ' + c.mix : '', c.vendor ? '업체 ' + c.vendor : '', c.place ? '부위 ' + c.place : ''].filter(Boolean);
+      const cardRows = [];
+      const body = c.tests.map((t) => {
+        nTests++;
+        const cells = rowCells(t);
+        const tsv = cells.join('\t');
+        cardRows.push(tsv); allRows.push(tsv);
+        const rem = remarkOf(t);
+        // 칸 순서 = 온도·슬럼프·겉보기·공기량·염화물1·염화물2·평균 염화물·단위수량(rowCells) — 그 뒤 비고, 마지막이 행 복사
+        const tds = cells.map((v) => '<td class="cc"' + (v ? ' data-c="' + esc(v) + '"' : '') + '>' + esc(v) + '</td>').join('');
+        return '<tr><th class="rd"><b>' + esc(t.round) + '</b>' + (t.vendor ? '<small>' + esc(t.vendor) + '</small>' : '') + '</th>' + tds +
+          '<td class="cc nt"' + (rem ? ' data-c="' + esc(rem) + '"' : '') + '>' + esc(rem) + '</td>' +
+          '<td class="act"><button type="button" class="cp mini" data-c="' + esc(tsv) + '">행 복사</button></td></tr>';
+      }).join('');
+      const photosHtml = c.tests.filter((t) => t.photos && t.photos.length).map((t) => {
+        return '<div class="pair"><div class="plab">' + esc(t.label || (t.round + '회')) + '</div><div class="thumbs">' +
+          t.photos.map((ph) => {
+            const i = seq++;
+            return '<figure class="ph" data-i="' + i + '" data-name="' + esc(ph.name) + '" data-full="' + esc(encodeURI(ph.name)) + '">' +
+              (ph.thumb ? '<img src="' + ph.thumb + '" alt="' + esc(ph.name) + '" loading="lazy">' : '<span class="noimg">미리보기 없음</span>') +
+              '<figcaption>' + esc(ph.name) + '</figcaption></figure>';
+          }).join('') + '</div></div>';
+      }).join('');
+      const q = [c.dong, c.sup, c.vendor, c.place].concat(c.tests.map((t) => t.vendor)).filter(Boolean).join(' ').toLowerCase();
+      return '<section class="card" data-q="' + esc(q) + '">' +
+        '<div class="chead"><div class="dong">' + esc(c.dong) + '</div><div class="sup">' + esc(c.sup) + '</div><div class="when">' + esc(info.join(' · ')) + '</div>' +
+        (cardRows.length > 1 ? '<button type="button" class="cp mini" data-c="' + esc(cardRows.join('\n')) + '">이 동 전체 복사</button>' : '') + '</div>' +
+        (body
+          ? '<div class="tblwrap"><table class="tbl"><thead><tr><th>호차</th><th>콘크리트<br>온도(℃)</th><th>슬럼프<br>(mm)</th><th>겉보기<br>공기량(%)</th><th>공기량<br>(%)</th>' +
+            '<th>염화물<br>1회</th><th>염화물<br>2회</th><th>평균<br>염화물</th><th>단위수량</th><th>비고</th><th></th></tr></thead><tbody>' + body + '</tbody></table></div>'
+          : '<p class="none">시험 없음</p>') +
+        (photosHtml ? '<div class="photos">' + photosHtml + '</div>' : '') +
+        '</section>';
+    }).join('');
+    const nPhotos = seq;
+    const tools = allRows.length ? '<button type="button" data-c="' + esc(allRows.join('\n')) + '">전체 복사</button>' : '';
+    const css = '*{box-sizing:border-box}[hidden]{display:none!important}' +
+      'body{font-family:system-ui,-apple-system,"Malgun Gothic",sans-serif;margin:0;color:#111;background:#f3f4f6}body.noscroll{overflow:hidden}' +
+      '.top{position:sticky;top:0;z-index:20;background:#fff;border-bottom:1px solid #e5e7eb;padding:10px 14px;display:flex;flex-wrap:wrap;gap:8px;align-items:center}' +
+      '.top h1{font-size:18px;margin:0 12px 0 0}.top .meta{font-size:13px;color:#555;margin-right:auto}' +
+      '.tools{display:flex;flex-wrap:wrap;gap:6px;align-items:center}.tools input{min-height:40px;padding:0 10px;border:1px solid #cfd4dc;border-radius:10px;font-size:15px;width:150px}' +
+      'button{min-height:40px;padding:0 14px;border:0;border-radius:10px;background:#2563eb;color:#fff;font-size:15px;font-weight:700;cursor:pointer;-webkit-tap-highlight-color:transparent}' +
+      'button.gray{background:#374151}button.ok{background:#16a34a}button.no{background:#dc2626}button.mini{min-height:34px;padding:0 10px;font-size:13px}' +
+      '.cards{padding:10px;display:flex;flex-direction:column;gap:10px}' +
+      '.card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:10px;min-width:0}' +
+      '.chead{display:flex;flex-wrap:wrap;gap:3px 10px;align-items:baseline;margin-bottom:8px}.dong{font-size:18px;font-weight:800}.sup{font-size:14px;color:#333}.when{font-size:12px;color:#666}.chead .mini{margin-left:auto}' +
+      '.tblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch}.tbl{border-collapse:collapse;font-size:15px;min-width:760px;width:100%}' +
+      '.tbl th,.tbl td{border:1px solid #d1d5db;padding:6px 8px;text-align:center;font-variant-numeric:tabular-nums;white-space:nowrap}' +
+      '.tbl thead th{background:#f1f3f6;font-size:12px;font-weight:700;color:#374151;line-height:1.25}' +
+      '.tbl .rd{background:#f9fafb;min-width:64px}.tbl .rd b{font-size:16px;display:block}.tbl .rd small{display:block;font-size:11px;font-weight:400;color:#666}' +
+      '.tbl .cc[data-c]{cursor:pointer}.tbl .cc[data-c]:hover{background:#eff6ff}.tbl .cc.flash{background:#bbf7d0}.tbl .nt{font-size:13px;color:#444}.tbl .act{padding:3px 6px}' +
+      '.none{color:#888;font-size:13px;margin:0 0 6px}' +
+      '.photos{margin-top:8px;display:flex;flex-direction:column;gap:6px}.pair{display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap}' +
+      '.plab{flex:0 0 auto;font-size:12px;font-weight:700;background:#eef2ff;color:#3730a3;padding:4px 9px;border-radius:999px}.thumbs{display:flex;gap:6px;flex-wrap:wrap}' +
+      '.ph{margin:0;width:78px;cursor:zoom-in}.ph img,.ph .noimg{width:78px;height:78px;object-fit:cover;border-radius:8px;border:1px solid #e5e7eb;background:#eee;display:block}' +
+      '.ph .noimg{display:grid;place-items:center;font-size:11px;color:#888}.ph figcaption{font-size:11px;color:#555;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+      '#peek{position:fixed;z-index:40;pointer-events:none;background:#fff;padding:6px;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.35)}#peek img{display:block;max-width:60vw;max-height:60vh;border-radius:8px}' +
+      '#box{position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.9);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:16px}' +
+      '#box img{max-width:94vw;max-height:78vh;border-radius:8px;background:#222}#box .cap{color:#fff;font-size:14px;text-align:center;word-break:break-all}' +
+      '#box .x{position:absolute;top:12px;right:12px;width:44px;height:44px;border-radius:50%;background:rgba(255,255,255,.18);font-size:22px;padding:0}' +
+      '#box .nav{position:absolute;top:50%;transform:translateY(-50%);width:48px;height:64px;border-radius:12px;background:rgba(255,255,255,.18);font-size:28px;padding:0}#box .prev{left:8px}#box .next{right:8px}' +
+      '@media (max-width:600px){.ph,.ph img,.ph .noimg{width:88px}.ph img,.ph .noimg{height:88px}.tools input{width:110px;min-height:36px}.top button{min-height:36px;padding:0 10px;font-size:14px}.top h1{font-size:17px}}' +
+      '@media print{.top,.cp,#peek,#box{display:none!important}.card{break-inside:avoid;border:1px solid #bbb}.tblwrap{overflow:visible}.tbl{min-width:0}.cards{padding:0;gap:8px}body{background:#fff}}';
+    const js = '(function(){' +
+      'var QA=function(s,r){return Array.prototype.slice.call((r||document).querySelectorAll(s));};' +
+      'function flash(b,ok){if(b.tagName==="TD"){b.classList.add("flash");setTimeout(function(){b.classList.remove("flash");},900);return;}var o=b.getAttribute("data-o")||b.textContent;b.setAttribute("data-o",o);b.textContent=ok?"복사됨":"복사 실패";b.classList.remove("ok","no");b.classList.add(ok?"ok":"no");setTimeout(function(){b.textContent=o;b.classList.remove("ok","no");},1500);}' +
+      'function fb(t,b){var ta=document.createElement("textarea");ta.value=t;ta.setAttribute("readonly","");ta.style.cssText="position:fixed;top:0;left:0;opacity:0";document.body.appendChild(ta);ta.select();ta.setSelectionRange(0,ta.value.length);var ok=false;try{ok=document.execCommand("copy");}catch(e){}document.body.removeChild(ta);flash(b,ok);}' +
+      'function copy(t,b){if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(function(){flash(b,true);},function(){fb(t,b);});}else{fb(t,b);}}' +
+      'var phs=QA(".ph"),cur=-1,box=document.getElementById("box"),bimg=box.querySelector("img"),bcap=box.querySelector(".cap"),peek=document.getElementById("peek"),pimg=peek.querySelector("img");' +
+      'function setImg(img,f){var th=f.querySelector("img"),full=f.getAttribute("data-full");img.onerror=function(){img.onerror=null;img.src=th?th.getAttribute("src"):"";};img.src=full||(th?th.getAttribute("src"):"");}' +
+      'function openBox(i){if(!phs.length)return;i=(i+phs.length)%phs.length;cur=i;var f=phs[i];setImg(bimg,f);bcap.textContent=f.getAttribute("data-name")+"  ("+(i+1)+"/"+phs.length+")";box.hidden=false;peek.hidden=true;document.body.classList.add("noscroll");}' +
+      'function closeBox(){box.hidden=true;document.body.classList.remove("noscroll");}' +
+      'document.addEventListener("click",function(e){' +
+        'var b=e.target.closest("button[data-c]");if(b){copy(b.getAttribute("data-c"),b);return;}' +
+        'var c=e.target.closest("td.cc[data-c]");if(c){copy(c.getAttribute("data-c"),c);return;}' +
+        'var f=e.target.closest(".ph");if(f){openBox(+f.getAttribute("data-i"));return;}' +
+        'if(e.target.closest("#box .x")){closeBox();return;}if(e.target.closest("#box .prev")){openBox(cur-1);return;}if(e.target.closest("#box .next")){openBox(cur+1);return;}if(e.target===box){closeBox();return;}' +
+        'if(e.target.closest("#pr")){window.print();return;}' +
+      '});' +
+      'document.addEventListener("keydown",function(e){if(box.hidden)return;if(e.key==="Escape")closeBox();else if(e.key==="ArrowLeft")openBox(cur-1);else if(e.key==="ArrowRight")openBox(cur+1);});' +
+      'var sx=null;box.addEventListener("touchstart",function(e){sx=e.touches[0].clientX;},{passive:true});box.addEventListener("touchend",function(e){if(sx==null)return;var dx=e.changedTouches[0].clientX-sx;sx=null;if(Math.abs(dx)>50)openBox(dx<0?cur+1:cur-1);},{passive:true});' +
+      'var lx=0,ly=0;pimg.onload=function(){placeAt(lx,ly);};function place(e){lx=e.clientX;ly=e.clientY;placeAt(lx,ly);}function placeAt(cx,cy){var w=peek.offsetWidth,h=peek.offsetHeight,x=cx+18,y=cy+18;if(x+w>window.innerWidth-8)x=Math.max(8,cx-w-18);if(y+h>window.innerHeight-8)y=Math.max(8,window.innerHeight-h-8);peek.style.left=x+"px";peek.style.top=y+"px";}' +
+      'var fine=window.matchMedia&&window.matchMedia("(hover:hover) and (pointer:fine)").matches;' +
+      'if(fine){phs.forEach(function(f){f.addEventListener("mouseenter",function(e){setImg(pimg,f);peek.hidden=false;place(e);});f.addEventListener("mousemove",place);f.addEventListener("mouseleave",function(){peek.hidden=true;});});}' +
+      'var q=document.getElementById("q");if(q)q.addEventListener("input",function(){var s=q.value.trim().toLowerCase();QA(".card").forEach(function(c){c.hidden=!!s&&c.getAttribute("data-q").indexOf(s)<0;});});' +
+      '})();';
+    return '<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+      '<title>' + esc(folder) + ' 물성시험값</title><style>' + css + '</style></head><body>' +
+      '<header class="top"><h1>' + esc(folder) + '</h1><span class="meta">물성시험 ' + cards.length + ' · 시험 ' + nTests + ' · 사진 ' + nPhotos + '</span>' +
+      '<div class="tools">' + (cards.length > 1 ? '<input id="q" type="search" placeholder="동·감리·업체 검색" autocomplete="off">' : '') + tools +
+      '<button type="button" class="gray" id="pr">인쇄</button></div></header>' +
+      '<div class="cards">' + cardsHtml + '</div>' +
+      '<div id="peek" hidden><img alt=""></div>' +
+      '<div id="box" hidden><button type="button" class="x" aria-label="닫기">×</button><button type="button" class="nav prev" aria-label="이전">‹</button><img alt=""><div class="cap"></div><button type="button" class="nav next" aria-label="다음">›</button></div>' +
+      '<script>' + js + '</script></body></html>';
+  }
+
+  /* ============================================================
+     이하 화면·상호작용 — DOM 이 있을 때만 의미가 있다
+     ============================================================ */
+
+  function refreshOutside() {
+    try { Home.refresh(); } catch (e) {}
+    try { if (Nav.current() === 'tasks') Tasks.refresh(); } catch (e) {}
+  }
+
+  /* ---------------- 상태 ---------------- */
+  let rec = null;                  // 편집 중인 레코드(메모리 사본 — 값 칸이 곧바로 여기에 쓰인다)
+  let dirty = false;
+  let ver = 0;                     // 저장 도중에 또 고친 것을 dirty 가 덮어 잃지 않게
+  let saving = null;
+  let autoT = null;
+  let scanBusy = false;
+  let filePending = null;          // 웹 파일 입력이 고른 사진을 받을 곳
+  const pendingIds = [];           // putPhoto 커밋 뒤 아직 레코드에 안 실린 사진 — gc 가 지우지 않게 보호
+  const unpend = (id) => { const i = pendingIds.indexOf(id); if (i >= 0) pendingIds.splice(i, 1); };
+  const AUTOSAVE_MS = 900;
+
+  function newTest(round, vendor) {
+    const t = { id: U.uid(), vendor: vendor || '', round: round || 1, photos: [] };
+    VALS.forEach((v) => { t[v.k] = ''; });
+    return t;
+  }
+  function draftRec(day) {
+    return { id: null, kind: 'prop', day: day || U.dayKey(Date.now()), dong: '', place: '', supervisor: '', supPhone: '',
+             jugu: U.jugu(), mix: '', vendor: '', qty: '', memo: '', planId: '', tests: [newTest(1, '')], photos: [] };
+  }
+
+  /* 자동저장 — 바뀌는 순간마다 0.9초 뒤 무음 저장. 내용 없는 새 초안은 만들지 않는다 */
+  function markDirty() { dirty = true; ver++; autosaveSoon(); }
+  function autosaveSoon() {
+    clearTimeout(autoT);
+    const owner = rec;
+    autoT = setTimeout(() => {
+      if (!owner || rec !== owner || !dirty) return;
+      collect();
+      if (!hasSubstance()) return;
+      save(true);
+    }, AUTOSAVE_MS);
+  }
+  function hasSubstance() {
+    if (!rec) return false;
+    if (rec.id) return true;
+    if ((rec.dong || '').trim() || (rec.place || '').trim() || (rec.mix || '').trim() || (rec.vendor || '').trim() || (rec.memo || '').trim()) return true;
+    return testsOf(rec).some((t) => VALS.some((v) => t[v.k]) || (t.vendor || '').trim() || (t.photos || []).some(Boolean));
+  }
+  const photoIdsOf = (r) => { const out = []; testsOf(r).forEach((t) => (t.photos || []).forEach((id) => { if (id && out.indexOf(id) < 0) out.push(id); })); return out; };
+
+  /* 입력칸 → 레코드. 값 칸은 입력 이벤트가 곧바로 rec.tests 에 쓰므로 여기선 머리 칸만 */
+  function collect() {
+    if (!rec) return null;
+    rec.day = ($('#prop-day').value || rec.day);
+    rec.place = Task.placeOf(rec.dong, $('#prop-place').value);   // 저장 때 대표 동 접두 보장(「옥탑」→「204동 옥탑」)
+    rec.mix = $('#prop-mix').value.trim().slice(0, 40);
+    rec.vendor = $('#prop-vendor').value.trim().slice(0, 80);
+    rec.memo = $('#prop-memo').value.trim().slice(0, 200);
+    return rec;
+  }
+
+  /* target 을 주면 그 레코드를 저장한다 — 줄 서 있는 사이에 다른 레코드로 갈아탔어도 엉뚱한 쪽을 저장하지 않게(await 너머 전역 금지) */
+  function save(silent, target) {
+    const p = (saving || Promise.resolve()).then(() => doSave(silent, target));
+    saving = p.catch(() => {});
+    return p;
+  }
+  async function doSave(silent, target) {
+    const owner = target || rec;
+    if (!owner) return null;
+    if (owner === rec) collect();
+    const myVer = ver;
+    const out = JSON.parse(JSON.stringify(owner));
+    out.photos = [];          // 레코드 사진 = 시험 사진의 평탄화 — 지운 사진이 옛 photos 로 되살아나지 않게 비워서 보낸다(store.propRec)
+    let saved;
+    try { saved = await Store.putBang(out); }
+    catch (e) { console.error(e); U.toast('저장하지 못했습니다'); return null; }
+    owner.id = saved.id; owner.createdAt = saved.createdAt; owner.order = saved.order;
+    if (rec === owner) {
+      if (ver === myVer) dirty = false;
+      $('#prop-delete').classList.remove('hidden');
+      $('#prop-heading').textContent = '물성시험';
+    }
+    Store.gc(photoIdsOf(owner).concat(pendingIds));
+    refreshOutside();
+    if (!silent) U.toast('저장했습니다');
+    return saved;
+  }
+
+  /* ---------------- 열기/닫기 ---------------- */
+  function open(r, day) {
+    if (r && r.id) {                  // 목록이 들고 있던 사본은 낡았을 수 있다 — 새로 읽는다(공시체 편집기와 같은 규칙)
+      return Store.getBang(r.id).then((fresh) => openNow((fresh && fresh.kind === 'prop') ? fresh : r, day))
+        .catch(() => openNow(r, day));
+    }
+    openNow(r, day);
+    return Promise.resolve();
+  }
+  function openNow(r, day) {
+    if (rec) { clearTimeout(autoT); collect(); if (dirty && hasSubstance()) save(true, rec); }   // 열려 있던 것이 있으면 먼저 지킨다(저장 대상을 못 박아 둔다 — 아래에서 rec 가 바뀐다)
+    rec = r ? JSON.parse(JSON.stringify(r)) : draftRec(day);
+    rec.kind = 'prop';
+    if (!Array.isArray(rec.tests)) rec.tests = [];
+    rec.tests.forEach((t, i) => {
+      if (!t.id) t.id = U.uid();
+      if (!(t.round > 0)) t.round = i + 1;
+      if (!Array.isArray(t.photos)) t.photos = [];
+      VALS.forEach((v) => { if (t[v.k] == null) t[v.k] = ''; });
+    });
+    dirty = false; ver = 0;
+    renderHead();
+    renderTests();
+    $('#view-prop').classList.remove('hidden');
+    const sc = $('#prop-scroll'); if (sc) sc.scrollTop = 0;
+  }
+  function finishClose() {
+    rec = null; dirty = false;
+    $('#view-prop').classList.add('hidden');
+    try { document.activeElement && document.activeElement.blur(); } catch (e) {}
+    refreshOutside();
+    try { if (global.TaskUI && TaskUI._overlayClosed) TaskUI._overlayClosed(); } catch (e) {}   // 플래너 「올린 묶음」 칩에서 열었으면 플래너로 돌아간다
+  }
+  function close() {
+    if (!rec) { $('#view-prop').classList.add('hidden'); return; }
+    collect();
+    clearTimeout(autoT);
+    if (!dirty || !hasSubstance()) { finishClose(); Store.gc(pendingIds.slice()); return; }
+    const owner = rec;
+    save(true).then((r) => {
+      if (rec !== owner) return;
+      finishClose();
+      if (!r) U.toast('저장하지 못했습니다 — 다시 열어 확인하세요', 3500);
+    });
+  }
+  const isOpen = () => !$('#view-prop').classList.contains('hidden');
+
+  function removeRec() {
+    if (!rec || !rec.id) { rec = null; dirty = false; finishClose(); return; }
+    const id = rec.id, owner = rec;
+    U.confirmSheet('이 물성시험을 삭제할까요?\n시험 ' + testsOf(owner).length + '건과 사진이 함께 지워집니다', '삭제', async () => {
+      // 확인한 순간부터 이 레코드는 저장 대상이 아니다 — 지우는 사이에 도는 자동저장이 deleteBang 뒤에 put 해 사진 없는 좀비로 되살리지 않게(감사 2026-10-15).
+      // rec 를 먼저 비우고(저장은 rec 를 보고 돈다), 삭제는 이미 줄 선 저장이 끝난 뒤에 같은 줄로 간다
+      const mine = (rec === owner), wasDirty = dirty;
+      if (mine) { clearTimeout(autoT); rec = null; dirty = false; }
+      try {
+        const p = (saving || Promise.resolve()).then(() => Store.deleteBang(id));
+        saving = p.catch(() => {});
+        await p;
+      } catch (e) {
+        console.error(e);
+        if (mine && !rec) { rec = owner; dirty = wasDirty; if (wasDirty) autosaveSoon(); }   // 못 지웠다 — 편집기를 그대로 되돌린다
+        U.toast('삭제하지 못했습니다');
+        return;
+      }
+      if (mine && !rec) finishClose();      // 그 사이 다른 레코드가 열렸으면(판넬 스캔이 끝나며 열 수 있다) 그 화면은 닫지 않는다
+      else refreshOutside();
+      U.toast('삭제했습니다');
+    }, true);
+  }
+
+  /* ---------------- 머리 칸(타설일·동·감리·부위·규격·업체·메모) ---------------- */
+  function renderHead() {
+    $('#prop-heading').textContent = rec.id ? '물성시험' : '새 물성시험';
+    $('#prop-delete').classList.toggle('hidden', !rec.id);
+    $('#prop-day').value = rec.day || '';
+    $('#prop-place').value = rec.place || '';
+    $('#prop-mix').value = rec.mix || '';
+    $('#prop-vendor').value = rec.vendor || '';
+    $('#prop-memo').value = rec.memo || '';
+    renderDong(); renderSup();
+  }
+  function renderDong() {
+    const el = $('#prop-dong-txt');
+    el.textContent = rec.dong || '동 선택';
+    el.classList.toggle('ph', !rec.dong);
+    $('#prop-place').placeholder = rec.dong || '';   // 부위 칸이 비면 동수가 흐린 글씨(저장 땐 collect 가 동을 접두)
+  }
+  function renderSup() {
+    const el = $('#prop-sup-txt');
+    el.textContent = rec.supervisor || '감리 선택';
+    el.classList.toggle('ph', !rec.supervisor);
+    if (global.Leave) Leave.decorate(el, rec.supervisor, ($('#prop-day').value || rec.day));   // 타설일(=시험일)에 쉬는 감리는 빨강 — 날짜를 바꾸면 다시 칠한다(공시체 편집기 renderSup 와 같은 규칙)
+  }
+
+  /* 동을 바꾸면 타설부위의 접두도 따라간다 — 비어 있으면 그대로, 「옛 동」 또는 「옛 동 …」 으로 시작할 때만 그 자리를 갈아 끼운다 */
+  function swapPlaceDong(prev, next) {
+    const inp = $('#prop-place');
+    const v = inp.value.trim();
+    if (!v || !prev) return;
+    if (v !== prev && v.indexOf(prev + ' ') !== 0) return;
+    inp.value = (next + v.slice(prev.length)).trim();
+  }
+
+  /* 동 ↔ 감리 싱크(전 화면 공통 규칙): **반대편이 비어 있을 때만** 자동으로 따라 채운다 — 이미 지정돼 있으면 안 건드린다(커스텀 짝 허용) */
+  function setDong(dong) {
+    if (!rec) return;
+    const prev = (rec.dong || '').trim();
+    rec.dong = dong || '';
+    swapPlaceDong(prev, rec.dong);
+    markDirty();
+    renderDong();
+    if (rec.supervisor) { renderSup(); return; }
+    const cs = rec.dong ? Contacts.byDong(rec.dong) : [];
+    if (cs.length === 1) { rec.supervisor = Contacts.label(cs[0]); rec.supPhone = cs[0].phone || ''; }
+    renderSup();
+  }
+  function setSup(c) {
+    if (!rec) return;
+    rec.supervisor = c ? Contacts.label(c) : '';
+    rec.supPhone = c ? (c.phone || '') : '';
+    if (c && !rec.dong) {
+      const ds = Contacts.dongsOf(c);
+      if (ds.length === 1) { rec.dong = ds[0]; renderDong(); }
+    }
+    markDirty();
+    renderSup();
+  }
+  function pickDong() {
+    if (!rec) return;
+    const items = Contacts.dongs().map((d) => ({
+      label: d, sub: Contacts.byDong(d).map((c) => Contacts.label(c)).join(', '),
+      cls: (rec && rec.dong === d) ? 'strong' : '',
+      onPick: () => setDong(d)
+    }));
+    items.unshift({ label: '직접 입력', sub: '명부에 없는 동·장소', onPick: () => {
+      const v = prompt('동 이름 (예: 220동, A9, 옥탑)', (rec && rec.dong) || '');
+      if (v === null) return;
+      setDong(v.trim());
+    } });
+    items.unshift({ label: '지정 안 함', onPick: () => setDong('') });
+    U.sheet('동수 고르기', items);
+  }
+  function pickSup() {
+    if (!rec) return;
+    const items = [{ label: '지정 안 함', onPick: () => setSup(null) }];
+    items.push({ label: '직접 입력', sub: '명부에 없는 감리', onPick: () => {
+      if (!rec) return;
+      const name = prompt('감리 이름·직급 (예: 홍길동 소장)', rec.supervisor || '');
+      if (name === null || !name.trim()) return;
+      const phone = prompt('전화번호 (선택 — 비워도 됩니다)', rec.supPhone || '');
+      rec.supervisor = name.trim();
+      rec.supPhone = (phone === null) ? '' : phone.trim();
+      markDirty(); renderSup();
+    } });
+    Contacts.search('').forEach((c) => {
+      items.push({ label: Contacts.label(c), sub: Contacts.where(c) + ' · ' + c.phone, cls: (rec && rec.supPhone === c.phone) ? 'strong' : '', onPick: () => setSup(c) });
+    });
+    U.sheet('담당 감리 (' + (U.jugu() === '1' ? '1주구' : '2·4주구') + ')', items);
+  }
+
+  /* ---------------- 시험 카드 ---------------- */
+  /* 값 칸 입력 정리 — 숫자·점·마이너스만(소수점 키가 쉼표인 키보드는 쉼표를 점으로). 판넬 그대로라 끝의 0 은 안 건드린다 */
+  function cleanInput(s) {
+    let t = normMinus(String(s || '').replace(/,/g, '.')).replace(/[^0-9.\-]/g, '');
+    const neg = t.charAt(0) === '-';
+    t = t.replace(/-/g, '');
+    const i = t.indexOf('.');
+    if (i >= 0) t = t.slice(0, i + 1) + t.slice(i + 1).replace(/\./g, '');
+    return (neg ? '-' : '') + t;
+  }
+
+  function renderTests() {
+    const box = $('#prop-tests');
+    box.innerHTML = '';
+    const tests = testsOf(rec);
+    $('#prop-tests-n').textContent = tests.length;
+    tests.forEach((t) => {
+      const c = buildTestCard(t);
+      box.appendChild(c);
+      paintPhotos(c, t);          // DOM 에 붙은 뒤에 그린다(paintPhotos 는 떨어진 카드를 건너뛴다)
+    });
+  }
+  const cardOf = (t) => document.querySelector('#prop-tests .prop-test[data-tid="' + t.id + '"]');
+
+  function buildTestCard(t) {
+    const card = U.el('div', 'prop-test');
+    card.dataset.tid = t.id;
+
+    // 머리 — 회차·업체를 고칠 수 있고, 시험 삭제
+    const head = U.el('div', 'prop-test-head');
+    const rd = U.el('input', 'prop-in prop-round');
+    rd.type = 'text'; rd.inputMode = 'numeric'; rd.maxLength = 2; rd.value = String(t.round);
+    rd.setAttribute('aria-label', '회차');
+    rd.addEventListener('input', () => {
+      rd.value = rd.value.replace(/\D/g, '');
+      const n = parseInt(rd.value, 10);
+      if (n > 0) { t.round = n; markDirty(); }
+    });
+    rd.addEventListener('blur', () => { rd.value = String(t.round); });
+    head.appendChild(rd);
+    head.appendChild(U.el('span', 'prop-round-u', '회'));
+    const vd = U.el('input', 'prop-in prop-vend');
+    vd.type = 'text'; vd.maxLength = 40; vd.placeholder = '업체'; vd.value = t.vendor || '';
+    vd.setAttribute('aria-label', '업체');
+    ['autocomplete', 'autocorrect', 'autocapitalize'].forEach((a) => vd.setAttribute(a, 'off'));
+    vd.spellcheck = false;
+    vd.addEventListener('input', () => { t.vendor = vd.value; markDirty(); });
+    head.appendChild(vd);
+    const del = U.el('button', 'prop-test-del');
+    del.appendChild(U.icon('trash'));
+    del.setAttribute('aria-label', '이 시험 삭제');
+    del.addEventListener('click', () => removeTest(t));
+    head.appendChild(del);
+    card.appendChild(head);
+
+    // 사진 2칸(판넬·전경) — 칸은 renderTests 가 카드를 붙인 뒤 paintPhotos 로 채운다
+    card.appendChild(U.el('div', 'prop-photos'));
+
+    const read = U.el('button', 'btn btn-calc prop-read');
+    read.appendChild(U.icon('scan'));
+    read.appendChild(document.createTextNode('판넬 읽기'));
+    read.addEventListener('click', () => readPanel(t));
+    card.appendChild(read);
+
+    // 값 8칸
+    const grid = U.el('div', 'prop-vals');
+    VALS.forEach((v) => {
+      const lab = U.el('label', 'prop-val' + (v.k === 'outTemp' ? ' wide' : ''));
+      const cap = U.el('span', 'prop-val-l', v.label);
+      cap.appendChild(U.el('i', '', ' ' + v.unit));
+      lab.appendChild(cap);
+      const inp = U.el('input', 'prop-in');
+      inp.type = 'text'; inp.inputMode = 'decimal'; inp.maxLength = 8; inp.value = t[v.k] || '';
+      inp.dataset.k = v.k;
+      ['autocomplete', 'autocorrect', 'autocapitalize'].forEach((a) => inp.setAttribute(a, 'off'));
+      inp.spellcheck = false;
+      inp.addEventListener('input', () => {
+        const c = cleanInput(inp.value);
+        if (c !== inp.value) inp.value = c;
+        t[v.k] = c;
+        markDirty();
+      });
+      if (v.k === 'outTemp') {
+        const row = U.el('div', 'prop-with-btn');
+        row.appendChild(inp);
+        const now = U.el('button', 'prop-now', '현재 기온');
+        now.type = 'button';
+        now.addEventListener('click', (e) => { e.preventDefault(); fillNowTemp(t); });
+        row.appendChild(now);
+        lab.appendChild(row);
+      } else lab.appendChild(inp);
+      grid.appendChild(lab);
+    });
+    card.appendChild(grid);
+    return card;
+  }
+
+  function addTest() {
+    if (!rec) return;
+    const tests = testsOf(rec);
+    const last = tests[tests.length - 1];
+    const t = newTest(nextRound(tests, last ? last.vendor : ''), last ? last.vendor : '');   // 같은 업체의 다음 회차가 기본(업체·회차는 고칠 수 있다)
+    rec.tests.push(t);
+    markDirty();
+    renderTests();
+    const c = cardOf(t);
+    if (c) { try { c.scrollIntoView({ block: 'nearest' }); } catch (e) {} }
+  }
+  function removeTest(t) {
+    if (!rec) return;
+    const owner = rec;
+    const has = VALS.some((v) => t[v.k]) || (t.photos || []).some(Boolean);
+    const doIt = () => {
+      if (rec !== owner) return;
+      const i = owner.tests.indexOf(t);
+      if (i < 0) return;
+      (t.photos || []).forEach((id) => { if (id) U.dropUrl(id); });
+      owner.tests.splice(i, 1);
+      markDirty();
+      renderTests();
+    };
+    if (!has) { doIt(); return; }
+    U.confirmSheet('이 시험을 삭제할까요?\n입력한 값과 사진이 지워집니다', '삭제', doIt, true);
+  }
+
+  async function fillNowTemp(t) {
+    U.toast('현재 기온 확인 중…', 8000);
+    let r = null;
+    try { r = await Weather.get(false); } catch (e) { console.warn(e); }
+    if (!r || typeof r.data.temp !== 'number') { U.toast('기온을 가져오지 못했습니다'); return; }
+    if (!rec || testsOf(rec).indexOf(t) < 0) return;
+    t.outTemp = r.data.temp.toFixed(1);
+    const c = cardOf(t);
+    const inp = c && c.querySelector('input[data-k="outTemp"]');
+    if (inp) inp.value = t.outTemp;
+    markDirty();
+    U.toast('외기 ' + t.outTemp + '℃' + (r.stale ? ' (' + Weather.ago(r.at) + ' 기준 · 오프라인)' : ''));
+  }
+
+  /* ---------------- 사진(시험마다 2칸 — 0 = 판넬, 1 = 전경) ---------------- */
+  const SLOT_NAME = ['판넬', '전경'];
+  const slotName = (i) => SLOT_NAME[i] || ('사진 ' + (i + 1));
+
+  async function paintPhotos(card, t) {
+    const box = card.querySelector('.prop-photos');
+    if (!box) return;
+    const owner = rec;
+    const my = (card._seq = (card._seq || 0) + 1);
+    const ids = (t.photos || []).filter(Boolean);
+    const byId = Object.create(null);
+    if (ids.length) {
+      try { (await Store.getPhotos(ids)).forEach((p) => { byId[p.id] = p; }); } catch (e) { console.error(e); }
+    }
+    if (rec !== owner || card._seq !== my || !card.isConnected) return;
+    box.innerHTML = '';
+    const n = Math.max(2, (t.photos || []).length);
+    for (let i = 0; i < n; i++) {
+      const pid = (t.photos || [])[i] || '';
+      box.appendChild(pid ? filledCell(card, t, i, pid, byId[pid]) : emptyCell(t, i));
+    }
+  }
+  function emptyCell(t, i) {
+    const b = U.el('button', 'prop-ph-add');
+    b.type = 'button';
+    b.appendChild(U.icon('camera'));
+    b.appendChild(U.el('b', '', slotName(i)));
+    b.appendChild(U.el('small', '', '촬영 · 앨범'));
+    b.addEventListener('click', () => askPhoto(t, i));
+    return b;
+  }
+  function filledCell(card, t, i, pid, p) {
+    const cell = U.el('div', 'photo-cell prop-ph');
+    const img = new Image();
+    img.draggable = false; img.alt = slotName(i) + ' 사진';
+    cell.appendChild(img);
+    if (p) img.src = U.thumbUrl(p.id, p.thumb || p.full);
+    else {      // 레코드가 아직 안 되살아난 사진 — 원본 파일에서 바로 띄운다
+      Store.origBlob(pid).then((b) => {
+        if (b) img.src = U.thumbUrl(pid, b);
+        else { cell.classList.add('loading'); const s = document.createElement('span'); s.textContent = '불러오기 실패'; if (img.parentNode === cell) cell.replaceChild(s, img); }
+      }).catch(() => {});
+    }
+    cell.addEventListener('click', () => openLightbox(pid));
+    const del = U.el('button', 'del');
+    del.appendChild(U.icon('close'));
+    del.setAttribute('aria-label', slotName(i) + ' 사진 삭제');
+    del.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const at = (t.photos || []).indexOf(pid);       // 그릴 때 인덱스가 아니라 지금 자리를 id 로 다시 찾는다(연타 안전)
+      if (at < 0) return;
+      U.dropUrl(pid);
+      t.photos[at] = '';
+      markDirty();
+      paintPhotos(card, t);
+    });
+    cell.appendChild(del);
+    cell.appendChild(U.el('span', 'n', slotName(i)));
+    return cell;
+  }
+
+  /* 사진 크게 보기 — 원본(파일·OPFS 이전분 포함)을 전역 라이트박스로. 확대는 열려 있는 동안만 */
+  async function openLightbox(pid) {
+    let blob = null;
+    try {
+      const p = await Store.getPhoto(pid);
+      blob = (await Store.fullBlob(p)) || (p && p.thumb) || (await Store.origBlob(pid)) || null;
+    } catch (e) { console.error(e); }
+    if (!blob) { U.toast('사진을 불러오지 못했습니다'); return; }
+    const img = $('#lightbox-img');
+    const url = URL.createObjectURL(blob);
+    img.src = url;
+    $('#lightbox').classList.remove('hidden');
+    Nav.setZoomable(true);
+    Nav.setLightboxCloser(() => {
+      $('#lightbox').classList.add('hidden');
+      Nav.setZoomable(false);
+      img.removeAttribute('src');
+      URL.revokeObjectURL(url);
+      Nav.setLightboxCloser(null);
+    });
+  }
+
+  /* 사진 받기 — 네이티브는 Native.shoot/pick(원본을 갤러리·SD 에도 남긴다), 플러그인이 없으면(PWA·브라우저) 숨은 파일 입력으로.
+     웹 입력은 취소 이벤트가 없어 약속이 안 풀릴 수 있다 — 다음 요청이 오면 앞 약속을 null 로 끝낸다 */
+  async function pickFiles(fromCamera) {
+    if (filePending) { const p = filePending; filePending = null; p(null); }
+    let files = null;
+    try { files = fromCamera ? await Native.shoot() : await Native.pick(); }
+    catch (e) { console.warn('[prop pick]', e); return []; }
+    if (files !== null) return files;
+    return new Promise((resolve) => {
+      filePending = resolve;
+      const inp = $(fromCamera ? '#prop-file-shoot' : '#prop-file-pick');
+      inp.value = '';
+      inp.click();
+    });
+  }
+
+  /* 카메라·앨범이 뜨는 동안 안드로이드가 앱을 죽일 수 있다 — 떠나기 전에 지금까지를 무음 저장(공시체 편집기 holdBeforeLeave) */
+  async function holdBeforeLeave() {
+    if (rec && dirty) { collect(); if (hasSubstance()) { clearTimeout(autoT); await save(true); } }
+  }
+
+  function askPhoto(t, slot, thenRead) {
+    U.sheet(slotName(slot) + ' 사진', [
+      { label: '촬영', onPick: () => { holdBeforeLeave().then(() => pickFiles(true)).then((fs) => afterPick(t, slot, fs, true, thenRead)); } },
+      { label: '앨범', onPick: () => { holdBeforeLeave().then(() => pickFiles(false)).then((fs) => afterPick(t, slot, fs, false, thenRead)); } }
+    ]);
+  }
+  async function afterPick(t, slot, files, fromCamera, thenRead) {
+    if (!files || !files.length) return;
+    const n = await addPhotos(t, slot, files, fromCamera);
+    if (n && thenRead && rec && testsOf(rec).indexOf(t) >= 0 && (t.photos || [])[0]) runRead(t, t.photos[0]);
+  }
+
+  /* 사진을 시험의 빈 칸에 — 누른 칸이 먼저, 그다음 다른 빈 칸, 그래도 남으면 뒤에 붙인다(잃지 않는다) */
+  function putSlot(t, start, id) {
+    t.photos = Array.isArray(t.photos) ? t.photos : [];
+    const order = [start];
+    for (let i = 0; i < Math.max(2, t.photos.length); i++) if (order.indexOf(i) < 0) order.push(i);
+    for (const i of order) {
+      if (!t.photos[i]) { while (t.photos.length < i) t.photos.push(''); t.photos[i] = id; return i; }
+    }
+    t.photos.push(id);
+    return t.photos.length - 1;
+  }
+
+  async function addPhotos(t, slot, files, fromCamera) {
+    const owner = rec;
+    if (!owner || owner.tests.indexOf(t) < 0) return 0;
+    const list = Array.prototype.slice.call(files || []).filter((f) => f && f.size);
+    if (!list.length) return 0;
+    // 아이폰(PWA)의 <input capture> 촬영본은 사진 앱에 안 남는다 — 공유 시트로 저장할 수 있게 처리본을 들고 있는다
+    const shareFiles = [];
+    const wantShare = fromCamera && !Native.isNative() && typeof navigator.share === 'function' && !!navigator.canShare;
+    U.toast('사진 처리 중…', 60000);
+    let ok = 0, fail = 0, aborted = false;
+    try {
+      for (const f of list) {
+        const id = U.uid();
+        pendingIds.push(id);           // putPhoto 커밋 전에 등록 — gc 와의 틈을 없앤다
+        try {
+          const img = await U.processImage(f, { maxSide: 1600, thumbSide: 320, quality: 0.82 });
+          await Store.putPhoto(Object.assign({ id: id }, img));
+          if (wantShare) { try { shareFiles.push(new File([img.full], 'prop_' + id + '.jpg', { type: 'image/jpeg' })); } catch (e) {} }
+        } catch (e) { console.error('[prop photo]', e); fail++; unpend(id); continue; }
+        if (rec !== owner || owner.tests.indexOf(t) < 0) { aborted = true; unpend(id); Store.deletePhotos([id]).catch(() => {}); break; }
+        putSlot(t, slot, id);
+        markDirty(); ok++;
+        await save(true);              // 장마다 즉시 레코드에 실어 저장 — putPhoto 와 저장 사이에서 앱이 죽어 고아가 되는 창을 한 장 분량으로
+        unpend(id);
+      }
+      if (rec === owner) { const c = cardOf(t); if (c) paintPhotos(c, t); }
+    } finally {
+      if (aborted) U.toast('편집기를 벗어나 사진 추가를 중단했습니다');
+      else if (fail && ok) U.toast(ok + '장 추가 · ' + fail + '장 실패');
+      else if (fail) U.toast(fail + '장 모두 불러오지 못했습니다');
+      else {
+        const done = ok + '장 추가했습니다';
+        if (ok && shareFiles.length && navigator.canShare({ files: shareFiles })) {
+          U.toast(done + '\n촬영본은 앱 안에만 있습니다', 8000, { label: '사진 앱에 저장', onClick: () => { navigator.share({ files: shareFiles }).catch(() => {}); } });
+        } else U.toast(done);
+      }
+    }
+    return ok;
+  }
+
+  /* ---------------- 판넬 읽기(편집기 — 그 시험의 첫 사진) ---------------- */
+  async function readPanel(t) {
+    if (!rec || testsOf(rec).indexOf(t) < 0) return;
+    if (scanBusy) { U.toast('아직 앞 사진을 읽는 중입니다 — 잠시만'); return; }
+    if (!(await OCR.ensureKey())) return;        // 키 확인은 사진 고르기 **전** — 찍은 뒤 물으면 사진이 버려진다
+    const first = (t.photos || [])[0];
+    if (first) { runRead(t, first); return; }
+    // 사진이 없으면 사진부터 — 판넬 칸(0)에 올리고 곧바로 읽는다
+    askPhoto(t, 0, true);
+  }
+
+  async function runRead(t, pid) {
+    const owner = rec;
+    if (scanBusy) return;
+    scanBusy = true;
+    U.toast('판넬 읽는 중…', 60000);
+    let raw = null, err = null;
+    try {
+      const p = await Store.getPhoto(pid);
+      const blob = (await Store.fullBlob(p)) || (p && p.thumb) || (await Store.origBlob(pid)) || null;
+      if (!blob) throw new Error('사진을 읽지 못했습니다');
+      raw = await ocrPanel(blob);
+    } catch (e) { err = e; console.warn('[prop ocr]', e); }
+    finally { scanBusy = false; }
+    if (err) { U.toast('판넬을 읽지 못했습니다\n' + Vision.explain(err), 4000); return; }
+    if (rec !== owner || testsOf(owner).indexOf(t) < 0) { U.toast('편집기를 벗어나 판넬 읽기를 중단했습니다'); return; }
+    const v = panelValues(raw);
+    if (!VALS.some((x) => v[x.k])) { U.toast('값을 읽지 못했습니다 — 판넬이 크게 나온 사진인지 확인하세요', 3500); return; }
+    const already = VALS.some((x) => t[x.k]);
+    if (already) {
+      U.toast('판넬을 읽었습니다', 1200);        // 60초짜리 「읽는 중」 토스트를 갈아 둔다 — 안 그러면 시트(토스트 아래)를 취소해도 한참 남는다
+      U.confirmSheet('이미 입력한 값이 있습니다\n판넬에서 읽은 값으로 덮을까요?', '덮어쓰기', () => applyPanel(t, v, true));
+    } else applyPanel(t, v, false);
+  }
+
+  /* 읽은 값을 시험에 — 읽힌 칸만 쓴다(읽지 못한 칸이 입력해 둔 값을 지우지 않는다). 업체는 비었을 때만(덮어쓰기를 골랐으면 판넬 것으로) */
+  function applyPanel(t, v, overwrite) {
+    if (!rec || testsOf(rec).indexOf(t) < 0) return;
+    let n = 0;
+    VALS.forEach((x) => { if (v[x.k] !== '') { t[x.k] = v[x.k]; n++; } });
+    if (v.vendor && (!t.vendor || overwrite)) t.vendor = v.vendor;
+    markDirty();
+    const c = cardOf(t);
+    if (c) {
+      c.querySelectorAll('input[data-k]').forEach((inp) => { inp.value = t[inp.dataset.k] || ''; });
+      const vd = c.querySelector('.prop-vend'); if (vd) vd.value = t.vendor || '';
+    }
+    const miss = VALS.filter((x) => !t[x.k]).map((x) => x.label);
+    let msg = '판넬을 읽었습니다 · ' + n + '칸';
+    if (miss.length) msg += '\n비어 있는 칸: ' + miss.join(', ');
+    if (v.skipped.length) msg += '\n범위 밖이라 뺀 칸: ' + v.skipped.map(labelOfKey).join(', ');
+    U.toast(msg, miss.length || v.skipped.length ? 5000 : 2600);
+  }
+
+  /* ---------------- 판넬 스캔으로 새로 만들기(홈·계산 탭) ----------------
+     사진 → OCR → 같은 날(판넬 날짜, 없으면 오늘)·같은 동(Task.dongKeyOf)의 물성 레코드가 있으면 거기 시험을 더하고(빈 시험이 맞으면 그 칸을 채운다 — 여럿이면 pickRecord),
+     없으면 새 레코드(동 = 부위의 첫 동, 감리 = 명부 담당) → 편집기를 열어 확인한다.
+     OCR 이 실패해도 사진은 잃지 않는다 — 새 레코드에 사진만 싣고 편집기를 연다(거기서 「판넬 읽기」 로 다시). */
+  function scan() {
+    if (scanBusy) { U.toast('아직 앞 사진을 읽는 중입니다 — 잠시만'); return; }
+    OCR.ensureKey().then((ok) => {
+      if (!ok) return;
+      const go = (fs) => { if (fs && fs.length) scanFile(fs[0], fs.length - 1); };
+      U.sheet('물성 판넬 사진', [
+        { label: '촬영', sub: '판넬이 크게 나오게', onPick: () => { pickFiles(true).then(go); } },
+        { label: '앨범', onPick: () => { pickFiles(false).then(go); } }
+      ]);
+    });
+  }
+
+  /* extra = 같이 고른 나머지 사진 수 — 한 번에 한 장만 읽으니 말없이 버리지 않고 결과 토스트 끝에 알린다 */
+  async function scanFile(file, extra) {
+    if (scanBusy) { U.toast('아직 앞 사진을 읽는 중입니다 — 잠시만'); return; }
+    scanBusy = true;
+    const note = extra > 0 ? '고른 사진 ' + (extra + 1) + '장 중 첫 장만 읽었습니다 — 나머지는 한 장씩 다시 스캔하세요' : '';
+    U.toast('판넬 읽는 중…', 60000);
+    const id = U.uid();
+    pendingIds.push(id);
+    // 저장과 판독은 서로 기다리지 않는다
+    const saveP = (async () => {
+      const img = await U.processImage(file, { maxSide: 1600, thumbSide: 320, quality: 0.82 });
+      await Store.putPhoto(Object.assign({ id: id }, img));
+      return id;
+    })().then((x) => ({ ok: x }), (e) => ({ err: e }));
+    const ocrP = ocrPanel(file).then((x) => ({ ok: x }), (e) => ({ err: e }));
+    const sv = await saveP, oc = await ocrP;
+    try {
+      if (sv.err) {
+        console.error('[prop scan photo]', sv.err);
+        unpend(id);
+        if (oc.err) { U.toast('판넬을 읽지 못했습니다\n' + Vision.explain(oc.err) + (note ? '\n' + note : ''), 4000); return; }
+        await finishScan('', oc.ok, null, note);       // 사진 저장 실패 — 값만이라도
+      } else {
+        await finishScan(sv.ok, oc.err ? null : oc.ok, oc.err || null, note);
+      }
+    } catch (e) {
+      console.error('[prop scan]', e);
+      U.toast('물성시험을 저장하지 못했습니다');
+    } finally {
+      scanBusy = false;
+      unpend(id);
+    }
+  }
+
+  /* 명부 담당 감리 — 한 명이면 이름·전화까지, 여럿이거나 없으면 비워 둔다(편집기에서 고른다 — 자동으로 잘못 배정하지 않는다) */
+  function supFor(dong) {
+    const cs = dong ? Contacts.byDong(dong) : [];
+    return cs.length === 1 ? { name: Contacts.label(cs[0]), phone: cs[0].phone || '' } : { name: '', phone: '' };
+  }
+
+  /* 판넬 타설부위 → place. 앞머리가 동 나열(「209,210동 옥탑」)이면 대표 동 접두를 또 붙이지 않는다(「209동 209,210동 옥탑」 금지) —
+     일정표·계획표와 같은 규칙(OCR.planItems: 동 나열이 대표 동을 품으면 원문 제목 그대로)을 먼저 쓰고, 동이 없거나 대표 동이 어긋나면 placeOf 그대로 */
+  function placeFromPanel(dong, text) {
+    let it = null;
+    try { it = (text && global.OCR && OCR.planItems) ? OCR.planItems([{ part: text }])[0] : null; } catch (e) { it = null; }
+    return (it && it.dong === dong && it.place) ? it.place : Task.placeOf(dong, text);
+  }
+
+  /* 판독이 끝난 순간 이미 다른 전체 화면이 떠 있는가 — 스캔하는 사이 플래너·방통·AI·검수를 열었을 수 있다. 그 화면들은 DOM 에서 이 편집기보다 위(같은 z-index)거나
+     (방통) goBack 이 먼저 닫아서, 그 아래/뒤에 편집기를 열면 가려진 채 열리고 첫 뒤로가기가 보이지 않는 편집기를 닫는다(감사 2026-10-15).
+     작업 편집기·감리 고르기는 DOM 에서 아래라 편집기가 그 위에 뜨고 goBack 순서도 맞아 괜찮다 */
+  const overlayBusy = () => Nav.isPlanOpen() || Nav.isAuditOpen() || Nav.isAIOpen() || !!(global.Bangtong && Bangtong.isOpen());
+
+  /* raw = 모델 원본 JSON(실패면 null), err = 판독 실패 사유. pid = 이미 저장된 판넬 사진 id('' 면 사진 없음). note = 토스트 끝에 붙일 안내 한 줄(선택) */
+  async function finishScan(pid, raw, err, note) {
+    const v = raw ? panelValues(raw) : null;
+    const read = !!(v && VALS.some((x) => v[x.k]));
+    const vv = v || panelValues({});
+    // 사진도 못 저장했고(pid 없음) 읽은 값도 없다 — 남길 것이 없다. 빈 레코드를 만들고 「사진은 저장했습니다」 라고 하지 않는다(스펙 C: 빈 새 레코드 금지, 감사 2026-10-15)
+    if (!read && !pid) {
+      U.toast((err ? '판넬을 읽지 못했습니다 — ' + Vision.explain(err) : '값을 읽지 못했습니다') + '\n사진도 저장하지 못해 물성시험을 만들지 않았습니다' + (note ? '\n' + note : ''), 4500);
+      return null;
+    }
+    const day = vv.date || U.dayKey(Date.now());
+    const mkTest = (round, ex) => {
+      const t = newTest(round, vv.vendor);
+      VALS.forEach((x) => { t[x.k] = vv[x.k] || ''; });
+      if (pid) t.photos = [pid];
+      return Object.assign(t, ex || {});
+    };
+    // 같은 날·같은 동 레코드
+    let target = null;
+    if (read && vv.dong) {
+      const key = Task.dongKeyOf(vv.dong);
+      const rows = mineRows(await Store.propsOf(day));
+      target = pickRecord(rows.filter((r) => Task.dongKeyOf(r.dong) === key), vv);
+    }
+    let saved, how, hit = null, live = null;
+    if (target) {
+      const fresh = (await Store.getBang(target.id)) || target;
+      // 같은 레코드를 편집기가 열어 두고 있으면(미저장 입력 포함) DB 사본이 아니라 그 메모리 사본에 합쳐 save() 줄로 저장한다 —
+      // DB 로 곧장 쓰면 편집기가 곧이어 옛 사본을 저장해 방금 합친 시험·사진 참조를 덮는다(감사 2026-10-15). 마지막 await 뒤라 판정은 동기로
+      live = (rec && rec.id && rec.id === fresh.id) ? rec : null;
+      const base = live || fresh;
+      const tests = testsOf(base).slice();
+      const at = pickTestSlot(tests, vv);
+      if (at >= 0) {
+        const t = tests[at];
+        VALS.forEach((x) => { if (vv[x.k]) t[x.k] = vv[x.k]; });
+        if (!t.vendor && vv.vendor) t.vendor = vv.vendor;
+        if (vv.round) t.round = vv.round;
+        t.photos = pid ? [pid].concat((t.photos || []).slice(1)) : (t.photos || []);
+        hit = t;
+        how = '「' + titleOf(base) + '」의 ' + t.round + '회 시험을 채웠습니다 · ' + dayWord(day);
+      } else {
+        const t = mkTest(vv.round || nextRound(tests, vv.vendor));
+        tests.push(t);
+        hit = t;
+        how = '「' + titleOf(base) + '」에 ' + t.round + '회 시험을 더했습니다 · ' + dayWord(day);
+      }
+      base.tests = tests;
+      if (live) {
+        markDirty();
+        renderTests();
+        saved = await save(true, live);
+        if (!saved) throw new Error('물성시험 저장 실패');
+      } else {
+        base.photos = [];
+        saved = await Store.putBang(base);
+      }
+    } else {
+      const dong = read ? vv.dong : '';
+      const sup = supFor(dong);
+      const t = mkTest(vv.round || 1);
+      saved = await Store.putBang({
+        kind: 'prop', day: day, dong: dong, place: placeFromPanel(dong, vv.place),
+        supervisor: sup.name, supPhone: sup.phone, jugu: U.jugu(),
+        mix: vv.mix, vendor: vv.vendor, qty: '', memo: '', planId: '', tests: [t], photos: []
+      });
+      how = '새 물성시험을 만들었습니다' + (dong ? ' · ' + dong : '') + ' · ' + dayWord(day);   // 판넬 날짜가 오늘이 아니면 다른 날 목록에 있다 — 날짜를 알린다
+    }
+    unpend(pid);
+    Store.gc(photoIdsOf(saved).concat(pendingIds));
+    refreshOutside();
+    const tail = (note ? '\n' + note : '') + (pid ? '' : '\n사진은 저장하지 못했습니다');   // pid 가 빈 값 = 사진 저장 실패(scanFile) — 값만 살렸다고 분명히 알린다
+    // 판독하는 사이(수 초) 다른 전체 화면을 열어 두었으면 편집기를 그 위/아래에 몰래 열지 않는다 — 목록에서 열게 안내만
+    const defer = !live && overlayBusy();
+    const where = defer ? '\n물성시험 목록에서 열어 확인하세요' : '';
+    if (!read) {
+      U.toast((err ? '판넬을 읽지 못했습니다 — ' + Vision.explain(err) : '값을 읽지 못했습니다') + '\n사진은 새 물성시험에 저장했습니다 · 「판넬 읽기」로 다시' + where + tail, 5000);
+    } else {
+      const miss = VALS.filter((x) => !vv[x.k]).length;
+      U.toast(how + (miss ? '\n못 읽은 칸 ' + miss + '개 — 확인하세요' : '') + where + tail, note ? 5500 : 4000);
+    }
+    if (live) {      // 이미 그 레코드의 편집기 안이다 — 다시 열지 않고 방금 채운 시험 카드로 간다
+      if (rec === live && hit) { const c = cardOf(hit); if (c) { try { c.scrollIntoView({ block: 'nearest' }); } catch (e) {} } }
+    } else if (!defer) await open(saved);
+    return saved;
+  }
+
+  /* ---------------- 홈(물성 모드) — 그날 물성시험 목록 ---------------- */
+  let homeSeq = 0;
+  async function renderHomeList(day, label) {
+    const my = ++homeSeq;
+    const list = $('#prop-home-list');
+    if (!list) return;
+    $('#prop-home-title').textContent = (label || '오늘') + ' 물성시험';
+    let rows = [], failed = null;
+    try { rows = sortRows(mineRows(await Store.propsOf(day))); } catch (e) { console.error(e); failed = e || true; }
+    if (my !== homeSeq) return;       // 그 사이 날짜가 또 바뀌었다 — 지나간 조회는 버린다
+    list.innerHTML = '';
+    const cnt = $('#prop-home-count');
+    if (failed) {
+      cnt.textContent = '–';
+      const err = U.el('p', 'todo-empty', (failed.userMsg || '목록을 불러오지 못했습니다') + ' — 탭해서 다시 시도');
+      err.addEventListener('click', () => renderHomeList(day, label));
+      list.appendChild(err);
+      return;
+    }
+    cnt.textContent = rows.length + '건';
+    if (!rows.length) { list.appendChild(U.el('p', 'todo-empty', '등록된 물성시험이 없습니다')); return; }
+    rows.forEach((r) => {
+      const done = isDoneRec(r);
+      const row = U.el('button', 'task-row' + (done ? ' done' : ''));
+      row.appendChild(U.el('span', 'due-spec sp-prop', '물성'));
+      const body = U.el('div', 'task-body');
+      body.appendChild(U.el('div', 'task-part', titleOf(r)));
+      const n = testsOf(r).length;
+      const pb = Task.placeBrief(r);
+      const metaEl = U.el('div', 'task-meta', [pb, r.vendor, '시험 ' + n + '회 · 사진 ' + photoN(r) + '/' + (2 * n)].filter(Boolean).join(' · '));
+      if (r.supervisor) {          // 감리는 메타 줄 끝(스펙 C) — 따로 span 으로 둬야 그날 휴무면 빨강으로 칠할 수 있다(Leave.decorate, 공시체·방통 행과 같은 훅)
+        metaEl.appendChild(document.createTextNode(' · '));
+        metaEl.appendChild(U.el('span', '', r.supervisor));
+        if (global.Leave) Leave.decorate(metaEl.lastChild, r.supervisor, r.day || day);
+      }
+      body.appendChild(metaEl);
+      row.appendChild(body);
+      const flag = U.el('span', 'task-flag' + (done ? ' on' : ''));
+      if (done) flag.appendChild(U.icon('check'));
+      row.appendChild(flag);
+      row.addEventListener('click', () => open(r));
+      list.appendChild(row);
+    });
+  }
+
+  /* ---------------- 작업 탭(물성 모드) ---------------- */
+  let sel = Object.create(null);
+  let tabDay = '';
+  let tabRows = [];
+  let tabSeq = 0;
+  let tabRowEls = Object.create(null);
+  let tabHead = null;
+
+  const selectedRows = () => tabRows.filter((r) => sel[r.id]);
+  function setChk(box, on) {
+    if (!box) return;
+    box.classList.toggle('on', on);
+    box.innerHTML = '';
+    if (on) box.appendChild(U.icon('check'));
+  }
+  function syncSelection() {
+    Object.keys(tabRowEls).forEach((id) => {
+      const row = tabRowEls[id];
+      if (!row || !row.isConnected) return;
+      const on = !!sel[id];
+      row.classList.toggle('on', on);
+      setChk(row.firstChild, on);
+    });
+    if (tabHead && tabHead.isConnected) setChk(tabHead.firstChild, tabRows.length > 0 && tabRows.every((r) => sel[r.id]));
+    updateBar();
+  }
+  function toggleAll() {
+    if (tabRows.length && selectedRows().length === tabRows.length) tabRows.forEach((r) => { delete sel[r.id]; });
+    else tabRows.forEach((r) => { sel[r.id] = true; });
+    syncSelection();
+  }
+
+  function updateBar() {
+    const rows = selectedRows();
+    const n = rows.length;
+    const p = rows.reduce((a, r) => a + photoN(r), 0);
+    const gd = n ? groupsOf(rows, 'day').filter((g) => g.photos > 0).length : 0;
+    const gs = n ? groupsOf(rows, 'sup').filter((g) => g.photos > 0).length : 0;
+    const btn = $('#tasks-send'), btnSup = $('#tasks-send-sup'), zb = $('#tasks-zip');
+    const off = (n === 0 || p === 0);
+    if (btn) { btn.disabled = off || gd === 0; btn.classList.toggle('off', btn.disabled); btn.textContent = (n && p) ? ('날짜별 ' + gd) : '날짜별'; }
+    if (btnSup) { btnSup.disabled = off || gs === 0; btnSup.classList.toggle('off', btnSup.disabled); btnSup.textContent = (n && p) ? ('감리별 ' + gs) : '감리별'; }
+    if (zb) {
+      zb.disabled = (n === 0) || (p === 0 && !rows.some(hasVals));
+      zb.classList.toggle('off', zb.disabled);
+      zb.textContent = n ? ('파일 내보내기 — ' + zipTitle(tabDay)) : '파일 내보내기';
+    }
+    const info = $('#tasks-info');
+    if (info) info.textContent = n ? (n + '건 · 사진 ' + p + '장') : '물성시험을 선택하세요';
+  }
+
+  async function renderTasksTab(day) {
+    const my = ++tabSeq;
+    const list = $('#tasks-list');
+    if (!list) return;
+    if (day !== tabDay) { sel = Object.create(null); tabDay = day; }
+    let rows = [], failed = null;
+    try { rows = sortRows(mineRows(await Store.propsOf(day))); } catch (e) { console.error(e); failed = e || true; }
+    if (my !== tabSeq) return;
+    tabRows = rows;
+    const alive = Object.create(null);
+    rows.forEach((r) => { alive[r.id] = 1; });
+    Object.keys(sel).forEach((id) => { if (!alive[id]) delete sel[id]; });
+    tabRowEls = Object.create(null);
+    tabHead = null;
+    list.innerHTML = '';
+    if (failed || !rows.length) {
+      list.appendChild(U.el('p', 'empty-msg prop-empty', failed
+        ? ((failed.userMsg || '목록을 불러오지 못했습니다.') + '\n위 날짜를 탭하면 다시 시도합니다.')
+        : '이 날짜에 물성시험이 없습니다.\n홈의 「+ 물성시험」이나 「판넬 스캔」으로 등록하세요.'));   // 작업 탭 헤더의 +는 물성 모드에서 숨는다(app.css .propmode) — 없는 버튼을 가리키지 않는다
+      updateBar();
+      return;
+    }
+    // 썸네일은 한 번에 읽는다(행마다 따로 읽으면 트랜잭션이 행 수만큼 열린다)
+    const wantIds = [];
+    rows.forEach((r) => { const id = (r.photos || [])[0]; if (id) wantIds.push(id); });
+    const pmap = Object.create(null);
+    if (wantIds.length) {
+      try { (await Store.getPhotos(wantIds)).forEach((p) => { pmap[p.id] = p; }); } catch (e) { console.warn('[prop thumbs]', e); }
+      if (my !== tabSeq) return;
+    }
+    const frag = document.createDocumentFragment();
+    const head = U.el('div', 'day-head day-head-btn');
+    head.appendChild(U.el('span', 'chk'));
+    head.appendChild(U.el('b', '', '물성시험'));
+    head.appendChild(U.el('span', '', rows.length + '건'));
+    head.addEventListener('click', toggleAll);
+    tabHead = head;
+    frag.appendChild(head);
+    rows.forEach((r) => frag.appendChild(tabRow(r, pmap)));
+    list.appendChild(frag);
+    syncSelection();
+  }
+
+  function tabRow(r, pmap) {
+    const row = U.el('div', 'bat-row' + (sel[r.id] ? ' on' : ''));
+    const box = U.el('span', 'chk' + (sel[r.id] ? ' on' : ''));
+    if (sel[r.id]) box.appendChild(U.icon('check'));
+    row.appendChild(box);
+    const th = U.el('div', 'bat-thumb');
+    const id = (r.photos || [])[0];
+    const p = id ? pmap[id] : null;
+    if (p) {
+      const img = new Image();
+      img.src = U.thumbUrl(p.id, p.thumb || p.full);
+      img.alt = '';
+      th.appendChild(img);
+    } else if (id) {
+      const img = new Image(); img.alt = '';
+      th.appendChild(img);
+      Store.origBlob(id).then((b) => {
+        if (b) img.src = U.thumbUrl(id, b);
+        else { th.innerHTML = ''; const np = U.el('div', 'nopic bad'); np.appendChild(U.icon('warn')); th.appendChild(np); }
+      }).catch(() => {});
+    } else {
+      const np = U.el('div', 'nopic');
+      np.appendChild(U.icon('note'));
+      th.appendChild(np);
+    }
+    row.appendChild(th);
+    const body = U.el('div', 'bat-body');
+    const hd = U.el('div', 'rec-meta');
+    hd.appendChild(U.el('span', 'due-spec sp-prop', '물성'));
+    hd.appendChild(U.el('span', 'rec-title', titleOf(r)));
+    if (r.supervisor) hd.appendChild(U.el('span', 'row-sup', r.supervisor));
+    if (global.Leave && r.supervisor) Leave.decorate(hd.lastChild, r.supervisor, r.day);   // 그날 휴무인 감리는 빨강 — 작업탭 공시체 행과 같게
+    body.appendChild(hd);
+    const n = testsOf(r).length;
+    const meta = [Task.placeBrief(r), r.vendor, '시험 ' + n + '회 · 사진 ' + photoN(r) + '/' + (2 * n)].filter(Boolean);
+    body.appendChild(U.el('div', 'task-meta', meta.join(' · ')));
+    row.appendChild(body);
+    const edit = U.el('button', 'row-edit');
+    edit.appendChild(U.icon('back'));
+    edit.setAttribute('aria-label', '물성시험 열기');
+    edit.addEventListener('click', (e) => { e.stopPropagation(); open(r); });
+    row.appendChild(edit);
+    row.addEventListener('click', () => {
+      if (sel[r.id]) delete sel[r.id]; else sel[r.id] = true;
+      syncSelection();
+    });
+    tabRowEls[r.id] = row;
+    return row;
+  }
+
+  /* ---------------- 카톡 보내기 ---------------- */
+  const WARN_PHOTOS = 30;          // 카카오톡 한 번에 보내기 한도 근처
+
+  function send(axis) {
+    const rows = selectedRows();
+    if (!rows.length) { U.toast('물성시험을 선택하세요'); return; }
+    const bySup = (axis === 'sup');
+    const groups = groupsOf(rows, bySup ? 'sup' : 'day').filter((g) => g.photos > 0);
+    if (!groups.length) { U.toast('선택한 물성시험에 사진이 없습니다'); return; }
+    const items = [];
+    groups.forEach((g) => {
+      const over = g.photos > WARN_PHOTOS;
+      const who = bySup ? (g.sup || '감리 미지정') : (g.items.length + '건');
+      items.push({
+        label: g.label + ' · 사진 ' + g.photos + '장',
+        cls: over ? 'danger' : 'strong',
+        sub: who + (bySup ? (' · ' + g.items.length + '건') : '') + (over ? ' · 카카오톡은 보통 한 번에 30장까지입니다' : ' · 보낸 뒤 문구 붙여넣기'),
+        onPick: () => sendGroup(g)
+      });
+    });
+    items.push({ sep: true });
+    items.push({
+      label: '묶음 이름만 복사', sub: groups.map((g) => g.label).join(' · '),
+      onPick: () => { U.copyText(groups.map((g) => g.label).join('\n')).then((o) => U.toast(o ? '복사했습니다' : '복사에 실패했습니다')); }
+    });
+    U.sheet((bySup ? '감리별 ' : '날짜별 ') + groups.length + '건 — 하나씩 보내세요', items);
+  }
+
+  async function sendGroup(g) {
+    U.toast('사진 준비 중…', 60000);
+    const blobs = [];
+    let missing = 0;
+    try {
+      const photos = await Store.getPhotos(g.photoIds);
+      const byId = {};
+      photos.forEach((p) => { byId[p.id] = p; });
+      for (const id of g.photoIds) {
+        const b = byId[id] ? await Store.fullBlob(byId[id]) : null;   // 파일로 옮겨진 원본 포함
+        if (b) blobs.push(b); else missing++;
+      }
+    } catch (e) { console.error(e); }
+    if (!blobs.length) { U.toast('보낼 사진이 없습니다'); return; }
+    if (missing) U.toast(missing + '장은 불러오지 못해 빠집니다', 3000);
+    let copied = false;
+    try { copied = await U.copyText(g.label); } catch (e) {}
+    const base = U.safeName(g.label, '물성시험').replace(/\//g, '-');
+    let how = 'download';
+    try { how = await Share.exportItems({ blobs: blobs, text: g.label, title: g.label, baseName: base }); }
+    catch (e) { console.error(e); U.toast('내보내기에 실패했습니다'); return; }
+    if (how === 'cancel') U.toast('내보내기를 취소했습니다');
+    else if (how === 'fail') U.toast(copied ? '공유에 실패했습니다\n「' + g.label + '」는 복사했습니다' : '공유에 실패했습니다');
+    else if (how === 'download') U.toast('공유 기능이 없어 파일로 저장했습니다');
+    else if (how === 'download-multi') U.toast('파일로 저장합니다 — 브라우저가 여러 장을 막으면 허용을 눌러 주세요', 4000);
+    else if (how === 'copied') U.toast('「' + g.label + '」를 복사했습니다');
+    else if (copied) U.toast('사진을 보낸 뒤 붙여넣기\n「' + g.label + '」', 4000);
+    else U.toast('공유할 앱에서 카카오톡을 선택하세요');
+  }
+
+  /* ---------------- 파일(압축) 내보내기 ----------------
+     「10월 14일 물성시험분.zip」 → 폴더 「10.14 물성시험」(날짜 = 레코드 day) 안에 사진 「204동(우림 1회)_1.jpg」(시험마다 1부터)와
+     「10.14 물성시험 물성시험값.html」(폴더 라벨 접두 — 같은 이름 파일이 여럿이면 엑셀·브라우저가 둘째를 못 연다) */
+  const fileLabel = (label) => String(label || '').replace(/[\\/:*?"<>|\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const fileTag = (folder) => (String(folder || '').replace(/[\/]+/g, ' ').trim() + ' ');
+  function blobToDataUrl(blob) {
+    return new Promise((resolve) => {
+      if (!blob) { resolve(''); return; }
+      try {
+        const fr = new FileReader();
+        fr.onload = () => resolve(String(fr.result || ''));
+        fr.onerror = () => resolve('');
+        fr.readAsDataURL(blob);
+      } catch (e) { resolve(''); }
+    });
+  }
+
+  async function exportZip() {
+    const rows = selectedRows();
+    if (!rows.length) { U.toast('물성시험을 선택하세요'); return; }
+    U.toast('압축파일 만드는 중…', 60000);
+    const zipName = zipTitle(tabDay);
+    try {
+      const entries = [];
+      const used = Object.create(null);
+      const uniq = (name) => { if (!used[name]) { used[name] = 1; return name; } return name + '_' + (++used[name]); };
+      const usedEntry = Object.create(null);
+      const uniqEntry = (name) => {
+        if (!usedEntry[name]) { usedEntry[name] = 1; return name; }
+        const k = ++usedEntry[name];
+        return name.replace(/(\.[a-z0-9]+)$/i, ' (' + k + ')$1');
+      };
+      const pages = Object.create(null);        // 폴더 → [카드]
+      for (const r of rows) {
+        const dtag = (Spec.md(r.day) || '').replace('/', '.');
+        const folder = (dtag ? dtag + ' ' : '') + '물성시험';
+        const nameBase = U.safeName(Task.dongOf(r) || '동미지정', '동미지정');
+        const key = uniq(folder + '/' + nameBase);
+        const suf = key.slice((folder + '/' + nameBase).length);             // '' 또는 '_2'
+        const card = { dong: (Task.dongOf(r) || '동미지정') + (suf ? ' (' + suf.slice(1) + ')' : ''),
+                       sup: (r.supervisor || '감리 미지정'), day: r.day, mix: r.mix || '', vendor: r.vendor || '',
+                       place: (r.place && r.place !== (r.dong || '')) ? r.place : '', tests: [] };   // 부위 = 판넬에 적은 그대로(동 접두 포함). 동만이면 생략
+        const ids = [];
+        testsOf(r).forEach((t) => (t.photos || []).forEach((id) => { if (id) ids.push(id); }));
+        let byId = {};
+        if (ids.length) {
+          try { (await Store.getPhotos(ids)).forEach((p) => { byId[p.id] = p; }); } catch (e) { console.warn(e); }
+        }
+        const cnt = Object.create(null);
+        for (const t of testsOf(r)) {
+          const lbl = testLabel(t);
+          const lab = fileLabel(lbl) ? '(' + fileLabel(lbl) + ')' : '';
+          const tc = Object.assign({}, t, { label: lbl, photos: [] });
+          for (const id of (t.photos || [])) {
+            if (!id) continue;
+            const p = byId[id];
+            const b = p ? await Store.fullBlob(p) : null;
+            if (!b) continue;
+            const n = (cnt[lab] = (cnt[lab] || 0) + 1);
+            const name = uniqEntry(key + lab + '_' + n + '.jpg');
+            entries.push({ name: name, data: new Uint8Array(await b.arrayBuffer()) });
+            const th = (p.thumb instanceof Blob) ? p.thumb : (p.thumb ? new Blob([p.thumb], { type: 'image/jpeg' }) : null);
+            tc.photos.push({ name: name.slice(folder.length + 1), thumb: await blobToDataUrl(th) });
+          }
+          card.tests.push(tc);
+        }
+        (pages[folder] = pages[folder] || []).push(card);
+      }
+      for (const folder of Object.keys(pages)) {
+        entries.push({ name: folder + '/' + fileTag(folder) + '물성시험값.html', data: new TextEncoder().encode(valuesHtml(folder, pages[folder])) });
+      }
+      if (!entries.length) { U.toast('내보낼 사진·물성값이 없습니다'); return; }
+      const zip = Share.makeZip(entries);
+      const how = await Share.exportFile(zip, zipName, zipName);
+      if (how === 'cancel') U.toast('내보내기를 취소했습니다');
+      else if (how === 'fail') U.toast('공유에 실패했습니다');
+      else if (how === 'download') U.toast(zipName + ' 파일로 저장했습니다');
+      else U.toast(zipName + ' — 보낼 앱을 선택하세요');
+    } catch (e) {
+      console.error('[prop zip]', e);
+      U.toast('압축파일을 만들지 못했습니다');
+    }
+  }
+
+  /* ---------------- 계산 탭(물성 모드) = 외기온도판 ----------------
+     판넬 비고란에 「외기 17℃」 로 그대로 옮겨 적는 값이라 숫자를 가장 크게. 인터넷이 없으면 마지막 캐시를 「n시간 전 기준(오프라인)」 으로 */
+  let tempSeq = 0;
+  function paintTemp(r) {
+    const big = $('#prop-temp-val'), sub = $('#prop-temp-sub'), rng = $('#prop-temp-range'), ago = $('#prop-temp-ago');
+    if (!big) return;
+    if (!r || !r.data || typeof r.data.temp !== 'number') {
+      big.textContent = '–';
+      sub.textContent = '';
+      rng.textContent = '';
+      ago.textContent = '기온을 가져오지 못했습니다 — 새로고침을 눌러 다시 시도하세요';
+      return;
+    }
+    const w = r.data;
+    const f1 = (n) => (typeof n === 'number' && isFinite(n)) ? n.toFixed(1) : null;
+    big.textContent = w.temp.toFixed(1);
+    sub.textContent = [f1(w.feels) != null ? '체감 ' + f1(w.feels) + '℃' : '',
+                       (typeof w.humidity === 'number') ? '습도 ' + Math.round(w.humidity) + '%' : '',
+                       f1(w.wind) != null ? '바람 ' + f1(w.wind) + 'm/s' : ''].filter(Boolean).join(' · ');
+    rng.textContent = (f1(w.tmax) != null && f1(w.tmin) != null) ? ('오늘 최고 ' + f1(w.tmax) + '℃ · 최저 ' + f1(w.tmin) + '℃') : '';
+    ago.textContent = Weather.ago(r.at) + (r.stale ? ' 기준(오프라인)' : '') + ' · ' + (r.name || '');
+  }
+  async function renderTemp(force) {
+    const my = ++tempSeq;
+    if (!$('#prop-temp-val')) return;
+    if (force) $('#prop-temp-ago').textContent = '기온 불러오는 중…';
+    else if ($('#prop-temp-val').textContent === '–') {      // 처음 열 땐 마지막 값을 먼저 보여 준다(GPS·네트워크를 기다리는 몇 초 동안 빈 판이 안 되게)
+      const c = Weather.cached();
+      if (c) paintTemp({ data: c.data, at: c.at, name: c.name, stale: false });
+    }
+    let r = null;
+    try { r = await Weather.get(!!force); } catch (e) { console.warn(e); }
+    if (my !== tempSeq) return;
+    paintTemp(r);
+  }
+  const calcShown = () => U.mode() === 'prop' && !$('#view-calc').classList.contains('hidden');
+
+  /* ---------------- 바인딩 ---------------- */
+  function init() {
+    $('#prop-back').addEventListener('click', close);
+    $('#prop-delete').addEventListener('click', removeRec);
+    $('#prop-save').addEventListener('click', () => { if (rec) save(false); });
+    $('#prop-dong').addEventListener('click', pickDong);
+    $('#prop-sup').addEventListener('click', pickSup);
+    $('#prop-add-test').addEventListener('click', addTest);
+    $('#prop-day').addEventListener('change', () => { if (rec) { markDirty(); renderSup(); } });   // 날짜가 바뀌면 감리의 휴무 빨강도 그 날짜 기준으로 다시
+    ['#prop-place', '#prop-vendor', '#prop-memo'].forEach((s) => { $(s).addEventListener('input', () => { if (rec) markDirty(); }); });
+    // 규격 — KS 다이얼(편집기와 같은 시트). 포커스를 빼야 Esc(뒤로가기)가 시트를 닫는다
+    const mx = $('#prop-mix');
+    mx.classList.add('dial-in');
+    const openMix = () => { mx.blur(); if (global.TaskUI && TaskUI.openMixDial) TaskUI.openMixDial(mx, () => { if (rec) markDirty(); }); };
+    mx.addEventListener('click', openMix);
+    mx.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openMix(); } });
+    // 웹 파일 입력(네이티브 카메라가 없을 때만)
+    ['#prop-file-shoot', '#prop-file-pick'].forEach((s) => {
+      $(s).addEventListener('change', (e) => {
+        const files = Array.prototype.slice.call(e.target.files || []);
+        e.target.value = '';
+        const r = filePending; filePending = null;
+        if (r) r(files);
+      });
+    });
+    // 이탈 안전망 — 가려지는 순간 무음 저장(최선 노력)
+    const flush = () => { if (rec && dirty) { collect(); if (hasSubstance()) save(true); } };
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
+    window.addEventListener('pagehide', flush);
+
+    // 홈(물성 모드)
+    const add = $('#prop-add'); if (add) add.addEventListener('click', () => open(null, U.dayKey(Home._base ? Home._base().getTime() : Date.now())));
+    const sc = $('#prop-scan'); if (sc) sc.addEventListener('click', scan);
+    const pl = $('#prop-plan'); if (pl) pl.addEventListener('click', () => { const hp = $('#home-plan'); if (hp) hp.click(); });
+    // 계산 탭(물성 모드) — 외기온도판
+    const rf = $('#prop-temp-refresh'); if (rf) rf.addEventListener('click', () => renderTemp(true));
+    const ts = $('#prop-temp-scan'); if (ts) ts.addEventListener('click', scan);
+    const tabs = $('#tabbar');
+    if (tabs) tabs.addEventListener('click', (e) => {      // 계산 탭을 (다시) 누를 때마다 기온을 새로 확인
+      const b = e.target.closest('.tab');
+      if (b && b.dataset.tab === 'calc' && U.mode() === 'prop') renderTemp(false);
+    });
+    const vc = $('#view-calc');                            // 어느 경로로 계산 탭이 열리든(Nav.go) 판이 비어 있지 않게
+    if (vc && global.MutationObserver) {
+      let wasHidden = vc.classList.contains('hidden');
+      new MutationObserver(() => {
+        const h = vc.classList.contains('hidden');
+        if (wasHidden && !h && U.mode() === 'prop') renderTemp(false);
+        wasHidden = h;
+      }).observe(vc, { attributes: true, attributeFilter: ['class'] });
+    }
+    setInterval(() => { if (calcShown() && document.visibilityState === 'visible') renderTemp(false); }, 30000);   // 보고 있는 동안 「n분 전」·30분 지난 캐시를 따라간다
+  }
+
+  global.Prop = {
+    init: init, open: open, openNew: (day) => open(null, day), scan: scan, close: close, isOpen: isOpen,
+    renderHomeList: renderHomeList, renderTasksTab: renderTasksTab, renderTemp: renderTemp,
+    send: send, exportZip: exportZip,
+    hasSelection: () => Object.keys(sel).length > 0,
+    isBusy: () => scanBusy,
+    testDone: testDone, isDone: isDoneRec,
+    _t: {
+      VALS: VALS, PROMPT: PROMPT, panelValues: panelValues, numTok: numTok, avgCl: avgCl, rowCells: rowCells, rowTsv: rowTsv,
+      valuesHtml: valuesHtml, groupsOf: groupsOf, pickTestSlot: pickTestSlot, pickRecord: pickRecord, nextRound: nextRound, ocrPanel: ocrPanel,
+      finishScan: finishScan, zipTitle: zipTitle
+    }
+  };
+})(window);
+
+;
 /* ===== js/home.js ===== */
 /* ============ home.js — 메인(홈) 화면 ============
    하루의 출발점.
@@ -12416,6 +15059,7 @@
 
     // 오늘이 아니면 시계·근무시간은 의미가 없다
     U.$('#clock-wrap').classList.toggle('hidden', !isToday());
+    if (global.Leave) Leave.renderHome(U.dayKey(base.getTime()));
   }
 
   function goDay(delta) {
@@ -12800,6 +15444,10 @@
   let taskSeq = 0;      // 낡은 조회가 최신 목록을 덮지 않게 (작업 탭 load 와 같은 가드)
 
   async function renderTasks() {
+    if (U.mode() === 'prop' && global.Prop) {      // 물성 모드 — 그날 물성시험 목록은 Prop 이 자기 카드(#home-prop)에 그린다
+      Prop.renderHomeList(U.dayKey(base.getTime()), isToday() ? '오늘' : Spec.shortDate(base));
+      return;
+    }
     const my = ++taskSeq;
     const list = U.$('#task-list');
     const day = U.dayKey(base.getTime());
@@ -12852,6 +15500,7 @@
         lastHead = head;
         const h = U.el('div', 'grp-head' + (done ? ' done' : ''));
         h.appendChild(U.el('span', '', done ? '완료' : (t.supervisor || '감리 미지정')));
+        if (global.Leave && !done && t.supervisor) Leave.decorate(h.lastChild, t.supervisor, day);
         list.appendChild(h);
       }
 
@@ -12864,6 +15513,7 @@
       // 동수와 담당 감리는 한 줄에 같이 간다(사용자 지시) — 짝으로 봐야 뜻이 있다
       const title = U.el('div', 'task-part', Task.dongOf(t) || '동 미지정');
       if (t.supervisor) title.appendChild(U.el('span', 'row-sup', t.supervisor));
+      if (global.Leave && t.supervisor) Leave.decorate(title.lastChild, t.supervisor, day);
       if (t.photoMark) title.appendChild(U.el('span', 'photo-mark', '사진'));   // 표시 전용 배지
       // 28일은 수중·봉함 중 남은 칸을 이름으로 알린다
       const note = Task.doneNote(t);
@@ -12901,6 +15551,7 @@
       const body = U.el('div', 'task-body');
       const title = U.el('div', 'task-part', Bangtong.placeOf(b));
       if (b.supervisor) title.appendChild(U.el('span', 'row-sup', b.supervisor));
+      if (global.Leave && b.supervisor) Leave.decorate(title.lastChild, b.supervisor, b.day);
       body.appendChild(title);
       const r = Bangtong.statsOf(b);
       const meta = [];
@@ -12918,7 +15569,7 @@
 
   /* ---------------- 모드(공시체·방통·물성) ----------------
      홈 상단 세그먼트. 모드는 U.mode() 하나로, 홈 목록·작업탭·계산기 계수·제목이 따라간다(사용자 지시 2026-09-17).
-     물성은 아직 빈 화면 — 작업 카드 대신 「준비 중」 카드, 계산·작업 탭도 같은 카드(CSS .propmode). */
+     물성(2026-10-15): 작업 카드 대신 물성시험 카드(#home-prop), 계산 탭은 외기온도판, 작업 탭은 그날 물성시험 목록(CSS .propmode, prop.js). */
   function syncMode() {
     const m = U.mode();
     const seg = U.$('#home-mode');
@@ -12936,9 +15587,8 @@
     if (co) co.classList.toggle('hidden', !ocrOk);
     ['#view-calc', '#view-tasks'].forEach((id) => { const v = U.$(id); if (v) v.classList.toggle('propmode', prop); });
     const cp = U.$('#calc-prop'); if (cp) cp.classList.toggle('hidden', !prop);
-    const tp = U.$('#tasks-prop'); if (tp) tp.classList.toggle('hidden', !prop);
-    const ct = U.$('#calc-title'); if (ct) ct.textContent = (m === 'bang') ? '큐브몰드 압축강도' : '공시체 압축강도';
-    const tt = U.$('#tasks-title'); if (tt) tt.textContent = (m === 'bang') ? '방통 · 작업' : '작업';
+    const ct = U.$('#calc-title'); if (ct) ct.textContent = (m === 'bang') ? '큐브몰드 압축강도' : (prop ? '외기 온도' : '공시체 압축강도');
+    const tt = U.$('#tasks-title'); if (tt) tt.textContent = (m === 'bang') ? '방통 · 작업' : (prop ? '물성 · 작업' : '작업');
     const add = U.$('#task-add');
     if (add && add.lastChild && add.lastChild.nodeType === 3) add.lastChild.textContent = (m === 'bang') ? '추가' : '작업 추가';
   }
@@ -13016,7 +15666,7 @@
       if (Date.now() - bakLast() < 7 * 24 * 3600 * 1000) return;
       const today = U.dayKey(Date.now());
       if (localStorage.getItem(K_BAKNAG) === today) return;
-      Store.taskCount().then((n) => {
+      Store.recordCount().then((n) => {     // 작업만 세면 물성(·방통)만 쓰는 기기는 알림을 영영 못 받는다
         if (!n) return;
         try { localStorage.setItem(K_BAKNAG, today); } catch (e) {}
         U.toast('백업을 내보낸 지 일주일이 넘었습니다', 8000,
@@ -13117,6 +15767,7 @@
       if (lightboxCloser) lightboxCloser(); else U.$('#lightbox').classList.add('hidden');
       return true;
     }
+    if (global.Prop && Prop.isOpen()) { Prop.close(); return true; }   // 물성 편집기 — 사진 크게 보기(라이트박스)가 위에 떠 있으면 그것부터 닫히도록 라이트박스 뒤에
     if (Nav.isPlanOpen()) { Nav.showPlan(false); return true; }   // 대기 목록은 저장돼 있어 그냥 닫는다
     if (Nav.isAuditOpen()) { AuditUI.close(); return true; }
     if (Nav.isAIOpen()) { AIUI.close(); return true; }
@@ -13192,8 +15843,10 @@
     AIUI.init();
     AuditUI.init();
     OCRUI.init();
+    if (global.Leave) Leave.init();
     if (global.Sync) Sync.init();     // 관리자 서버 백업 (beta)
     if (global.Bangtong) Bangtong.init();
+    if (global.Prop) Prop.init();
     Home.init();
     Nav.go('home');
     // 네이티브 스플래시 → 부팅 화면 → 앱. 색이 같아 이음매가 안 보인다.
@@ -13219,9 +15872,10 @@
     // 데이터 안전판 — 부팅이 자리 잡은 뒤에(1.5초) 하루 한 번 작업 메타를 백업한다.
     // DB 는 비었는데 백업이 남아 있으면(증발 사고) 그냥 덮지 말고 복원을 권한다.
     setTimeout(() => {
-      Store.taskCount().then(async (n) => {
+      Store.recordCount().then(async (n) => {
         // 백업들 중 '가장 큰' 것과 견줘, DB 가 비었거나 절반 밑으로 확 줄었으면 복원을 권한다.
         // (2026-09-22 실사고: 웹뷰 초기화 뒤 부분복원으로 429 → 16 이 됐는데 예전엔 빈 경우만 제안해 놓쳤다)
+        // n 은 bakN 과 같은 단위(작업+방통+물성) — 작업만 세면 물성만 쓰는 기기가 매 부팅 가짜 복원 제안을 본다(감사 2026-10-15)
         const maintain = () => {
           Store.backupDaily();
           Store.backupToFileDaily();
@@ -13243,9 +15897,10 @@
           if (Nav.isTaskOpen() || Nav.isAIOpen() || Nav.isAuditOpen() || Nav.isSupOpen()) return;
           if (global.Powder && Powder.isOpen()) return;
           if (global.Bangtong && Bangtong.isOpen()) return;
+          if (global.Prop && Prop.isOpen()) return;
           if (!U.$('#lightbox').classList.contains('hidden')) return;
           U.confirmSheet(
-            (n === 0 ? '저장된 작업이 하나도 없는데\n' : ('지금 작업이 ' + n + '건뿐인데\n')) +
+            (n === 0 ? '저장된 기록이 하나도 없는데\n' : ('지금 기록이 ' + n + '건뿐인데\n')) +
             U.dayLabel(bak.at) + ' 백업(' + bakN + '건)이 있습니다\n' +
             '복원할까요? (파일로 남은 사진은 함께 살립니다)', '복원',
             async () => {
@@ -13253,7 +15908,7 @@
               U.toast('복원 중…', 120000);
               try {
                 const k = await Store.restoreBackup(bak);
-                U.toast('작업 ' + k + '건을 복원했습니다 — 사진 미리보기는 이어서 채워집니다', 3500);
+                U.toast('기록 ' + (k + (bak.bangs || []).length) + '건을 복원했습니다 — 사진 미리보기는 이어서 채워집니다', 3500);
               } catch (e) { console.error(e); U.toast('복원하지 못했습니다'); }
               try { Home.refresh(); } catch (e) {}
               Store.migratePhotosToFiles().then((m) => { if (m) console.log('[사진 파일 이전]', m + '장'); });
