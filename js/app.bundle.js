@@ -6210,8 +6210,9 @@
 
   /* ---------- 내보내기 묶음 ----------
      카톡은 감리에게 보낸다 → **감리별로 묶는다.**
-     한 감리 안에서도 동·분류가 다르면 따로 보낸다.
-     문구는 "201동 9/12 타설 수직입니다" / "204동 10/10 시험 28일강도입니다" 형식(수중은 28일강도로 쓴다). */
+     한 감리 안에서도 동·분류·보고 날짜가 다르면 따로 보낸다(예전 그대로 — 2026-10-16 사용자 선택).
+     문구는 「수직강도시험분입니다」 / 「28일강도시험분입니다」 형식(2026-10-16 사용자 지시 — 문구에서만 동·날짜 뺌).
+     날짜별 축은 「9/12 타설 수직」 / 「10/10 시험 28일강도」(dayGroup). */
 
   /* 카톡에 쓸 동 표기. 연락처의 동은 "215동(특화동)" · "305동, 214동B" 처럼
      지저분한 것이 섞여 있어 앞의 「숫자+동」만 뽑는다. 없으면 적힌 그대로.
@@ -6317,26 +6318,21 @@
     return !!s && s.key === 'seal';
   }
 
-  /* 카톡에 붙일 한 줄: "201동 9/12 타설 수직입니다" · 감리축으로 안 보내는 것은 빈 문자열
-     28일은 수중 칸만 나가고 문구는 "201동 10/10 시험 28일강도입니다".
-     날짜(보고 날짜 + 타설/시험 낱말)는 동 뒤에 붙는다 — 보고 날짜가 없으면 예전 꼴 "201동 수직입니다". */
+  /* 감리별 카톡에 붙일 한 줄(2026-10-16 사용자 지시): 「수직강도시험분입니다」 — **동·날짜는 안 쓴다**(받는 감리는 사진으로 안다).
+     28일은 수중 칸만 나가고 「28일강도시험분입니다」(구버전 water 도 같다), 큐브몰드는 「큐브몰드강도시험분입니다」.
+     감리축으로 안 보내는 것(봉함 칸·구버전 봉함)은 빈 문자열. 날짜별 문구(「9/12 타설 수직」)는 dayGroup 이 따로 만든다. */
   function exportLabel(t, subKey) {
     const s = Spec.byKey(t && t.specKey);
     if (!s) return '';
-    const tag = dayTag(t, subKey);
-    const when = tag ? tag + ' ' : '';
-    if (hasSubs(t)) {
-      if (subKey === 'seal') return '';
-      const d0 = dongOf(t);
-      return (d0 ? d0 + ' ' : '') + when + '28일강도입니다';
-    }
+    if (hasSubs(t)) return (subKey === 'seal') ? '' : '28일강도시험분입니다';
     if (supAxisOff(t)) return '';
-    const name = (s.key === 'water') ? '28일강도' : s.name;
-    const d = dongOf(t);
-    return (d ? d + ' ' : '') + when + name + '입니다';
+    return ((s.key === 'water') ? '28일' : s.name) + '강도시험분입니다';
   }
 
-  /* 키에 보고 날짜가 들어간다 — 같은 감리·동·분류라도 날짜가 다르면 문구가 달라지므로 한 묶음으로 섞이면 안 된다 */
+  /* 감리축 묶음 키 = 감리 · 동 · 문구(분류) · 보고 날짜 — **묶기는 예전 그대로 동·날짜마다 따로**(2026-10-16 사용자 선택:
+     「동마다 따로(예전처럼)」 — 문구만 동·날짜를 뺐다). 그래서 같은 감리에게 같은 문구가 여러 번 갈 수 있고,
+     어느 동·날짜 묶음인지는 전송 시트의 작은 글씨 「감리 · 9/12 타설 · 201동 · 1건」으로 구별한다.
+     문구로 묶으니 28일(수중 칸)과 구버전 수중도 같은 동·날짜면 한 묶음이다 */
   function exportGroup(t, subKey) {
     const s = Spec.byKey(t.specKey);
     if (!s) return null;
@@ -6345,11 +6341,11 @@
     const label = exportLabel(t, subKey);
     if (!label) return null;
     const sup = (t.supervisor || '').trim();
-    const d = dongOf(t);
+    const dong = dongOf(t);
     const day = reportDayOf(t);
     return {
-      key: sup + '|' + d + '|' + s.key + '|' + (subKey || '') + '|' + day,
-      sup: sup, dong: d, day: day,
+      key: sup + '|' + dong + '|' + label + '|' + day,
+      sup: sup, dong: dong, day: day,
       label: label
     };
   }
@@ -6408,7 +6404,9 @@
           order.push(g.key);
         }
         const box = map[g.key];
-        if (box.items.indexOf(pc.t) < 0) box.items.push(pc.t);
+        // 묶음 구성원 = **사진을 실제로 내는** 작업만. 같은 묶음 키의 사진 0장 작업(같은 감리·동·분류·날짜, 날짜별은 같은 날·분류)이
+        // 「보낸 N건」·사진 체크(photoMark)·시트의 건수·동 목록에 끼던 것을 막는다(감사 2026-10-16). 사진 0장 묶음은 어차피 photos>0 으로 걸러진다
+        if (pc.photos.length && box.items.indexOf(pc.t) < 0) box.items.push(pc.t);
         pc.photos.forEach((id) => {
           if (box.photoIds.indexOf(id) < 0) {
             box.photoIds.push(id);
@@ -6424,7 +6422,7 @@
     });
   }
 
-  /* 감리축 — 감리·동·분류·보고 날짜가 같은 것끼리. 예 "201동 9/12 타설 수직입니다"
+  /* 감리축 — 감리·동·분류·보고 날짜가 같은 것끼리. 문구는 「수직강도시험분입니다」(동·날짜 없음)
      같은 감리·동 안에서는 날짜순(라벨 글자순이면 「10/10」이 「9/12」보다 앞서 버린다) */
   function groupForExport(tasks) {
     return groupBy(tasks, exportGroup).sort((a, b) =>
@@ -6432,6 +6430,13 @@
       (a.dong || '').localeCompare(b.dong || '', 'ko') ||
       (a.day || '').localeCompare(b.day || '') ||
       a.label.localeCompare(b.label, 'ko'));
+  }
+
+  /* 묶음에 든 동들(중복 없이, 들어온 순서) — 감리별 문구에 동이 없어서 전송 시트 작은 글씨로 보여 준다 */
+  function dongsOf(items) {
+    const seen = Object.create(null), out = [];
+    (items || []).forEach((t) => { const d = dongOf(t); if (d && !seen[d]) { seen[d] = 1; out.push(d); } });
+    return out;
   }
 
   /* 날짜축 — 예전부터 쓰던 방식. 둘 다 남긴다(사용자 지시: 투트랙). */
@@ -6451,7 +6456,7 @@
     LOT_M3: LOT_M3, PROP_M3: PROP_M3, vendorSets: vendorSets, lotSets: lotSets, vendorParts: vendorParts, lotParts: lotParts, propTests: propTests, parseVendors: parseVendors, sumQty: sumQty,
     looseKey: looseKey, partKey: partKey, partsAlike: partsAlike,
     actualAge: actualAge, label: label, summary: summary,
-    autoReportDay: autoReportDay, reportDayOf: reportDayOf, dayWord: dayWord, exportLabel: exportLabel,
+    autoReportDay: autoReportDay, reportDayOf: reportDayOf, dayWord: dayWord, dayTag: dayTag, dongsOf: dongsOf, exportLabel: exportLabel,
     wmText: wmText,
     supAxisOff: supAxisOff,
     batchKey: batchKey, batchKeyBang: batchKeyBang, dongKeyOf: dongKeyOf, defaultSup: defaultSup,
@@ -7934,7 +7939,8 @@
     let copied = false;
     if (copyText) { try { copied = await U.copyText(g.label); } catch (e) {} }
 
-    const base = U.safeName(g.label, '공시체').replace(/\//g, '-');
+    // 공유 사본 파일 이름 — 감리별 문구엔 동·날짜가 없어 문구만 쓰면 묶음끼리 이름(=네이티브 캐시 경로)이 겹친다(감사 2026-10-16). 감리·동·날짜를 붙여 가른다
+    const base = U.safeName([g.label, g.sup, g.dong, g.day].filter(Boolean).join(' '), '공시체').replace(/\//g, '-');
     let how = 'download';
     try {
       how = await Share.exportItems({
@@ -8519,7 +8525,8 @@
 
   /* 내보내기 두 갈래 — 묶는 축만 다르고 보내는 방식은 같다.
        byDay : 같은 날 같은 분류끼리   → "7/22 타설 필러"
-       bySup : 감리·동·분류·날짜가 같은 것 → "201동 7/22 타설 수직입니다" */
+       bySup : 감리·동·분류·날짜가 같은 것 → "수직강도시험분입니다" — 문구에 동·날짜가 없어서(사용자 지시)
+               같은 문구 묶음이 여럿일 수 있고, 시트 작은 글씨 「감리 · 7/22 타설 · 201동 · 1건」으로 구별한다 */
   function askSend(axis) {
     if (propMode()) { Prop.send(axis); return; }
     const rows = selected();
@@ -8529,7 +8536,7 @@
       .filter((g) => g.photos > 0);
     if (!groups.length) {
       // 봉함은 감리축으로 안 보낸다 — 사진이 없는 것과 구별해 알린다
-      if (bySup && rows.every(Task.supAxisOff)) {
+      if (bySup && rows.every((t) => Task.supAxisOff(t))) {   // every 의 인덱스가 subKey 로 새면 2건부터 늘 거짓이 된다
         U.toast('봉함은 감리별로 보내지 않습니다\n날짜별로 보내세요', 3500);
       } else {
         U.toast('선택한 작업에 사진이 없습니다');
@@ -8547,22 +8554,29 @@
     items.push({ sep: true });
     groups.forEach((g) => {
       const over = g.photos > WARN_PHOTOS;
-      const who = bySup ? (g.sup || '감리 미지정') : (g.items.length + '건');
+      const tags = [];
+      g.items.forEach((t) => { const x = Task.dayTag(t, g.subKey); if (x && tags.indexOf(x) < 0) tags.push(x); });
+      const who = bySup
+        ? [g.sup || '감리 미지정', tags.join(', '), Task.dongsOf(g.items).join(', '), g.items.length + '건'].filter(Boolean).join(' · ')
+        : (g.items.length + '건');
       items.push({
         label: g.label + ' · 사진 ' + g.photos + '장',
         cls: over ? 'danger' : 'strong',
-        sub: who + (bySup ? (' · ' + g.items.length + '건') : '') +
+        sub: who +
              (over ? ' · 카카오톡은 보통 한 번에 30장까지입니다'
                    : ' · 보낸 뒤 문구 붙여넣기'),
         onPick: () => sendGroup(g, true, axis)
       });
     });
     items.push({ sep: true });
+    // 감리별은 문구가 분류뿐이라 여러 묶음이 같은 문구다 — 이름 목록은 한 번씩만
+    const names = [];
+    groups.forEach((g) => { if (names.indexOf(g.label) < 0) names.push(g.label); });
     items.push({
       label: '묶음 이름만 복사',
-      sub: groups.map((g) => g.label).join(' · '),
+      sub: names.join(' · '),
       onPick: () => {
-        U.copyText(groups.map((g) => g.label).join('\n'))
+        U.copyText(names.join('\n'))
           .then((o) => U.toast(o ? '복사했습니다' : '복사에 실패했습니다'));
       }
     });
@@ -9510,7 +9524,7 @@
 
   /* ---------------- 동수 ----------------
      동을 고르면 그 동 담당 감리가 따라온다(한 동에 둘이면 고르게 한다).
-     동수는 목록 제목이자 카톡 문구("201동 9/12 타설 수직입니다")의 주어다. */
+     동수는 목록 제목이자 사진 도장·파일 이름의 주어다(감리별 카톡 문구 「수직강도시험분입니다」엔 동을 안 쓴다 — 2026-10-16). */
   function renderDong() {
     const el = $('#tk-dong-name');
     if (!el || !tk) return;
@@ -11122,9 +11136,9 @@
     '[카카오톡 내보내기 규칙]',
     '- 수직·수평·필러: 같은 날 "타설"한 것을 감리 무관하게 한 번에. 표기는 "7/22 타설 필러" 형식(날짜 뒤에 타설/시험을 적는다).',
     '- 수중·봉함: 같은 날 "시험"한 것을 한 번에. 수중은 텍스트를 "28일강도"로 쓴다(예 "8/1 시험 28일강도").',
-    '- 감리별로 보낼 땐 동·날짜가 앞에 붙는다(예 "201동 7/22 타설 수직입니다", "203동 8/1 시험 28일강도입니다").',
+    '- 감리별로 보낼 땐 문구에 동·날짜를 안 쓰고 분류만 쓴다(예 "수직강도시험분입니다", "28일강도시험분입니다"). 묶음은 감리·동·분류·날짜마다 따로라 같은 문구가 동마다 한 번씩 간다.',
     '- 사진을 먼저 보내고 대화창에 제목을 붙여넣는 방식이다.',
-    '- 아래 [지금 앱 상태]의 각 작업에 「카톡표기」가 이미 규칙대로 계산돼 있다.',
+    '- 아래 [지금 앱 상태]의 각 작업에 「카톡표기」(감리별·날짜별)가 이미 규칙대로 계산돼 있다.',
     '  카톡 문구를 물으면 그 값을 그대로 쓰고 날짜를 되묻지 마라.',
     '',
     '[압축강도 시험 절차 일반]',
@@ -11198,13 +11212,15 @@
         bits.push(tasks.slice(0, 8).map((t) => {
           const p = [];
           const pb = Task.placeBrief(t);
-          p.push('- ' + Task.label(t) + (pb ? (' ' + pb) : '') + (t.part ? (' ' + t.part) : ''));   // 부위 → 메모
+          const dg = Task.dongOf(t);   // 동은 이 머리에만 있다 — 감리별 카톡표기엔 동이 없다(2026-10-16), placeBrief 는 동 접두를 걷는다
+          p.push('- ' + (dg ? dg + ' ' : '') + Task.label(t) + (pb ? (' ' + pb) : '') + (t.part ? (' ' + t.part) : ''));   // 동 → 분류 → 부위 → 메모
           if (t.castDay) p.push('타설 ' + Spec.md(t.castDay));
           const test = Task.testDayOf(t);
           if (test) p.push('시험 ' + Spec.md(test));
           if (t.supervisor) p.push('감리 ' + t.supervisor);
-          const lab = Task.exportLabel(t);
-          if (lab) p.push('카톡표기 "' + lab + '"');
+          const lab = Task.exportLabel(t);                                               // 감리별 「수직강도시험분입니다」(봉함은 감리축 제외 → '')
+          const dayLab = Task.groupByDay([t]).map((g) => g.label).filter(Boolean).join(', ');   // 날짜별 「9/12 타설 수직」(28일은 수중·봉함 둘)
+          if (lab || dayLab) p.push('카톡표기 감리별 "' + (lab || '보내지 않음') + '" / 날짜별 "' + dayLab + '"');
           const brief = Task.setsBrief(t);
           if (brief) p.push(brief);
           p.push((t.photos || []).length + '장');
@@ -13577,7 +13593,8 @@
   const sortRows = (rows) => rows.slice().sort((a, b) =>
     (a.supervisor || '￿').localeCompare(b.supervisor || '￿', 'ko') || (a.order - b.order) || (a.createdAt - b.createdAt));
 
-  /* 카톡 묶음 — 날짜별 「10/14 물성시험」 / 감리별 「204동 10/14 물성시험입니다」(감리·동이 같은 것끼리, 공시체 exportGroup 과 같은 규칙).
+  /* 카톡 묶음 — 날짜별 「10/14 물성시험」 / 감리별 「물성시험분입니다」(2026-10-16 사용자 지시 — 감리별 문구는 동·날짜를 뺀다).
+     감리별 묶기는 예전 그대로 감리·동·날짜마다(공시체 exportGroup 과 같은 규칙), 어느 묶음인지는 전송 시트 작은 글씨로.
      사진은 시험 순서대로 평탄화한 photos 를 쓴다 */
   function groupsOf(rows, axis) {
     const map = Object.create(null), order = [];
@@ -13587,20 +13604,21 @@
       if (axis === 'sup') {
         sup = (r.supervisor || '').trim();
         dong = Task.dongOf(r);
-        key = sup + '|' + dong + '|' + day;
-        label = (dong ? dong + ' ' : '') + (day ? Spec.md(day) + ' ' : '') + '물성시험입니다';
+        key = sup + '|' + dong + '|' + day;     // 묶기는 예전 그대로 감리·동·날짜마다(2026-10-16 사용자 선택 — 문구에서만 동·날짜를 뺐다)
+        label = '물성시험분입니다';
       } else {
         key = day;
         label = (day ? Spec.md(day) + ' ' : '') + '물성시험';
       }
       if (!map[key]) { map[key] = { key: key, label: label, sup: sup, dong: dong, day: day, items: [], photoIds: [] }; order.push(key); }
       const g = map[key];
-      g.items.push(r);
-      (r.photos || []).forEach((id) => { if (id && g.photoIds.indexOf(id) < 0) g.photoIds.push(id); });
+      const ids = (r.photos || []).filter(Boolean);
+      if (ids.length) g.items.push(r);       // 구성원 = 사진을 실제로 내는 레코드만(시트의 동 목록·건수가 안 보내는 레코드를 세지 않게)
+      ids.forEach((id) => { if (g.photoIds.indexOf(id) < 0) g.photoIds.push(id); });
     });
     const out = order.map((k) => { const g = map[k]; g.photos = g.photoIds.length; return g; });
     return out.sort(axis === 'sup'
-      ? (a, b) => (a.sup || '￿').localeCompare(b.sup || '￿', 'ko') || (a.dong || '').localeCompare(b.dong || '', 'ko') || a.label.localeCompare(b.label, 'ko')
+      ? (a, b) => (a.sup || '￿').localeCompare(b.sup || '￿', 'ko') || (a.dong || '').localeCompare(b.dong || '', 'ko') || (a.day || '').localeCompare(b.day || '')
       : (a, b) => (a.day || '').localeCompare(b.day || ''));
   }
 
@@ -14774,18 +14792,23 @@
     const items = [];
     groups.forEach((g) => {
       const over = g.photos > WARN_PHOTOS;
-      const who = bySup ? (g.sup || '감리 미지정') : (g.items.length + '건');
+      // 감리별 문구엔 동·날짜가 없다(사용자 지시) — 같은 문구 묶음이 여럿일 수 있어 작은 글씨 「감리 · 10/14 · 204동 · 1건」으로 구별
+      const who = bySup
+        ? [g.sup || '감리 미지정', g.day ? Spec.md(g.day) : '', Task.dongsOf(g.items).join(', '), g.items.length + '건'].filter(Boolean).join(' · ')
+        : (g.items.length + '건');
       items.push({
         label: g.label + ' · 사진 ' + g.photos + '장',
         cls: over ? 'danger' : 'strong',
-        sub: who + (bySup ? (' · ' + g.items.length + '건') : '') + (over ? ' · 카카오톡은 보통 한 번에 30장까지입니다' : ' · 보낸 뒤 문구 붙여넣기'),
+        sub: who + (over ? ' · 카카오톡은 보통 한 번에 30장까지입니다' : ' · 보낸 뒤 문구 붙여넣기'),
         onPick: () => sendGroup(g)
       });
     });
     items.push({ sep: true });
+    const names = [];                        // 감리별은 문구가 모두 「물성시험분입니다」 — 이름 목록은 한 번씩만
+    groups.forEach((g) => { if (names.indexOf(g.label) < 0) names.push(g.label); });
     items.push({
-      label: '묶음 이름만 복사', sub: groups.map((g) => g.label).join(' · '),
-      onPick: () => { U.copyText(groups.map((g) => g.label).join('\n')).then((o) => U.toast(o ? '복사했습니다' : '복사에 실패했습니다')); }
+      label: '묶음 이름만 복사', sub: names.join(' · '),
+      onPick: () => { U.copyText(names.join('\n')).then((o) => U.toast(o ? '복사했습니다' : '복사에 실패했습니다')); }
     });
     U.sheet((bySup ? '감리별 ' : '날짜별 ') + groups.length + '건 — 하나씩 보내세요', items);
   }
@@ -14807,7 +14830,8 @@
     if (missing) U.toast(missing + '장은 불러오지 못해 빠집니다', 3000);
     let copied = false;
     try { copied = await U.copyText(g.label); } catch (e) {}
-    const base = U.safeName(g.label, '물성시험').replace(/\//g, '-');
+    // 공유 사본 파일 이름 — 감리별 문구가 모두 같아 문구만 쓰면 묶음끼리 이름(=네이티브 캐시 경로)이 겹친다(감사 2026-10-16). 감리·동·날짜를 붙여 가른다
+    const base = U.safeName([g.label, g.sup, g.dong, g.day].filter(Boolean).join(' '), '물성시험').replace(/\//g, '-');
     let how = 'download';
     try { how = await Share.exportItems({ blobs: blobs, text: g.label, title: g.label, baseName: base }); }
     catch (e) { console.error(e); U.toast('내보내기에 실패했습니다'); return; }
