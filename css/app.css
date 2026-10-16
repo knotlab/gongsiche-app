@@ -1290,6 +1290,7 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
   color:var(--text-2);font-size:15px;font-weight:700;
 }
 .bang-sup.set{color:var(--text);border-color:var(--accent)}
+.bang-sup-row .bang-sup{flex:1 1 auto;width:auto;min-width:0}     /* 감리 + 전화 버튼 한 줄(공시체 편집기 .sup-row 와 같은 모양) */
 .bang-memo{
   width:100%;min-height:var(--tap);padding:10px 14px;
   border:1px solid var(--line);border-radius:var(--r-md);
@@ -1651,8 +1652,45 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
 .prop-temp-btns .btn{flex:1 1 0;min-width:0;height:var(--tap)}
 .prop-temp-btns .btn-calc{width:auto;margin:0}
 
-/* 편집기 — 시험 카드(머리·사진 2칸·판넬 읽기·값 8칸) */
-.prop-test{padding:10px;margin-bottom:10px;border:1px solid var(--line);border-radius:var(--r);background:var(--surface)}
+/* 편집기 — 담당 감리 칸은 공시체 편집기와 같은 .sup-row/.sup-pick/.sup-call/.sup-where(전화 버튼은 번호가 있을 때만 보임) */
+#prop-sup-txt{font-size:15px;font-weight:700}
+#prop-sup-txt.ph{color:var(--text-2);font-weight:600}
+
+/* 편집기 — 시험 회차 아코디언(2026-10-16): 접힌 줄 .prop-sum(64px 안팎) + 펼친 본문 .prop-test-body, 한 번에 한 회차(.open).
+   접힌 회차의 본문도 DOM 에 있고 display 만 꺼진다 */
+.prop-shoot-btns{margin-bottom:6px}
+.prop-seq-hint{margin:0 0 10px;font-size:12px;font-weight:600;color:var(--text-2)}
+.prop-test{margin-bottom:8px;border:1px solid var(--line);border-radius:var(--r);background:var(--surface);overflow:hidden}
+.prop-test.open{margin-bottom:10px;border-color:var(--accent)}
+.prop-sum{display:flex;align-items:center;gap:6px;min-height:64px;padding:8px 8px 8px 12px;cursor:pointer;outline:none}
+.prop-sum:active{background:var(--surface-2)}
+.prop-sum:focus-visible{box-shadow:inset 0 0 0 2px var(--accent)}
+.prop-test.open .prop-sum{display:none}
+.prop-test-body{display:none;padding:10px}
+.prop-test.open .prop-test-body{display:block}
+.prop-sum-main{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px}
+.prop-sum-title{display:flex;align-items:center;gap:6px;min-width:0;font-size:16px;line-height:1.25}
+.prop-sum-round{flex:0 0 auto;font-weight:800}
+.prop-sum-vend{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:700;color:var(--text-2)}
+.prop-sum-ok{flex:0 0 auto;width:20px;height:20px;border-radius:7px;background:var(--accent);color:var(--on-accent);display:grid;place-items:center}
+.prop-sum-ok .ic{width:var(--ic-xs);height:var(--ic-xs);stroke-width:3}
+.prop-sum-vals{
+  font-size:12px;font-weight:600;line-height:1.3;color:var(--text-2);font-variant-numeric:tabular-nums;word-break:keep-all;
+  display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;
+}
+.prop-sum-vals.none{font-weight:400}   /* 값 없음은 알파가 아니라 굵기로 흐리게 — opacity 는 라이트에서 3.3:1 로 대비 기준(4.5:1)을 밑돌았다(2026-10-16 감사) */
+.prop-sum-ph{flex:0 0 auto;display:flex;gap:4px}
+.prop-sum-th{width:40px;height:40px;border-radius:8px;overflow:hidden;background:var(--surface-2);display:block}
+.prop-sum-th img{width:100%;height:100%;object-fit:cover;display:block}
+.prop-sum-th.empty{display:grid;place-items:center;border:1.5px dashed var(--line);background:transparent;font-size:11px;font-weight:700;color:var(--text-2)}
+.prop-sum-th.bad{display:grid;place-items:center;border:1.5px dashed var(--danger);background:transparent;color:var(--danger)}   /* 사진 레코드·원본 파일이 둘 다 없는 죽은 참조 */
+.prop-sum-th.bad .ic{width:var(--ic-sm);height:var(--ic-sm)}
+.prop-sum-read{flex:0 0 auto;min-height:var(--tap);padding:0 12px;border-radius:var(--r-md);background:var(--accent-soft);color:var(--accent);font-size:14px;font-weight:800}
+.prop-sum-read:active{filter:brightness(.95)}
+.prop-chev{flex:0 0 auto;width:var(--ic-sm);height:var(--ic-sm);color:var(--text-2);transform:rotate(-90deg)}   /* ic-back(왼쪽 꺾쇠)를 눕혀 아래 화살표 */
+.prop-fold{flex:0 0 auto;width:var(--tap);height:var(--tap);display:grid;place-items:center;border-radius:var(--r-md);color:var(--text-2)}
+.prop-fold:active{background:var(--surface-2)}
+.prop-fold .ic{width:var(--ic-sm);height:var(--ic-sm);transform:rotate(90deg)}   /* 위 화살표 = 접기 */
 .prop-test-head{display:flex;align-items:center;gap:6px;margin-bottom:8px}
 .prop-in{
   width:100%;min-width:0;min-height:var(--tap);padding:9px 11px;border-radius:var(--r-md);
@@ -1667,8 +1705,17 @@ body.manual-reg .key-enter:active{filter:brightness(.9)}
 .prop-test-del:active{background:var(--surface-2)}
 .prop-test-del .ic{width:var(--ic-md);height:var(--ic-md)}
 .prop-photos{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:8px}
-.prop-photos .photo-cell,.prop-ph-add{aspect-ratio:4/3}
-.prop-photos .photo-cell{cursor:pointer}
+.prop-photos.swap{grid-template-columns:1fr 52px 1fr;gap:6px}   /* 전경 · 순서 바꾸기 · 판넬 */
+.prop-photos-x{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:8px}   /* 3번째 이후 사진(옛 putSlot) */
+.prop-photos .photo-cell,.prop-photos-x .photo-cell,.prop-ph-add{aspect-ratio:4/3}
+.prop-photos .photo-cell,.prop-photos-x .photo-cell{cursor:pointer}
+.prop-swap{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;min-width:0;padding:4px 2px;
+  border-radius:var(--r-md);background:var(--surface-2);color:var(--text-2);
+  font-size:11px;font-weight:800;line-height:1.25;text-align:center;word-break:keep-all;
+}
+.prop-swap:active{filter:brightness(.93)}
+.prop-swap .ic{width:var(--ic-md);height:var(--ic-md)}
 .prop-ph-add{
   width:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
   border:2px dashed var(--line);border-radius:var(--r-md);background:var(--surface-2);color:var(--text-2);

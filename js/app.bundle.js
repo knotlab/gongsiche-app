@@ -252,6 +252,15 @@
   }
 
   /* ---- 클립보드 (WebView 폴백 포함) ---- */
+  /* 전화 걸기 — 누르면 바로 다이얼러(2026-10-16 사용자 지시 「번호 복사 없애고 누르면 바로 전화되게」 — 공시체 편집기·방통·물성 공통).
+     tel: 로 이동하면 안드로이드 웹뷰(Capacitor)·아이폰 사파리가 전화 앱을 번호가 찍힌 채로 연다. 숫자·+ 만 남긴다 */
+  function dial(phone) {
+    const n = String(phone || '').replace(/[^0-9+]/g, '');
+    if (!n) return false;
+    try { global.location.href = 'tel:' + n; return true; }
+    catch (e) { toast('전화 앱을 열지 못했습니다'); return false; }
+  }
+
   async function copyText(text) {
     try {
       if (navigator.clipboard && window.isSecureContext) {
@@ -543,7 +552,7 @@
     normQty: normQty,
     $: $, $$: $$, el: el, icon: icon,
     toast: toast, sheet: sheet, confirmSheet: confirmSheet, dialSheet: dialSheet, buzz: buzz,
-    copyText: copyText,
+    copyText: copyText, dial: dial,
     pad2: pad2, fix2: fix2,
     fmtBytes: fmtBytes,
     fmtDateTime: fmtDateTime, fmtDateShort: fmtDateShort, fmtTime: fmtTime,
@@ -1417,8 +1426,14 @@
      값은 **문자열**(판넬에 적힌 그대로 — 「0.010」 의 끝 0 을 보존), 빈 값은 ''. 숫자·점·앞 마이너스만 받는다.
      **photos 는 tests[].photos 를 순서대로 평탄화한 것**(+레코드 자체 photos 중 빠진 것)으로 매번 다시 계산한다 —
      gc·deleteTask·deleteRecord·refBangPhotos 가 photos 만 보므로, 이것만으로 시험 사진이 보호된다(그 네 곳은 안 건드린다).
-     시험의 photos 는 칸 위치(0=판넬, 1=전경)를 지키려고 빈 칸을 ''로 남길 수 있다(끝의 빈 칸만 잘라 낸다). */
+     시험의 photos 는 칸 위치를 지키려고 빈 칸을 ''로 남길 수 있다(끝의 빈 칸만 잘라 낸다).
+     **칸 뜻은 판 표식 pv 가 정한다(2026-10-16)**: pv 2 = 칸 0 전경 · 칸 1 판넬(공시체 「전경+판넬」과 같은 순서), pv 없음 = 옛 꼴(칸 0 판넬 · 칸 1 전경).
+     새 레코드(createdAt 없음)는 pv 2 로 찍고, 저장됐던 옛 레코드는 pv 없음 그대로 둔다 — 백업 복원으로 들어오는 옛 기록이 새 꼴로 잘못 찍혀 사진이 뒤바뀌어 보이면 안 된다.
+     읽는 쪽(propsOf·allProps·getBang)이 upgradeProp 으로 메모리에서 옛 꼴을 맞바꿔 올려 주고, 부팅 때 upgradeProps 가 DB 에도 한 번 반영한다. */
   const PROP_VALS = ['temp', 'slump', 'airApp', 'air', 'cl1', 'cl2', 'water', 'outTemp'];
+  const PROP_PV = 2;
+  // 판 표식이 새 꼴인가 — 숫자 2 뿐 아니라 문자열 「2」 도(JSON·외부 도구를 거치며 모양이 바뀌어도 옛 꼴로 오인해 한 번 더 맞바꿔 사진이 뒤바뀌는 일이 없게)
+  const isNewPv = (v) => Number(v) === PROP_PV;
   function propNum(v) {
     let s = String(v === null || v === undefined ? '' : v).trim().replace(/[^0-9.\-]/g, '');
     const neg = s.charAt(0) === '-';
@@ -1451,13 +1466,17 @@
     PROP_VALS.forEach((k) => { o[k] = propNum(t[k]); });
     return o;
   }
+  /* 레코드 photos = tests[].photos 를 순서대로 평탄화(중복 제외) + 레코드 자체 photos 중 빠진 것 — propRec·upgradeProp 이 같은 규칙을 쓴다 */
+  function propFlat(tests, extra) {
+    const seen = Object.create(null), photos = [];
+    const take = (id) => { const s = (id === null || id === undefined) ? '' : String(id); if (s && !seen[s]) { seen[s] = 1; photos.push(s); } };
+    tests.forEach((t) => ((t && t.photos) || []).forEach(take));
+    (Array.isArray(extra) ? extra : []).forEach(take);
+    return photos;
+  }
   function propRec(b, now) {
     const tests = (Array.isArray(b.tests) ? b.tests : []).map(propTest);
-    const seen = Object.create(null), photos = [];
-    const take = (id) => { if (id && !seen[id]) { seen[id] = 1; photos.push(id); } };
-    tests.forEach((t) => t.photos.forEach(take));
-    (Array.isArray(b.photos) ? b.photos : []).forEach((id) => take((id === null || id === undefined) ? '' : String(id)));
-    return {
+    const rec = {
       id: b.id || U.uid(),
       kind: 'prop',
       day: goodDay(b.day, U.dayKey(now)),
@@ -1472,11 +1491,30 @@
       memo: String(b.memo || '').trim().slice(0, 200),
       planId: String(b.planId || '').trim(),
       tests: tests,
-      photos: photos,
+      photos: propFlat(tests, b.photos),
       order: (typeof b.order === 'number') ? b.order : now,
       createdAt: b.createdAt || now,
       updatedAt: now
     };
+    // 판 표식 — 새 꼴(2)이 오거나 한 번도 저장된 적 없는 새 레코드(createdAt 없음)면 2. 저장됐던 옛 레코드는 표식 없음을 그대로 지킨다
+    if (isNewPv(b.pv) || !b.createdAt) rec.pv = PROP_PV;
+    return rec;
+  }
+  /* 옛 꼴(pv 없음) 물성 레코드 → 새 꼴: 시험마다 칸 0 ↔ 1 을 맞바꾸고(짧으면 '' 로 채워 길이 2, 끝의 빈 칸은 propSlots 규칙대로 자름) pv 2.
+     순수 함수 — 입력을 안 건드리고 사본을 돌려준다(이미 pv 2 이거나 물성이 아니면 그 객체 그대로). 사진 id 는 자리만 바뀔 뿐 하나도 안 잃는다.
+     3번째 칸 이후(옛 putSlot 이 뒤에 붙인 사진)는 제자리. 레코드 photos(평탄화)도 새 순서로 다시 계산 — 목록 썸네일·카톡 사진 순서가 따라온다 */
+  function upgradeProp(r) {
+    if (!r || r.kind !== 'prop' || isNewPv(r.pv)) return r;
+    const tests = (Array.isArray(r.tests) ? r.tests : []).map((t) => {
+      const o = Object.assign({}, t);
+      const p = Array.isArray(t && t.photos) ? t.photos.map((id) => (id === null || id === undefined) ? '' : String(id)) : [];
+      while (p.length < 2) p.push('');
+      const x = p[0]; p[0] = p[1]; p[1] = x;
+      while (p.length && !p[p.length - 1]) p.pop();
+      o.photos = p;
+      return o;
+    });
+    return Object.assign({}, r, { tests: tests, photos: propFlat(tests, r.photos), pv: PROP_PV });
   }
   const isProp = (b) => !!(b && b.kind === 'prop');
 
@@ -1516,16 +1554,37 @@
   function allBangs() {
     return run((db) => reqp(db.transaction('bangs').objectStore('bangs').getAll())).then((a) => (a || []).filter((b) => !isProp(b)));
   }
+  /* 물성을 읽는 길(propsOf·allProps·getBang)은 전부 upgradeProp 을 거친다 — 옛 꼴(pv 없음)도 새 칸 뜻(0 전경·1 판넬)으로 보인다.
+     사본을 저장하면 새 꼴로 남는다. DB 원본(raw getAll)을 직접 읽는 백업·미러·gc·washDead 는 사진 id 만 보거나 칸 자리를 그대로 지켜 영향이 없다 */
   function propsOf(day) {
     return run((db) => reqp(
       db.transaction('bangs').objectStore('bangs').index('byDay').getAll(IDBKeyRange.only(day))
-    )).then((arr) => (arr || []).filter(isProp).sort((a, b) => (a.order - b.order) || (a.createdAt - b.createdAt)));
+    )).then((arr) => (arr || []).filter(isProp).map((b) => upgradeProp(b)).sort((a, b) => (a.order - b.order) || (a.createdAt - b.createdAt)));
   }
   function allProps() {
-    return run((db) => reqp(db.transaction('bangs').objectStore('bangs').getAll())).then((a) => (a || []).filter(isProp));
+    return run((db) => reqp(db.transaction('bangs').objectStore('bangs').getAll())).then((a) => (a || []).filter(isProp).map((b) => upgradeProp(b)));
   }
   function getBang(id) {
-    return run((db) => reqp(db.transaction('bangs').objectStore('bangs').get(id)));
+    return run((db) => reqp(db.transaction('bangs').objectStore('bangs').get(id))).then((b) => upgradeProp(b));
+  }
+  /* 옛 꼴(pv 없음) 물성 레코드를 새 꼴로 DB 에 한 번 반영한다(부팅 때 Prop.init) — 멱등. 읽기·쓰기를 한 트랜잭션에 묶어
+     그 사이 편집기의 저장이 끼어들어 덮이는 일이 없게 한다. 실패해도 조용히(읽을 때 올리기가 어차피 새 꼴로 보여 준다). 반환 = 바꾼 건수 */
+  function upgradeProps() {
+    let n = 0;
+    return tx(['bangs'], 'readwrite', (t) => {
+      const os = t.objectStore('bangs');
+      const rq = os.getAll();
+      rq.onsuccess = () => {
+        const now = Date.now();
+        (rq.result || []).forEach((b) => {
+          if (!isProp(b) || isNewPv(b.pv)) return;
+          const up = propRec(upgradeProp(b), now);
+          up.updatedAt = b.updatedAt || up.updatedAt;   // 칸 순서만 옮기는 이관은 편집이 아니다 — 편집 시각을 지켜야 복원(LWW)이 이 기록보다 늦게 고친 백업본을 건너뛰지 않는다
+          os.put(up);
+          n++;
+        });
+      };
+    }).then(() => { if (n) mirrorSoon(); return n; }, (e) => { console.warn('[upgradeProps]', e); return 0; });
   }
   /* 삭제 — 다른 데(작업·기록·다른 방통)서 안 쓰는 사진만 지운다. 읽기·삭제 한 트랜잭션(TOCTOU 차단). */
   function deleteBang(id) {
@@ -1893,7 +1952,7 @@
     putTask: putTask, tasksOf: tasksOf, getTask: getTask, deleteTask: deleteTask,
     allTasks: allTasks,
     putBang: putBang, bangsOf: bangsOf, allBangs: allBangs, getBang: getBang, deleteBang: deleteBang,
-    propsOf: propsOf, allProps: allProps,
+    propsOf: propsOf, allProps: allProps, upgradeProps: upgradeProps,
     normalizeSets: normalizeSets,
     taskCount: taskCount, recordCount: recordCount, backupInfo: backupInfo, backupNow: backupNow, fullSnapshot: fullSnapshot,
     backupDaily: backupDaily, restoreBackup: restoreBackup,
@@ -1901,7 +1960,8 @@
     mirrorInfo: mirrorInfo, mirrorSoon: mirrorSoon, bestBackupInfo: bestBackupInfo, reviveMissingThumbs: reviveMissingThumbs,
     forceFileBackup: forceFileBackup, origBlob: origBlob,
     migratePhotosToFiles: migratePhotosToFiles,
-    gc: gc, estimate: estimate
+    gc: gc, estimate: estimate,
+    _t: { upgradeProp: upgradeProp, propRec: propRec }   // 시험이 직접 부른다(순수 함수)
   };
 })(window);
 
@@ -9726,20 +9786,10 @@
     Nav.showSup(true);
   }
 
+  /* 누르면 바로 다이얼러 — 「전화 걸기·번호 복사」 시트는 없앴다(2026-10-16 사용자 지시, 방통·물성도 같음 — U.dial) */
   function callSup() {
     if (!tk || !tk.supPhone) return;
-    const c = Contacts.byPhone(tk.supPhone);
-    const who = (tk.supervisor || '') + (c ? ' (' + Contacts.where(c) + ')' : '');
-    U.sheet(who + '\n' + tk.supPhone, [
-      { label: '전화 걸기', cls: 'strong', onPick: () => {
-          // tel: 을 열면 다이얼러가 뜬다 (기기에 따라 바로 발신)
-          try { global.location.href = 'tel:' + tk.supPhone.replace(/[^0-9+]/g, ''); }
-          catch (e) { U.toast('전화 앱을 열지 못했습니다'); }
-        } },
-      { label: '번호 복사', sub: tk.supPhone, onPick: () => {
-          U.copyText(tk.supPhone).then((o) => U.toast(o ? '번호를 복사했습니다' : '복사에 실패했습니다'));
-        } }
-    ]);
+    U.dial(tk.supPhone);
   }
 
   /* ---------------- 계산 세트 ----------------
@@ -13030,6 +13080,8 @@
     $('#bang-sup-txt').textContent = t;
     if (global.Leave) Leave.decorate($('#bang-sup-txt'), draft.supervisor, editing ? editing.day : '');   // 새 입력은 오늘, 수정은 그 기록의 날짜
     $('#bang-sup').classList.toggle('set', !!draft.supervisor);
+    const call = $('#bang-sup-call');
+    if (call) call.classList.toggle('hidden', !draft.supPhone);   // 번호 있는 감리만 — 누르면 바로 다이얼러(U.dial, 2026-10-16)
     $('#bang-dong-txt').textContent = draft.dong || '동 선택';
     $('#bang-dong').classList.toggle('set', !!draft.dong);
   }
@@ -13436,6 +13488,8 @@
 
     $('#bang-dong').addEventListener('click', pickDong);
     $('#bang-sup').addEventListener('click', pickSup);
+    const bc = $('#bang-sup-call');
+    if (bc) bc.addEventListener('click', () => { if (draft.supPhone) U.dial(draft.supPhone); });
     const mi = $('#bang-memo');
     if (mi) mi.addEventListener('input', () => { draft.memo = mi.value; saveDraft(); });
     $('#bang-save').addEventListener('click', saveBang);
@@ -13469,8 +13523,8 @@
 /* ============ prop.js — 물성시험 모드 (2026-10-15) ============
    콘크리트 물성시험(온도·슬럼프·공기량·염화물·단위수량) — 판넬(화이트보드)을 찍어 OCR 로 읽고, 기록·카톡·ZIP 으로 내보낸다.
    **계산은 없다** — 판넬에 적힌 값을 그대로 옮길 뿐이다(겉보기만 있으면 공기량은 빈칸).
-   저장: bangs 스토어의 kind:'prop' 레코드(store.js 상단 「물성시험 레코드」). 시험(tests[])마다 사진 2장(판넬·전경)과 값 8칸.
-   화면: 편집기 #view-prop · 홈(물성 모드) #home-prop 목록 · 계산 탭 #calc-prop 외기온도판 · 작업 탭 목록·카톡·ZIP.
+   저장: bangs 스토어의 kind:'prop' 레코드(store.js 상단 「물성시험 레코드」). 시험(tests[])마다 사진 2장(칸 0 전경 · 칸 1 판넬 — 판 표식 pv 2)과 값 8칸.
+   화면: 편집기 #view-prop(회차는 아코디언 — 접힌 줄 + 한 번에 한 회차만 펼침, 촬영·앨범은 2장이 1회로 빈 칸을 순서대로) · 홈(물성 모드) #home-prop 목록 · 계산 탭 #calc-prop 외기온도판 · 작업 탭 목록·카톡·ZIP.
    내보내기: 「10월 14일 물성시험분.zip」 → 폴더 「10.14 물성시험」 안에 사진 + 「물성시험값.html」(HPMS 열 순서 가로 표, 행 복사).
    판넬 OCR 은 vision.js(Gemini)를 직접 쓴다 — ocr.js 는 건드리지 않는다. 모델에게 판정·계산을 시키지 않고 값만 받아 코드가 정리한다.
 ================================================================ */
@@ -13582,7 +13636,7 @@
   const titleOf = (r) => Task.dongOf(r) || '동 미지정';
   const testsOf = (r) => (Array.isArray(r && r.tests) ? r.tests : []);
   const photoN = (r) => ((r && r.photos) || []).length;
-  // 시험 1회 완료 = 사진 2장(판넬·전경) — 공시체 「사진 = 완료」와 같은 원칙. 값은 판넬 사진에서 언제든 다시 읽는다.
+  // 시험 1회 완료 = 사진 2장(전경·판넬) — 공시체 「사진 = 완료」와 같은 원칙. 값은 판넬 사진에서 언제든 다시 읽는다.
   // 홈·작업탭 목록과 플래너 올린 묶음 칩이 이 하나를 같이 쓴다(2026-10-16 팀장 결정 — 칩만 값 기준이던 것을 통일)
   const testDone = (t) => ((t && t.photos) || []).filter(Boolean).length >= 2;
   const isDoneRec = (r) => testsOf(r).length > 0 && testsOf(r).every(testDone);
@@ -13623,13 +13677,15 @@
   }
 
   /* 판넬 한 장 → 레코드에 넣을 자리. 이미 같은 날·같은 동 레코드가 있으면 거기 시험을 더하되,
-     플래너가 미리 만들어 둔 **빈 시험(값·사진 없음)** 이 맞으면 새로 더하지 않고 그 칸을 채운다. 반환 인덱스(-1 = 새로 더함) */
+     플래너가 미리 만들어 둔 **빈 시험(판넬에서 읽을 값 없음·판넬 칸 비어 있음)** 이 맞으면 새로 더하지 않고 그 칸을 채운다. 반환 인덱스(-1 = 새로 더함) */
   /* 업체 이름 대조 — 공백·괄호·구두점·대소문자를 무시(Task.looseKey)하고, 두 글자 이상이면 한쪽이 다른 쪽을 품어도 같은 업체로 본다
      (판넬 손글씨 「삼표」·「삼표(안양)」 ↔ 계획표 「삼표안양」). 공백만 걷은 완전 일치였을 땐 표기가 조금만 달라도 빈 시험 칸이 안 채워지고
      같은 회차가 두 업체명으로 갈라졌다(감사 2026-10-15) */
   const vkey = (s) => Task.looseKey(s);
   const vNear = (a, b) => { const x = vkey(a), y = vkey(b); return !!x && !!y && (x === y || (Math.min(x.length, y.length) >= 2 && (x.indexOf(y) >= 0 || y.indexOf(x) >= 0))); };
-  function emptyTest(t) { return !VALS.some((v) => t[v.k]) && !(t.photos || []).some(Boolean); }
+  /* 판넬이 채울 수 있는 시험 = 판넬에서 읽을 값 7칸이 비고 판넬 칸(1)이 빈 시험. 전경(칸 0)만 먼저 찍은 시험·외기온도(「현재 기온」)만 채운 시험도 든다 —
+     그 둘을 빼면 같은 업체·회차 시험이 하나 더 생겨 한 회차가 둘로 갈라진다(2026-10-16 감사). 채울 때 전경 사진·적어 둔 외기온도는 그대로 둔다 */
+  function fillableTest(t) { return !READ_KEYS.some((k) => t[k]) && !(t.photos || [])[PANEL]; }
   /* 후보 {t, i} 가운데 판넬 업체에 맞는 칸 — 표기가 똑같은 칸이 먼저, 없으면 한쪽이 다른 쪽을 품는 칸이 **한 업체로만** 좁혀질 때
      (판넬 「삼표」 가 삼표안양·삼표서부 둘 다에 걸리면 어느 쪽인지 몰라 고르지 않는다) */
   function byVendor(list, vendor) {
@@ -13641,10 +13697,10 @@
     return (near.length && Object.keys(kinds).length === 1) ? near[0] : null;
   }
   function pickTestSlot(tests, v) {
-    const empty = tests.map((t, i) => ({ t: t, i: i })).filter((o) => emptyTest(o.t));
+    const free = tests.map((t, i) => ({ t: t, i: i })).filter((o) => fillableTest(o.t));
     const named = !!vkey(v.vendor);
     if (v.round) {
-      const cand = empty.filter((o) => o.t.round === v.round);
+      const cand = free.filter((o) => o.t.round === v.round);
       if (named) {
         const hit = byVendor(cand, v.vendor) || cand.find((o) => !vkey(o.t.vendor));   // 업체 이름이 맞는 칸 → 이름이 비어 있는 칸
         return hit ? hit.i : -1;
@@ -13653,7 +13709,7 @@
       const kinds = Object.create(null); cand.forEach((o) => { kinds[vkey(o.t.vendor)] = 1; });
       return (cand.length && Object.keys(kinds).length === 1) ? cand[0].i : -1;
     }
-    const hit = named ? byVendor(empty, v.vendor) : null;
+    const hit = named ? byVendor(free, v.vendor) : null;
     return hit ? hit.i : -1;
   }
   /* 같은 날·같은 동 레코드가 여럿일 때(플래너가 부위가 다른 두 타설을 따로 만든 경우 — 215동 벽체 + 램프) 판넬이 속할 레코드.
@@ -13840,6 +13896,7 @@
   let autoT = null;
   let scanBusy = false;
   let filePending = null;          // 웹 파일 입력이 고른 사진을 받을 곳
+  let openTid = null;              // 펼쳐진 시험의 id — 한 번에 한 회차만 펼친다(null = 모두 접힘)
   const pendingIds = [];           // putPhoto 커밋 뒤 아직 레코드에 안 실린 사진 — gc 가 지우지 않게 보호
   const unpend = (id) => { const i = pendingIds.indexOf(id); if (i >= 0) pendingIds.splice(i, 1); };
   const AUTOSAVE_MS = 900;
@@ -13850,7 +13907,7 @@
     return t;
   }
   function draftRec(day) {
-    return { id: null, kind: 'prop', day: day || U.dayKey(Date.now()), dong: '', place: '', supervisor: '', supPhone: '',
+    return { id: null, kind: 'prop', pv: 2, day: day || U.dayKey(Date.now()), dong: '', place: '', supervisor: '', supPhone: '',
              jugu: U.jugu(), mix: '', vendor: '', qty: '', memo: '', planId: '', tests: [newTest(1, '')], photos: [] };
   }
 
@@ -13914,18 +13971,21 @@
   }
 
   /* ---------------- 열기/닫기 ---------------- */
-  function open(r, day) {
+  /* openId = 펼쳐 놓을 시험 id(판넬 스캔이 방금 채운 회차) — 없으면 사진이나 값이 빈 첫 회차 */
+  function open(r, day, openId) {
     if (r && r.id) {                  // 목록이 들고 있던 사본은 낡았을 수 있다 — 새로 읽는다(공시체 편집기와 같은 규칙)
-      return Store.getBang(r.id).then((fresh) => openNow((fresh && fresh.kind === 'prop') ? fresh : r, day))
-        .catch(() => openNow(r, day));
+      return Store.getBang(r.id).then((fresh) => openNow((fresh && fresh.kind === 'prop') ? fresh : r, day, openId))
+        .catch(() => openNow(r, day, openId));
     }
-    openNow(r, day);
+    openNow(r, day, openId);
     return Promise.resolve();
   }
-  function openNow(r, day) {
+  function openNow(r, day, openId) {
     if (rec) { clearTimeout(autoT); collect(); if (dirty && hasSubstance()) save(true, rec); }   // 열려 있던 것이 있으면 먼저 지킨다(저장 대상을 못 박아 둔다 — 아래에서 rec 가 바뀐다)
     rec = r ? JSON.parse(JSON.stringify(r)) : draftRec(day);
     rec.kind = 'prop';
+    // 읽는 길(Store)이 이미 새 꼴로 올려 주지만, 못 거친 옛 꼴 사본(pv 없음)이 들어와도 칸 뜻이 뒤바뀌어 보이지 않게 한 번 더 — 저장됐던 레코드(createdAt)만 맞바꾸고, 한 번도 저장 안 된 건 새 꼴로 찍는다
+    if (Number(rec.pv) !== 2) rec = rec.createdAt ? Store._t.upgradeProp(rec) : Object.assign(rec, { pv: 2 });
     if (!Array.isArray(rec.tests)) rec.tests = [];
     rec.tests.forEach((t, i) => {
       if (!t.id) t.id = U.uid();
@@ -13934,6 +13994,7 @@
       VALS.forEach((v) => { if (t[v.k] == null) t[v.k] = ''; });
     });
     dirty = false; ver = 0;
+    openTid = (openId && rec.tests.some((t) => t.id === openId)) ? openId : firstOpenTid(rec);
     renderHead();
     renderTests();
     $('#view-prop').classList.remove('hidden');
@@ -14001,11 +14062,21 @@
     el.classList.toggle('ph', !rec.dong);
     $('#prop-place').placeholder = rec.dong || '';   // 부위 칸이 비면 동수가 흐린 글씨(저장 땐 collect 가 동을 접두)
   }
+  /* 감리 칸 = 공시체 편집기와 같은 모양: 이름 + 소속(명부에 있을 때만) + 전화 버튼(번호가 있을 때만 — 직접 입력한 감리도 번호를 적었으면 보인다) */
   function renderSup() {
-    const el = $('#prop-sup-txt');
+    const el = $('#prop-sup-txt'), whereEl = $('#prop-sup-where'), callEl = $('#prop-sup-call');
+    const c = (rec.supervisor && rec.supPhone) ? Contacts.byPhone(rec.supPhone) : null;
     el.textContent = rec.supervisor || '감리 선택';
     el.classList.toggle('ph', !rec.supervisor);
+    whereEl.textContent = c ? Contacts.where(c) : '';
+    callEl.classList.toggle('hidden', !(rec.supervisor && rec.supPhone));
     if (global.Leave) Leave.decorate(el, rec.supervisor, ($('#prop-day').value || rec.day));   // 타설일(=시험일)에 쉬는 감리는 빨강 — 날짜를 바꾸면 다시 칠한다(공시체 편집기 renderSup 와 같은 규칙)
+  }
+  // taskui.callSup 과 같은 시트 — tel: 은 다이얼러를 띄운다(기기에 따라 바로 발신). 번호는 누른 순간 잡아 둔다(시트가 떠 있는 사이 편집이 바뀌어도 그 번호로)
+  /* 누르면 바로 다이얼러 — 시트·번호 복사 없음(2026-10-16 사용자 지시, 공시체·방통과 같음 — U.dial) */
+  function callSup() {
+    if (!rec || !rec.supPhone) return;
+    U.dial(rec.supPhone);
   }
 
   /* 동을 바꾸면 타설부위의 접두도 따라간다 — 비어 있으면 그대로, 「옛 동」 또는 「옛 동 …」 으로 시작할 때만 그 자리를 갈아 끼운다 */
@@ -14085,24 +14156,124 @@
     return (neg ? '-' : '') + t;
   }
 
+  /* 시험 목록은 아코디언 — 회차마다 접힌 한 줄(요약) + 펼친 본문. 펼침은 openTid 하나(한 번에 한 회차만).
+     **접힌 회차의 본문도 DOM 에 있다**(display 만 끈다) — 값 칸 입력이 곧바로 rec.tests 에 쓰이고, 목록을 다시 그려도 어느 회차든 입력·사진 칸이 그대로 따라오게 */
   function renderTests() {
     const box = $('#prop-tests');
     box.innerHTML = '';
-    const tests = testsOf(rec);
-    $('#prop-tests-n').textContent = tests.length;
-    tests.forEach((t) => {
+    testsOf(rec).forEach((t) => {
       const c = buildTestCard(t);
       box.appendChild(c);
+      refreshSum(t);
       paintPhotos(c, t);          // DOM 에 붙은 뒤에 그린다(paintPhotos 는 떨어진 카드를 건너뛴다)
     });
+    applyOpen();
+    syncCount();
   }
   const cardOf = (t) => document.querySelector('#prop-tests .prop-test[data-tid="' + t.id + '"]');
+
+  /* 판넬에서 읽을 값 7칸 — 외기온도는 비고라 따로 뺀다(「현재 기온」 으로 먼저 채우는 일이 흔해 「값 있음」 에 안 센다) */
+  const READ_KEYS = VALS.filter((v) => v.k !== 'outTemp').map((v) => v.k);
+  const hasRead = (t) => READ_KEYS.some((k) => t[k]);
+  /* 편집기를 열 때 펼칠 회차 = 사진이나 값이 빈 첫 회차(다 찼으면 null — 모두 접힘) */
+  const firstOpenTid = (r) => { const t = testsOf(r).find((x) => !testDone(x) || !hasRead(x)); return t ? t.id : null; };
+
+  /* 접힌 줄의 값 요약 — 「26.4℃ · 190 · 4.4% · 염 0.011/0.010 · 180.7」. 적힌 칸만(빈 칸은 건너뜀), 하나도 없으면 「값 없음」. 겉보기만 있으면 「겉 4.6%」 */
+  function sumText(t) {
+    const p = [];
+    if (t.temp) p.push(t.temp + '℃');
+    if (t.slump) p.push(t.slump);
+    if (t.air) p.push(t.air + '%');
+    else if (t.airApp) p.push('겉 ' + t.airApp + '%');
+    if (t.cl1 || t.cl2) p.push('염 ' + [t.cl1, t.cl2].filter(Boolean).join('/'));
+    if (t.water) p.push(t.water);
+    return p.length ? p.join(' · ') : '값 없음';
+  }
+
+  /* 시험 영역 위 요약 줄 「시험 6회 · 사진 8/12」 — 분모는 시험 × 2(전경·판넬) */
+  function syncCount() {
+    if (!rec) return;
+    const tests = testsOf(rec);
+    $('#prop-tests-n').textContent = tests.length;
+    const have = tests.reduce((a, t) => a + (t.photos || []).filter(Boolean).length, 0);
+    $('#prop-photos-n').textContent = '· 사진 ' + have + '/' + (2 * tests.length);
+  }
+
+  /* 펼침 — tid 하나만 펼치고 나머지는 접는다(null 이면 모두 접힘). scroll 이면 펼친 회차가 통째로 보이게 */
+  function setOpen(tid, scroll) {
+    openTid = tid || null;
+    applyOpen();
+    if (scroll && openTid && rec) {
+      const t = testsOf(rec).find((x) => x.id === openTid);
+      const c = t && cardOf(t);
+      if (c) scrollToCard(c);
+    }
+  }
+  function applyOpen() {
+    document.querySelectorAll('#prop-tests .prop-test').forEach((c) => {
+      const on = !!openTid && c.dataset.tid === openTid;
+      c.classList.toggle('open', on);
+      const s = c.querySelector('.prop-sum');
+      if (s) s.setAttribute('aria-expanded', on ? 'true' : 'false');
+    });
+  }
+  function scrollToCard(c) { try { c.scrollIntoView({ block: 'nearest' }); } catch (e) {} }
+
+  /* 접힌 줄 — 「1회 · 우림 ✓」 / 값 요약 / 작은 썸네일 2칸(전경·판넬, 비면 점선) / 판넬만 있고 값이 없으면 「읽기」 / 펼침 화살표. 줄 전체가 누르는 곳 */
+  function buildSum(t) {
+    const row = U.el('div', 'prop-sum');
+    row.setAttribute('role', 'button');
+    row.tabIndex = 0;
+    row.setAttribute('aria-expanded', 'false');
+    const main = U.el('div', 'prop-sum-main');
+    const ttl = U.el('div', 'prop-sum-title');
+    ttl.appendChild(U.el('b', 'prop-sum-round'));
+    ttl.appendChild(U.el('span', 'prop-sum-vend'));
+    const ok = U.el('span', 'prop-sum-ok hidden');
+    ok.appendChild(U.icon('check'));
+    ok.setAttribute('role', 'img');
+    ok.setAttribute('aria-label', '사진 2장 완료');
+    ttl.appendChild(ok);
+    main.appendChild(ttl);
+    main.appendChild(U.el('div', 'prop-sum-vals'));
+    row.appendChild(main);
+    const ph = U.el('div', 'prop-sum-ph');
+    ph.setAttribute('aria-hidden', 'true');
+    for (let i = 0; i < 2; i++) ph.appendChild(U.el('span', 'prop-sum-th empty', slotName(i).charAt(0)));
+    row.appendChild(ph);
+    const rd = U.el('button', 'prop-sum-read hidden', '읽기');
+    rd.type = 'button';
+    rd.setAttribute('aria-label', '판넬 읽기');
+    rd.addEventListener('click', (e) => { e.stopPropagation(); readPanel(t); });   // 펼치지 않고 그 자리에서 — 차례로 읽을 수 있게
+    row.appendChild(rd);
+    row.appendChild(U.icon('back', 'prop-chev'));
+    row.addEventListener('click', () => setOpen(t.id, true));
+    row.addEventListener('keydown', (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target === row) { e.preventDefault(); setOpen(t.id, true); } });
+    return row;
+  }
+  /* 접힌 줄의 글자·표시를 지금 값으로 — 회차·업체·값·사진이 바뀔 때마다(썸네일 그림은 paintPhotos 가 맡는다) */
+  function refreshSum(t) {
+    const c = cardOf(t);
+    const row = c && c.querySelector('.prop-sum');
+    if (!row) return;
+    row.querySelector('.prop-sum-round').textContent = t.round + '회';
+    const v = (t.vendor || '').trim();
+    row.querySelector('.prop-sum-vend').textContent = v ? ' · ' + v : '';        // 앞 공백은 줄 머리라 화면엔 안 보인다 — 글자(읽기·복사)만 「1회 · 우림」
+    const vals = row.querySelector('.prop-sum-vals');
+    vals.textContent = sumText(t);
+    vals.classList.toggle('none', !hasRead(t));
+    row.querySelector('.prop-sum-ok').classList.toggle('hidden', !testDone(t));
+    row.querySelector('.prop-sum-read').classList.toggle('hidden', !((t.photos || [])[PANEL] && !hasRead(t)));
+  }
 
   function buildTestCard(t) {
     const card = U.el('div', 'prop-test');
     card.dataset.tid = t.id;
+    card.appendChild(buildSum(t));
+    const body = U.el('div', 'prop-test-body');
+    card.appendChild(body);
 
-    // 머리 — 회차·업체를 고칠 수 있고, 시험 삭제
+    // 머리 — 회차·업체를 고칠 수 있고, 시험 삭제 · 접기. 입력칸·버튼이 아닌 빈 자리를 눌러도 접힌다
     const head = U.el('div', 'prop-test-head');
     const rd = U.el('input', 'prop-in prop-round');
     rd.type = 'text'; rd.inputMode = 'numeric'; rd.maxLength = 2; rd.value = String(t.round);
@@ -14110,7 +14281,7 @@
     rd.addEventListener('input', () => {
       rd.value = rd.value.replace(/\D/g, '');
       const n = parseInt(rd.value, 10);
-      if (n > 0) { t.round = n; markDirty(); }
+      if (n > 0) { t.round = n; markDirty(); refreshSum(t); }
     });
     rd.addEventListener('blur', () => { rd.value = String(t.round); });
     head.appendChild(rd);
@@ -14120,23 +14291,33 @@
     vd.setAttribute('aria-label', '업체');
     ['autocomplete', 'autocorrect', 'autocapitalize'].forEach((a) => vd.setAttribute(a, 'off'));
     vd.spellcheck = false;
-    vd.addEventListener('input', () => { t.vendor = vd.value; markDirty(); });
+    vd.addEventListener('input', () => { t.vendor = vd.value; markDirty(); refreshSum(t); });
     head.appendChild(vd);
     const del = U.el('button', 'prop-test-del');
+    del.type = 'button';
     del.appendChild(U.icon('trash'));
     del.setAttribute('aria-label', '이 시험 삭제');
     del.addEventListener('click', () => removeTest(t));
     head.appendChild(del);
-    card.appendChild(head);
+    const fold = U.el('button', 'prop-fold');
+    fold.type = 'button';
+    fold.appendChild(U.icon('back'));
+    fold.setAttribute('aria-label', '접기');
+    fold.addEventListener('click', () => setOpen(null));
+    head.appendChild(fold);
+    head.addEventListener('click', (e) => { if (!e.target.closest('input,button')) setOpen(null); });
+    body.appendChild(head);
 
-    // 사진 2칸(판넬·전경) — 칸은 renderTests 가 카드를 붙인 뒤 paintPhotos 로 채운다
-    card.appendChild(U.el('div', 'prop-photos'));
+    // 사진 2칸(전경·판넬) + 순서 바꾸기 — 칸은 renderTests 가 카드를 붙인 뒤 paintPhotos 로 채운다. 3번째 이후 사진(옛 putSlot 이 뒤에 붙인 것)은 아래 줄
+    body.appendChild(U.el('div', 'prop-photos'));
+    body.appendChild(U.el('div', 'prop-photos-x hidden'));
 
     const read = U.el('button', 'btn btn-calc prop-read');
+    read.type = 'button';
     read.appendChild(U.icon('scan'));
     read.appendChild(document.createTextNode('판넬 읽기'));
     read.addEventListener('click', () => readPanel(t));
-    card.appendChild(read);
+    body.appendChild(read);
 
     // 값 8칸
     const grid = U.el('div', 'prop-vals');
@@ -14155,6 +14336,7 @@
         if (c !== inp.value) inp.value = c;
         t[v.k] = c;
         markDirty();
+        refreshSum(t);
       });
       if (v.k === 'outTemp') {
         const row = U.el('div', 'prop-with-btn');
@@ -14167,7 +14349,7 @@
       } else lab.appendChild(inp);
       grid.appendChild(lab);
     });
-    card.appendChild(grid);
+    body.appendChild(grid);
     return card;
   }
 
@@ -14177,10 +14359,11 @@
     const last = tests[tests.length - 1];
     const t = newTest(nextRound(tests, last ? last.vendor : ''), last ? last.vendor : '');   // 같은 업체의 다음 회차가 기본(업체·회차는 고칠 수 있다)
     rec.tests.push(t);
+    openTid = t.id;                    // 새 회차를 펼친다
     markDirty();
     renderTests();
     const c = cardOf(t);
-    if (c) { try { c.scrollIntoView({ block: 'nearest' }); } catch (e) {} }
+    if (c) scrollToCard(c);
   }
   function removeTest(t) {
     if (!rec) return;
@@ -14192,6 +14375,7 @@
       if (i < 0) return;
       (t.photos || []).forEach((id) => { if (id) U.dropUrl(id); });
       owner.tests.splice(i, 1);
+      if (openTid === t.id) openTid = firstOpenTid(owner);     // 펼친 회차를 지웠으면 다음에 채울 회차를 펼친다(편집기를 열 때와 같은 규칙)
       markDirty();
       renderTests();
     };
@@ -14213,10 +14397,13 @@
     U.toast('외기 ' + t.outTemp + '℃' + (r.stale ? ' (' + Weather.ago(r.at) + ' 기준 · 오프라인)' : ''));
   }
 
-  /* ---------------- 사진(시험마다 2칸 — 0 = 판넬, 1 = 전경) ---------------- */
-  const SLOT_NAME = ['판넬', '전경'];
+  /* ---------------- 사진(시험마다 2칸 — 칸 0 = 전경, 칸 1 = 판넬) ----------------
+     칸 뜻은 레코드의 판 표식 pv 2(store.js) — 공시체 「전경+판넬」 짝과 같은 순서. 옛 꼴(칸 0 판넬)은 읽는 길(Store)이 맞바꿔 올려 준다 */
+  const SCENE = 0, PANEL = 1;
+  const SLOT_NAME = ['전경', '판넬'];
   const slotName = (i) => SLOT_NAME[i] || ('사진 ' + (i + 1));
 
+  /* 사진 칸을 그린다 — 펼친 본문(전경 · 순서 바꾸기 · 판넬 + 3번째 이후)과 접힌 줄의 작은 썸네일을 한 번에(사진 레코드는 한 번만 읽는다) */
   async function paintPhotos(card, t) {
     const box = card.querySelector('.prop-photos');
     if (!box) return;
@@ -14228,12 +14415,69 @@
       try { (await Store.getPhotos(ids)).forEach((p) => { byId[p.id] = p; }); } catch (e) { console.error(e); }
     }
     if (rec !== owner || card._seq !== my || !card.isConnected) return;
+    const ph = t.photos || [];
+    const cell = (i) => (ph[i] ? filledCell(card, t, i, ph[i], byId[ph[i]]) : emptyCell(t, i));
     box.innerHTML = '';
-    const n = Math.max(2, (t.photos || []).length);
-    for (let i = 0; i < n; i++) {
-      const pid = (t.photos || [])[i] || '';
-      box.appendChild(pid ? filledCell(card, t, i, pid, byId[pid]) : emptyCell(t, i));
+    box.appendChild(cell(SCENE));
+    const any = !!(ph[SCENE] || ph[PANEL]);
+    if (any) box.appendChild(swapBtn(t));                // 두 칸 중 하나라도 있으면 — 순서를 바꿔 찍었을 때 한 번에 고친다
+    box.appendChild(cell(PANEL));
+    box.classList.toggle('swap', any);
+    const xbox = card.querySelector('.prop-photos-x');
+    if (xbox) {
+      xbox.innerHTML = '';
+      for (let i = 2; i < ph.length; i++) if (ph[i]) xbox.appendChild(filledCell(card, t, i, ph[i], byId[ph[i]]));
+      xbox.classList.toggle('hidden', !xbox.firstChild);
     }
+    fillThumbs(card, t, byId);
+    refreshSum(t);
+    syncCount();
+  }
+  /* 접힌 줄의 썸네일 2칸 — 사진이 있으면 그림, 없으면 점선 빈칸(전·판) */
+  function fillThumbs(card, t, byId) {
+    const ths = card.querySelectorAll('.prop-sum-th');
+    for (let i = 0; i < 2; i++) {
+      const th = ths[i];
+      if (!th) continue;
+      th.innerHTML = '';
+      th.classList.remove('bad');
+      const pid = (t.photos || [])[i] || '';
+      th.classList.toggle('empty', !pid);
+      if (!pid) { th.textContent = slotName(i).charAt(0); continue; }
+      const img = new Image();
+      img.draggable = false; img.alt = '';
+      const p = byId[pid];
+      if (p) img.src = U.thumbUrl(p.id, p.thumb || p.full);
+      else Store.origBlob(pid).then((b) => {
+        if (b) img.src = U.thumbUrl(pid, b);
+        else if (img.parentNode === th) {        // 사진 레코드도 원본 파일도 없는 죽은 참조 — 펼친 칸의 「불러오기 실패」 와 같은 뜻으로 보여, 빈 회색 칸 + ✓ 로 멀쩡해 보이지 않게(2026-10-16 감사)
+          th.innerHTML = '';
+          th.classList.add('bad');
+          th.appendChild(U.icon('warn'));
+        }
+      }).catch(() => {});
+      th.appendChild(img);
+    }
+  }
+  /* 전경 ↔ 판넬 맞바꿈 — 사진 id 는 자리만 바뀐다(하나도 안 잃는다). 한 칸만 차 있어도 그 사진이 반대 칸으로 간다 */
+  function swapBtn(t) {
+    const b = U.el('button', 'prop-swap');
+    b.type = 'button';
+    b.appendChild(U.icon('swap'));
+    b.appendChild(U.el('span', '', '순서 바꾸기'));
+    b.addEventListener('click', () => swapPhotos(t));
+    return b;
+  }
+  function swapPhotos(t) {
+    if (!rec || testsOf(rec).indexOf(t) < 0) return;
+    const p = Array.isArray(t.photos) ? t.photos.slice() : [];
+    while (p.length < 2) p.push('');
+    if (!p[SCENE] && !p[PANEL]) return;
+    const x = p[SCENE]; p[SCENE] = p[PANEL]; p[PANEL] = x;
+    t.photos = p;
+    markDirty();
+    const c = cardOf(t);
+    if (c) paintPhotos(c, t);
   }
   function emptyCell(t, i) {
     const b = U.el('button', 'prop-ph-add');
@@ -14326,7 +14570,7 @@
   async function afterPick(t, slot, files, fromCamera, thenRead) {
     if (!files || !files.length) return;
     const n = await addPhotos(t, slot, files, fromCamera);
-    if (n && thenRead && rec && testsOf(rec).indexOf(t) >= 0 && (t.photos || [])[0]) runRead(t, t.photos[0]);
+    if (n && thenRead && rec && testsOf(rec).indexOf(t) >= 0 && (t.photos || [])[PANEL]) runRead(t, t.photos[PANEL]);   // 판넬 읽기는 칸 1(판넬) 사진을 읽는다
   }
 
   /* 사진을 시험의 빈 칸에 — 누른 칸이 먼저, 그다음 다른 빈 칸, 그래도 남으면 뒤에 붙인다(잃지 않는다) */
@@ -14341,35 +14585,68 @@
     return t.photos.length - 1;
   }
 
-  async function addPhotos(t, slot, files, fromCamera) {
-    const owner = rec;
-    if (!owner || owner.tests.indexOf(t) < 0) return 0;
-    const list = Array.prototype.slice.call(files || []).filter((f) => f && f.size);
+  /* 연속 촬영·앨범 = 2장이 1회(공시체처럼) — 다음 빈 칸을 회차 순서대로(1회 전경 → 1회 판넬 → 2회 전경 → …).
+     칸이 모자라면 회차를 새로 만든다(업체 = 마지막 회차 업체, 회차 = nextRound). 새 회차는 rec.tests 에 바로 들어간다.
+     skip = 이번 묶음에서 읽지 못한 파일 수 — 그 칸들은 빈 채로 두고 뒤 사진은 그다음 빈 칸으로 간다(안 그러면 뒤 사진이 한 칸씩 당겨져 전경·판넬이 조용히 뒤바뀐다) */
+  function nextBlank(owner, skip) {
+    const blanks = [];
+    testsOf(owner).forEach((t) => { for (let s = 0; s < 2; s++) if (!(t.photos || [])[s]) blanks.push({ t: t, s: s }); });
+    const at = skip > 0 ? skip : 0;
+    while (blanks.length <= at) {
+      const tests = testsOf(owner);
+      const last = tests[tests.length - 1];
+      const nt = newTest(nextRound(tests, last ? last.vendor : ''), last ? last.vendor : '');
+      owner.tests.push(nt);
+      blanks.push({ t: nt, s: SCENE }, { t: nt, s: PANEL });
+    }
+    return blanks[at];
+  }
+
+  /* 사진 한 묶음을 레코드에 싣는다 — place(id, skip) 가 칸을 정하고 그 시험을 돌려준다(시험이 사라졌으면 null → 중단).
+     장마다 처리 → putPhoto → 칸에 넣기 → 즉시 저장: putPhoto 와 저장 사이에서 앱이 죽어 고아가 되는 창을 한 장 분량으로. seq = 회차를 넘나드는 연속 채우기(끝에 마지막 회차를 펼친다).
+     **저장은 소유자를 못 박는다**(save(true, owner)) — 뒤로가기의 저장이 줄 서 있다 편집기를 먼저 닫으면(rec = null) 목표 없는 저장은 아무것도 안 쓰고 null 을 돌려줘
+     방금 놓은 사진이 어느 레코드에도 안 실린 채 성공 토스트가 떴다(2026-10-16 감사). 읽지 못한 파일(깨짐·0바이트)은 건너뛰지 않고 자리를 비워 둔다(skip — nextBlank) */
+  async function ingestPhotos(files, fromCamera, owner, place, seq) {
+    const list = Array.prototype.slice.call(files || []).filter(Boolean);
     if (!list.length) return 0;
     // 아이폰(PWA)의 <input capture> 촬영본은 사진 앱에 안 남는다 — 공유 시트로 저장할 수 있게 처리본을 들고 있는다
     const shareFiles = [];
     const wantShare = fromCamera && !Native.isNative() && typeof navigator.share === 'function' && !!navigator.canShare;
     U.toast('사진 처리 중…', 60000);
-    let ok = 0, fail = 0, aborted = false;
+    let ok = 0, fail = 0, unsaved = 0, aborted = false, last = null;
+    const failedAt = [];               // 읽지 못한 파일의 순번(1부터) — 그 칸이 비어 있다고 알린다
     try {
-      for (const f of list) {
+      for (let k = 0; k < list.length; k++) {
+        const f = list[k];
+        if (!f.size) { fail++; failedAt.push(k + 1); continue; }
         const id = U.uid();
         pendingIds.push(id);           // putPhoto 커밋 전에 등록 — gc 와의 틈을 없앤다
         try {
           const img = await U.processImage(f, { maxSide: 1600, thumbSide: 320, quality: 0.82 });
           await Store.putPhoto(Object.assign({ id: id }, img));
           if (wantShare) { try { shareFiles.push(new File([img.full], 'prop_' + id + '.jpg', { type: 'image/jpeg' })); } catch (e) {} }
-        } catch (e) { console.error('[prop photo]', e); fail++; unpend(id); continue; }
-        if (rec !== owner || owner.tests.indexOf(t) < 0) { aborted = true; unpend(id); Store.deletePhotos([id]).catch(() => {}); break; }
-        putSlot(t, slot, id);
-        markDirty(); ok++;
-        await save(true);              // 장마다 즉시 레코드에 실어 저장 — putPhoto 와 저장 사이에서 앱이 죽어 고아가 되는 창을 한 장 분량으로
-        unpend(id);
+        } catch (e) { console.error('[prop photo]', e); fail++; failedAt.push(k + 1); unpend(id); continue; }
+        const t = (rec === owner) ? place(id, fail) : null;
+        if (!t) { aborted = true; unpend(id); Store.deletePhotos([id]).catch(() => {}); break; }
+        last = t;
+        markDirty();
+        syncCount();
+        const saved = await save(true, owner);     // 장마다 즉시 레코드에 실어 저장
+        // 저장이 실패했으면(doSave 가 이미 알렸다) 사진은 메모리 레코드에 있고 dirty 라 다음 저장이 싣는다 — 그때까지 gc 가 못 지우게 pending 을 유지
+        if (saved) { unpend(id); ok++; } else unsaved++;
       }
-      if (rec === owner) { const c = cardOf(t); if (c) paintPhotos(c, t); }
+      if (rec === owner && last) {
+        if (seq) {
+          openTid = last.id;           // 마지막 사진이 들어간 회차를 펼친다
+          renderTests();
+          const c = cardOf(last);
+          if (c) scrollToCard(c);
+        } else { const c = cardOf(last); if (c) paintPhotos(c, last); }
+      }
     } finally {
       if (aborted) U.toast('편집기를 벗어나 사진 추가를 중단했습니다');
-      else if (fail && ok) U.toast(ok + '장 추가 · ' + fail + '장 실패');
+      else if (unsaved) U.toast('사진 ' + (ok + unsaved) + '장을 올렸지만 저장하지 못했습니다\n저장 버튼을 눌러 다시 저장하세요', 5000);
+      else if (fail && ok) U.toast(ok + '장 추가 · ' + fail + '장 실패' + (seq ? '\n' + failedAt.map((n) => n + '번째').join(', ') + ' 사진의 칸은 비워 뒀습니다' : ''), seq ? 5000 : undefined);
       else if (fail) U.toast(fail + '장 모두 불러오지 못했습니다');
       else {
         const done = ok + '장 추가했습니다';
@@ -14378,18 +14655,34 @@
         } else U.toast(done);
       }
     }
-    return ok;
+    return ok + unsaved;
+  }
+  /* 펼친 회차의 칸을 눌러 넣기 — 누른 칸이 먼저(putSlot) */
+  function addPhotos(t, slot, files, fromCamera) {
+    const owner = rec;
+    if (!owner || owner.tests.indexOf(t) < 0) return Promise.resolve(0);
+    return ingestPhotos(files, fromCamera, owner, (id) => {
+      if (owner.tests.indexOf(t) < 0) return null;
+      putSlot(t, slot, id);
+      return t;
+    }, false);
+  }
+  /* 시험 영역 위 「촬영」·「앨범」 — 빈 칸을 회차 순서대로 */
+  function addSeq(files, fromCamera) {
+    const owner = rec;
+    if (!owner) return Promise.resolve(0);
+    return ingestPhotos(files, fromCamera, owner, (id, skip) => { const b = nextBlank(owner, skip); putSlot(b.t, b.s, id); return b.t; }, true);
   }
 
-  /* ---------------- 판넬 읽기(편집기 — 그 시험의 첫 사진) ---------------- */
+  /* ---------------- 판넬 읽기(편집기 — 그 시험의 판넬 칸 = 칸 1) ---------------- */
   async function readPanel(t) {
     if (!rec || testsOf(rec).indexOf(t) < 0) return;
     if (scanBusy) { U.toast('아직 앞 사진을 읽는 중입니다 — 잠시만'); return; }
     if (!(await OCR.ensureKey())) return;        // 키 확인은 사진 고르기 **전** — 찍은 뒤 물으면 사진이 버려진다
-    const first = (t.photos || [])[0];
-    if (first) { runRead(t, first); return; }
-    // 사진이 없으면 사진부터 — 판넬 칸(0)에 올리고 곧바로 읽는다
-    askPhoto(t, 0, true);
+    const panel = (t.photos || [])[PANEL];
+    if (panel) { runRead(t, panel); return; }
+    // 판넬 사진이 없으면 사진부터 — 판넬 칸(1)에 올리고 곧바로 읽는다
+    askPhoto(t, PANEL, true);
   }
 
   async function runRead(t, pid) {
@@ -14409,18 +14702,19 @@
     if (rec !== owner || testsOf(owner).indexOf(t) < 0) { U.toast('편집기를 벗어나 판넬 읽기를 중단했습니다'); return; }
     const v = panelValues(raw);
     if (!VALS.some((x) => v[x.k])) { U.toast('값을 읽지 못했습니다 — 판넬이 크게 나온 사진인지 확인하세요', 3500); return; }
-    const already = VALS.some((x) => t[x.k]);
+    const already = hasRead(t);        // 판넬에서 읽는 7칸 기준 — 외기온도만 적은 회차는 접힌 줄이 「읽기」 를 보이는데 덮어쓰기 확인이 끼면 안 된다(2026-10-16 감사)
     if (already) {
       U.toast('판넬을 읽었습니다', 1200);        // 60초짜리 「읽는 중」 토스트를 갈아 둔다 — 안 그러면 시트(토스트 아래)를 취소해도 한참 남는다
       U.confirmSheet('이미 입력한 값이 있습니다\n판넬에서 읽은 값으로 덮을까요?', '덮어쓰기', () => applyPanel(t, v, true));
     } else applyPanel(t, v, false);
   }
 
-  /* 읽은 값을 시험에 — 읽힌 칸만 쓴다(읽지 못한 칸이 입력해 둔 값을 지우지 않는다). 업체는 비었을 때만(덮어쓰기를 골랐으면 판넬 것으로) */
+  /* 읽은 값을 시험에 — 읽힌 칸만 쓴다(읽지 못한 칸이 입력해 둔 값을 지우지 않는다). 업체·외기온도(「현재 기온」 으로 먼저 적어 두는 일이 흔하다)는
+     비었을 때만(덮어쓰기를 골랐으면 판넬 것으로) */
   function applyPanel(t, v, overwrite) {
     if (!rec || testsOf(rec).indexOf(t) < 0) return;
     let n = 0;
-    VALS.forEach((x) => { if (v[x.k] !== '') { t[x.k] = v[x.k]; n++; } });
+    VALS.forEach((x) => { if (v[x.k] !== '' && (overwrite || x.k !== 'outTemp' || !t.outTemp)) { t[x.k] = v[x.k]; n++; } });
     if (v.vendor && (!t.vendor || overwrite)) t.vendor = v.vendor;
     markDirty();
     const c = cardOf(t);
@@ -14428,6 +14722,7 @@
       c.querySelectorAll('input[data-k]').forEach((inp) => { inp.value = t[inp.dataset.k] || ''; });
       const vd = c.querySelector('.prop-vend'); if (vd) vd.value = t.vendor || '';
     }
+    refreshSum(t);       // 접힌 줄의 값 요약·「읽기」 버튼도 따라간다
     const miss = VALS.filter((x) => !t[x.k]).map((x) => x.label);
     let msg = '판넬을 읽었습니다 · ' + n + '칸';
     if (miss.length) msg += '\n비어 있는 칸: ' + miss.join(', ');
@@ -14518,7 +14813,7 @@
     const mkTest = (round, ex) => {
       const t = newTest(round, vv.vendor);
       VALS.forEach((x) => { t[x.k] = vv[x.k] || ''; });
-      if (pid) t.photos = [pid];
+      if (pid) putSlot(t, PANEL, pid);          // 스캔한 사진은 판넬 — 칸 1(칸 0 전경은 비워 둔다)
       return Object.assign(t, ex || {});
     };
     // 같은 날·같은 동 레코드
@@ -14539,10 +14834,10 @@
       const at = pickTestSlot(tests, vv);
       if (at >= 0) {
         const t = tests[at];
-        VALS.forEach((x) => { if (vv[x.k]) t[x.k] = vv[x.k]; });
+        VALS.forEach((x) => { if (vv[x.k] && !(x.k === 'outTemp' && t.outTemp)) t[x.k] = vv[x.k]; });   // 먼저 적어 둔 외기온도는 지킨다(업체와 같은 규칙 — 비었을 때만)
         if (!t.vendor && vv.vendor) t.vendor = vv.vendor;
         if (vv.round) t.round = vv.round;
-        t.photos = pid ? [pid].concat((t.photos || []).slice(1)) : (t.photos || []);
+        if (pid) putSlot(t, PANEL, pid);       // 판넬 칸(1)에 — 칸 0(전경)은 그대로. 고른 시험은 판넬 칸이 비어 있는 것뿐이지만(fillableTest), 혹 차 있어도 사진을 덮어 잃지 않는다
         hit = t;
         how = '「' + titleOf(base) + '」의 ' + t.round + '회 시험을 채웠습니다 · ' + dayWord(day);
       } else {
@@ -14554,6 +14849,7 @@
       base.tests = tests;
       if (live) {
         markDirty();
+        if (hit) openTid = hit.id;             // 방금 채운 회차를 펼쳐 보인다
         renderTests();
         saved = await save(true, live);
         if (!saved) throw new Error('물성시험 저장 실패');
@@ -14565,6 +14861,7 @@
       const dong = read ? vv.dong : '';
       const sup = supFor(dong);
       const t = mkTest(vv.round || 1);
+      hit = t;
       saved = await Store.putBang({
         kind: 'prop', day: day, dong: dong, place: placeFromPanel(dong, vv.place),
         supervisor: sup.name, supPhone: sup.phone, jugu: U.jugu(),
@@ -14587,7 +14884,7 @@
     }
     if (live) {      // 이미 그 레코드의 편집기 안이다 — 다시 열지 않고 방금 채운 시험 카드로 간다
       if (rec === live && hit) { const c = cardOf(hit); if (c) { try { c.scrollIntoView({ block: 'nearest' }); } catch (e) {} } }
-    } else if (!defer) await open(saved);
+    } else if (!defer) await open(saved, undefined, hit && hit.id);       // 방금 채운 회차를 펼친 채로(플래너가 만든 시험 여럿 중 어느 것인지)
     return saved;
   }
 
@@ -14846,7 +15143,8 @@
 
   /* ---------------- 파일(압축) 내보내기 ----------------
      「10월 14일 물성시험분.zip」 → 폴더 「10.14 물성시험」(날짜 = 레코드 day) 안에 사진 「204동(우림 1회)_1.jpg」(시험마다 1부터)와
-     「10.14 물성시험 물성시험값.html」(폴더 라벨 접두 — 같은 이름 파일이 여럿이면 엑셀·브라우저가 둘째를 못 연다) */
+     「10.14 물성시험 물성시험값.html」(폴더 라벨 접두 — 같은 이름 파일이 여럿이면 엑셀·브라우저가 둘째를 못 연다).
+     사진 번호는 칸 순서대로 있는 사진만 차례로 — 두 칸이 다 있으면 _1 = 전경(칸 0), _2 = 판넬(칸 1). 물성시험값.html 썸네일도 같은 순서 */
   const fileLabel = (label) => String(label || '').replace(/[\\/:*?"<>|\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
   const fileTag = (folder) => (String(folder || '').replace(/[\/]+/g, ' ').trim() + ' ');
   function blobToDataUrl(blob) {
@@ -14972,7 +15270,11 @@
     $('#prop-save').addEventListener('click', () => { if (rec) save(false); });
     $('#prop-dong').addEventListener('click', pickDong);
     $('#prop-sup').addEventListener('click', pickSup);
+    $('#prop-sup-call').addEventListener('click', callSup);
     $('#prop-add-test').addEventListener('click', addTest);
+    // 연속 촬영·앨범 — 2장이 1회: 빈 칸을 회차 순서대로(전경 → 판넬 → 다음 회차 …). 카메라·앨범이 뜨는 동안 앱이 죽을 수 있어 먼저 저장
+    $('#prop-shoot').addEventListener('click', () => { holdBeforeLeave().then(() => pickFiles(true)).then((fs) => { if (fs && fs.length) addSeq(fs, true); }); });
+    $('#prop-pick').addEventListener('click', () => { holdBeforeLeave().then(() => pickFiles(false)).then((fs) => { if (fs && fs.length) addSeq(fs, false); }); });
     $('#prop-day').addEventListener('change', () => { if (rec) { markDirty(); renderSup(); } });   // 날짜가 바뀌면 감리의 휴무 빨강도 그 날짜 기준으로 다시
     ['#prop-place', '#prop-vendor', '#prop-memo'].forEach((s) => { $(s).addEventListener('input', () => { if (rec) markDirty(); }); });
     // 규격 — KS 다이얼(편집기와 같은 시트). 포커스를 빼야 Esc(뒤로가기)가 시트를 닫는다
@@ -15017,6 +15319,8 @@
       }).observe(vc, { attributes: true, attributeFilter: ['class'] });
     }
     setInterval(() => { if (calcShown() && document.visibilityState === 'visible') renderTemp(false); }, 30000);   // 보고 있는 동안 「n분 전」·30분 지난 캐시를 따라간다
+    // 옛 꼴(칸 0 판넬) 물성 레코드를 새 꼴(칸 0 전경)로 DB 에도 한 번 반영 — 멱등·조용히. 못 해도 읽을 때 올리기(Store)가 새 꼴로 보여 준다
+    try { if (Store.upgradeProps) Store.upgradeProps(); } catch (e) {}
   }
 
   global.Prop = {
@@ -15029,7 +15333,7 @@
     _t: {
       VALS: VALS, PROMPT: PROMPT, panelValues: panelValues, numTok: numTok, avgCl: avgCl, rowCells: rowCells, rowTsv: rowTsv,
       valuesHtml: valuesHtml, groupsOf: groupsOf, pickTestSlot: pickTestSlot, pickRecord: pickRecord, nextRound: nextRound, ocrPanel: ocrPanel,
-      finishScan: finishScan, zipTitle: zipTitle
+      finishScan: finishScan, zipTitle: zipTitle, sumText: sumText, firstOpenTid: firstOpenTid
     }
   };
 })(window);

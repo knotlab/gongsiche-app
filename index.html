@@ -133,6 +133,11 @@
   <symbol id="ic-phone" viewBox="0 0 24 24">
     <path d="M6.3 3.6h3l1.5 3.8-2 1.3a11.5 11.5 0 0 0 5.5 5.5l1.3-2 3.8 1.5v3a1.8 1.8 0 0 1-2 1.8C11 18 6 13 4.5 5.6a1.8 1.8 0 0 1 1.8-2z"/>
   </symbol>
+  <!-- 마주 보는 두 화살표(⇄) — 물성 편집기 사진 「순서 바꾸기」 -->
+  <symbol id="ic-swap" viewBox="0 0 24 24">
+    <path d="M4.4 8.2h14.2"/><path d="M14.9 4.5l3.7 3.7-3.7 3.7"/>
+    <path d="M19.6 15.8H5.4"/><path d="M9.1 12.1l-3.7 3.7 3.7 3.7"/>
+  </symbol>
   <symbol id="ic-home" viewBox="0 0 24 24">
     <path d="M3.5 10.4L12 3.6l8.5 6.8"/>
     <path d="M5.6 12v7.6a1 1 0 0 0 1 1h10.8a1 1 0 0 0 1-1V12"/>
@@ -725,7 +730,12 @@
           <span class="bang-val" id="bv-fl">—</span>
         </button>
       </div>
-      <button class="bang-sup" id="bang-sup"><span id="bang-sup-txt">담당 감리 선택</span></button>
+      <div class="sup-row bang-sup-row">
+        <button class="bang-sup" id="bang-sup"><span id="bang-sup-txt">담당 감리 선택</span></button>
+        <button class="sup-call hidden" id="bang-sup-call" aria-label="전화 걸기">
+          <svg class="ic" aria-hidden="true"><use href="#ic-phone"/></svg>
+        </button>
+      </div>
       <input class="bang-memo" id="bang-memo" type="text" maxlength="60" placeholder="메모 (선택)"
              autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
       <div class="photo-grid bang-photo-grid" id="bang-photos"></div>
@@ -784,9 +794,18 @@
       <span class="field-label">동수</span>
       <button class="pick-box" id="prop-dong"><span id="prop-dong-txt">동 선택</span></button>
     </div>
+    <!-- 감리 칸은 공시체 편집기와 같은 모양(#tk-sup-*) — 이름 + 소속(명부에 있을 때만) + 전화 버튼(번호가 있을 때만 보임, prop.js renderSup/callSup) -->
     <div class="field">
       <span class="field-label">담당 감리</span>
-      <button class="pick-box" id="prop-sup"><span id="prop-sup-txt">감리 선택</span></button>
+      <div class="sup-row">
+        <button class="sup-pick" id="prop-sup">
+          <span id="prop-sup-txt">감리 선택</span>
+          <span class="sup-where" id="prop-sup-where"></span>
+        </button>
+        <button class="sup-call hidden" id="prop-sup-call" aria-label="전화 걸기">
+          <svg class="ic" aria-hidden="true"><use href="#ic-phone"/></svg>
+        </button>
+      </div>
     </div>
     <!-- 타설부위 — 동을 앞에 한 번 더 쓴다(Task.placeOf). 비면 동수가 흐린 글씨, 저장 땐 동을 접두 -->
     <label class="field">
@@ -813,9 +832,19 @@
              autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
     </label>
 
-    <!-- 시험 카드들 — 시험마다 사진 2장(판넬·전경)과 값 8칸. prop.js renderTests -->
+    <!-- 시험 회차들 — 아코디언(접힌 한 줄 + 한 번에 한 회차만 펼침). 회차마다 사진 2장(전경·판넬)과 값 8칸. prop.js renderTests.
+         촬영·앨범은 2장이 1회 — 빈 칸을 회차 순서대로(1회 전경 → 1회 판넬 → 2회 전경 …) 채운다 -->
     <div class="field">
-      <span class="field-label">시험 <b id="prop-tests-n">0</b>회 <span class="lbl-sub">사진은 판넬·전경 2장이 한 묶음</span></span>
+      <span class="field-label">시험 <b id="prop-tests-n">0</b>회 <span class="lbl-sub" id="prop-photos-n">· 사진 0/0</span></span>
+      <div class="photo-btns prop-shoot-btns">
+        <button class="btn" id="prop-shoot">
+          <svg class="ic" aria-hidden="true"><use href="#ic-camera"/></svg>촬영
+        </button>
+        <button class="btn" id="prop-pick">
+          <svg class="ic" aria-hidden="true"><use href="#ic-image"/></svg>앨범
+        </button>
+      </div>
+      <div class="prop-seq-hint">회차마다 전경 → 판넬 순서로 빈 칸을 채웁니다</div>
       <div id="prop-tests"></div>
       <button class="btn btn-calc" id="prop-add-test">
         <svg class="ic" aria-hidden="true"><use href="#ic-plus"/></svg>시험 추가
