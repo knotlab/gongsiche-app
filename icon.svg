@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="공시체 계산기">
+  <!-- 배경 -->
+  <rect width="512" height="512" rx="112" fill="#1D4ED8"/>
+
+  <!-- 공시체(원기둥) 실루엣 : 윗면 타원 + 몸통 + 아랫면 타원 -->
+  <g fill="#FFFFFF">
+    <ellipse cx="256" cy="151" rx="100" ry="34"/>
+    <rect x="156" y="151" width="200" height="215"/>
+    <ellipse cx="256" cy="366" rx="100" ry="34"/>
+  </g>
+
+  <!-- 윗면 테두리 : 이 선이 있어야 원기둥으로 읽힌다 -->
+  <ellipse cx="256" cy="151" rx="100" ry="34" fill="none" stroke="#1D4ED8" stroke-width="6"/>
+
+  <!-- 계산기 키패드 : 몸통에 뚫린 6키 + 하단 바 -->
+  <g fill="#1D4ED8">
+    <circle cx="220" cy="218" r="17"/><circle cx="292" cy="218" r="17"/>
+    <circle cx="220" cy="259" r="17"/><circle cx="292" cy="259" r="17"/>
+    <circle cx="220" cy="300" r="17"/><circle cx="292" cy="300" r="17"/>
+    <rect x="212" y="330" width="88" height="22" rx="11"/>
+  </g>
+</svg>
